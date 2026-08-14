@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentnavi"
+version = "0.1.0"
+description = "独立于项目仓库和具体 Agent 的三层项目认知导航引擎"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+  {name = "AgentNavi contributors"}
+]
+keywords = ["agent", "context", "knowledge-graph", "obsidian", "codex", "claude-code"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.scripts]
+agentnavi = "agentnavi.cli:main"
+navi = "agentnavi.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Andrewlislin/AgentNavi"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

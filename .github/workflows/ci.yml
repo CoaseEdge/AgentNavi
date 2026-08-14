@@ -1,0 +1,41 @@
+name: 持续集成
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装项目
+        run: python -m pip install -e .
+
+      - name: 编译检查
+        run: python -m compileall -q src
+
+      - name: 运行测试
+        run: python -m unittest discover -s tests -v
+
+      - name: CLI 冒烟测试
+        env:
+          AGENTNAVI_HOME: ${{ runner.temp }}/agentnavi-home
+        run: |
+          agentnavi init
+          agentnavi doctor

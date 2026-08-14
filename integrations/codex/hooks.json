@@ -1,0 +1,67 @@
+{
+  "description": "AgentNavi：外置三层项目上下文与任务记忆",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentnavi hook ingest --agent codex",
+            "timeout": 120,
+            "statusMessage": "加载 AgentNavi 项目上下文",
+            "additionalContextLimit": 8000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentnavi hook ingest --agent codex",
+            "timeout": 120,
+            "statusMessage": "定位任务相关概念与文件",
+            "additionalContextLimit": 8000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentnavi hook ingest --agent codex",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentnavi hook ingest --agent codex",
+            "timeout": 120,
+            "statusMessage": "沉淀任务图并增量更新索引"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentnavi hook ingest --agent codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
