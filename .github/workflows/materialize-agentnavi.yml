@@ -27,11 +27,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 解包实现
+      - name: 校验并解包实现
         shell: bash
         run: |
           set -euo pipefail
-          cat .agentnavi-bootstrap/part-* | base64 --decode > /tmp/agentnavi-bootstrap.tar.gz
+          cat \
+            .agentnavi-bootstrap/part-00 \
+            .agentnavi-bootstrap/part-01 \
+            .agentnavi-bootstrap/part-02 \
+            .agentnavi-bootstrap/part-03 \
+            .agentnavi-bootstrap/part-040 \
+            .agentnavi-bootstrap/part-041 \
+            .agentnavi-bootstrap/part-042 \
+            .agentnavi-bootstrap/part-05 \
+            .agentnavi-bootstrap/part-06 \
+            .agentnavi-bootstrap/part-07 \
+            | base64 --decode > /tmp/agentnavi-bootstrap.tar.gz
+          echo "feaf72e5430c4f84b1b60f49ea482cd6c50d90909346635800f493781293f563  /tmp/agentnavi-bootstrap.tar.gz" | sha256sum -c -
           tar -xzf /tmp/agentnavi-bootstrap.tar.gz
           rm -rf .agentnavi-bootstrap
           rm -f .github/workflows/materialize-agentnavi.yml
