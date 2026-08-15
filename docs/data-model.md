@@ -1,130 +1,116 @@
 # 数据模型
 
-AgentNavi 当前使用 SQLite。数据库开启外键、WAL 和 busy timeout，以支持多个本地 Agent 进程短时并发写入。
+AgentNavi 使用 SQLite 作为查询投影，并用两个 append-only JSONL 保存不可轻易丢弃的事实。
 
-## projects
+## 一、外部事实日志
 
-项目注册表。
+### `events.jsonl`
 
-| 字段 | 含义 |
-|---|---|
-| `id` | 稳定项目标识 |
-| `name` | 显示名称 |
-| `root` | 项目绝对路径，唯一 |
-| `kind` | `software`、`writing`、`video` 或 `generic` |
-| `last_scan_at` | 最近扫描时间 |
+保存 L3：
 
-## nodes
+- 会话建立和结束；
+- 任务创建和关闭；
+- 工具事件；
+- 项目快照；
+- 受影响概念快照。
 
-三层统一节点表。
+### `semantic-overlays.jsonl`
 
-| 字段 | 含义 |
-|---|---|
-| `layer` | 1、2 或 3 |
-| `kind` | `file`、`project`、`concept`、`task` 等 |
-| `key` | 项目内稳定键，如相对路径或概念键 |
-| `label` | 人类可读名称 |
-| `data_json` | 结构化派生信息 |
-| `confidence` | 0 到 1 的置信度 |
-| `source` | `filesystem`、`parser`、`semantic-heuristic`、`external-semantic-provider`、`task-events` 等 |
+保存人工 L2 判断：
 
-节点 ID 由：
+- correction upsert；
+- correction remove；
+- 项目快照。
+
+SQLite 删除后，项目重新关联并扫描即可重新物化人工校正；L3 通过 `replay l3` 重建。
+
+## 二、`projects`
+
+项目注册表：`id`、`name`、`root`、`kind`、扫描时间。
+
+## 三、`nodes` 与 `edges`
+
+三层统一图模型。
+
+节点稳定 ID：
 
 ```text
 project_id + layer + kind + key
 ```
 
-确定性生成。重复扫描不会制造新节点 ID。
-
-## edges
-
-统一关系表。
-
-### L1 常见关系
-
-- `imports`
-- `references`
-- `tests`
-
-### L2 常见关系
-
-- `contains`
-- `implemented_by`
-- `tested_by`
-- `documented_by`
-- `configured_by`
-- `depends_on`
-- `related_to`
-
-### L3 常见关系
-
-- `read`
-- `modified`
-- `tested`
-- `searched`
-- `affects`
-
-边 ID 由：
+边稳定 ID：
 
 ```text
 project_id + layer + source + relation + target
 ```
 
-确定性生成。重复事件会在 `data_json.count` 中累计，而不是制造重复边。
+L1 常见关系：`imports`、`references`、`tests`。
 
-## file_state
+L2 常见关系：`contains`、`implemented_by`、`tested_by`、`documented_by`、`configured_by`、`depends_on`、`related_to`、`merged_into`。
 
-增量扫描缓存：
+L3 常见关系：`read`、`modified`、`tested`、`searched`、`affects`。
 
-- 相对路径；
-- mtime 纳秒值；
-- 大小；
-- SHA-256 摘要；
-- 更新时间。
+## 四、`file_state`
 
-先用 mtime 与大小筛选，变化时再更新摘要和依赖。
+保存文件 mtime、大小、摘要和更新时间，用于增量扫描。
 
-## sessions
+## 五、L3 物化表
 
-Agent 会话映射：
+### `sessions`
 
-```text
-agent + external_session_id → session_key
-```
+外部会话 ID、Agent、活动任务、开始和结束时间。
 
-保存当前活动任务，用于把工具事件归入正确任务。
+### `tasks`
 
-## tasks
+原始提示、标题、Agent、状态、摘要、起止时间。
 
-L3 任务实体：
+### `events`
 
-- 原始提示；
-- 标题；
-- Agent；
-- 状态；
-- 摘要；
-- 起止时间；
-- 会话键。
+工具事件、文件路径、压缩数据和时间。一个带多个文件路径的日志事件会物化为多行查询事件。
 
-## events
+### `applied_log_events`
 
-追加式工具事件：
+保存已应用的 L3 `event_id`，实现幂等重放。
 
-- 事件类型；
-- 工具名称；
-- 项目内相对路径；
-- 压缩后的结构化数据；
-- 时间。
+## 六、人工语义物化表
 
-当前事件表与图谱共用 SQLite。未来会增加独立 JSONL 事件日志，使 L3 也能在删除数据库后完整重放。
+### `semantic_overlays`
 
-## 事实与解释
+字段包括：
+
+- `action`；
+- `subject_key`；
+- `relation`；
+- `object_key`；
+- `value_json`；
+- `note`；
+- `enabled`。
+
+它不是唯一副本；权威副本位于 `semantic-overlays.jsonl`。
+
+### `applied_overlay_events`
+
+保存已经物化的人工校正日志事件 ID。
+
+## 七、`benchmark_runs`
+
+保存：
+
+- suite、case、run kind、mode；
+- 任务文本和 task ID；
+- 必要文件与候选文件；
+- 召回、精度、无关读取等指标；
+- 实际 Token、输出 Token、耗时和 success。
+
+比较器只使用同一 case / kind / mode 的最新记录，并对质量合格的配对计算 reduction。
+
+## 八、事实与解释
 
 必须区分：
 
 ```text
-事实：文件存在、A import B、工具修改了文件、测试退出码
-解释：A 属于某业务概念、任务为何如此修改、某关系意味着业务依赖
+事实：文件存在、A import B、工具修改文件、测试退出码、人的明确拒绝
+解释：A 属于某概念、概念之间代表业务依赖、任务动机摘要
 ```
 
-AgentNavi 用 `source`、`confidence` 和 `data_json.evidence` 保存解释来源，避免把模型或规则推断伪装成确定事实。
+自动解释保留 `source`、`confidence` 和 evidence。人工 Overlay 的最终结果使用 `source=human-overlay`、`confidence=1.0`，但仍可通过日志审计是谁做了什么校正及其 note。

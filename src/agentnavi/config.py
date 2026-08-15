@@ -47,10 +47,13 @@ class Settings:
     database_path: Path
     config_path: Path
     obsidian_vault: Path
+    event_log_path: Path
+    semantic_overlay_log_path: Path
     max_file_bytes: int = 4 * 1024 * 1024
     ignored_directories: tuple[str, ...] = field(default_factory=lambda: DEFAULT_IGNORED_DIRECTORIES)
     ignored_files: tuple[str, ...] = field(default_factory=lambda: DEFAULT_IGNORED_FILES)
     semantic_command: str | None = None
+    event_log_fsync: bool = True
 
     @classmethod
     def load(cls, home: str | Path | None = None) -> "Settings":
@@ -72,6 +75,18 @@ class Settings:
         if not obsidian_path.is_absolute():
             obsidian_path = home_path / obsidian_path
 
+        event_log_raw = data.get("event_log", str(home_path / "events.jsonl"))
+        event_log_path = Path(str(event_log_raw)).expanduser()
+        if not event_log_path.is_absolute():
+            event_log_path = home_path / event_log_path
+
+        overlay_log_raw = data.get(
+            "semantic_overlay_log", str(home_path / "semantic-overlays.jsonl")
+        )
+        semantic_overlay_log_path = Path(str(overlay_log_raw)).expanduser()
+        if not semantic_overlay_log_path.is_absolute():
+            semantic_overlay_log_path = home_path / semantic_overlay_log_path
+
         semantic_command = os.environ.get("AGENTNAVI_SEMANTIC_COMMAND")
         if semantic_command is None:
             value = data.get("semantic_command")
@@ -84,26 +99,42 @@ class Settings:
             dict.fromkeys((*DEFAULT_IGNORED_FILES, *map(str, data.get("ignored_files", []))))
         )
 
+        fsync_env = os.environ.get("AGENTNAVI_EVENT_LOG_FSYNC")
+        if fsync_env is None:
+            event_log_fsync = bool(data.get("event_log_fsync", True))
+        else:
+            event_log_fsync = fsync_env.strip().lower() not in {"0", "false", "no", "off"}
+
         return cls(
             home=home_path,
             database_path=home_path / "agentnavi.db",
             config_path=config_path,
             obsidian_vault=obsidian_path.resolve(),
+            event_log_path=event_log_path.resolve(),
+            semantic_overlay_log_path=semantic_overlay_log_path.resolve(),
             max_file_bytes=int(data.get("max_file_bytes", 4 * 1024 * 1024)),
             ignored_directories=ignored_dirs,
             ignored_files=ignored_files,
             semantic_command=semantic_command,
+            event_log_fsync=event_log_fsync,
         )
 
     def ensure_layout(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
         self.obsidian_vault.mkdir(parents=True, exist_ok=True)
+        self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.event_log_path.touch(exist_ok=True)
+        self.semantic_overlay_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.semantic_overlay_log_path.touch(exist_ok=True)
         if not self.config_path.exists():
             self.config_path.write_text(
                 json.dumps(
                     {
                         "max_file_bytes": self.max_file_bytes,
                         "obsidian_vault": str(self.obsidian_vault),
+                        "event_log": str(self.event_log_path),
+                        "semantic_overlay_log": str(self.semantic_overlay_log_path),
+                        "event_log_fsync": self.event_log_fsync,
                         "semantic_command": None,
                         "ignored_directories": [],
                         "ignored_files": [],

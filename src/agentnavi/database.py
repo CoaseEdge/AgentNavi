@@ -8,7 +8,7 @@ from typing import Any, Iterator, Sequence
 from .config import Settings
 from .utils import json_dumps, stable_id, utc_now
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -121,6 +121,64 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS applied_log_events (
+    event_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_applied_log_project ON applied_log_events(project_id, applied_at);
+
+CREATE TABLE IF NOT EXISTS applied_overlay_events (
+    event_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_applied_overlay_project
+    ON applied_overlay_events(project_id, applied_at);
+
+CREATE TABLE IF NOT EXISTS semantic_overlays (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT '',
+    object_key TEXT NOT NULL DEFAULT '',
+    value_json TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_overlays_project
+    ON semantic_overlays(project_id, enabled, action, subject_key);
+
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    suite TEXT NOT NULL,
+    case_key TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    task_text TEXT NOT NULL DEFAULT '',
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    expected_files_json TEXT NOT NULL DEFAULT '[]',
+    candidate_files_json TEXT NOT NULL DEFAULT '[]',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    duration_ms INTEGER,
+    success INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_suite
+    ON benchmark_runs(project_id, suite, run_kind, mode, created_at DESC);
 """
 
 
@@ -132,6 +190,13 @@ class Database:
         self.settings.ensure_layout()
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            if row is not None and int(row["value"]) > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"数据库 schema 版本 {row['value']} 高于当前程序支持的 {SCHEMA_VERSION}"
+                )
             connection.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -250,6 +315,94 @@ class Database:
     def delete_layer(connection: sqlite3.Connection, project_id: str, layer: int) -> None:
         connection.execute("DELETE FROM edges WHERE project_id=? AND layer=?", (project_id, layer))
         connection.execute("DELETE FROM nodes WHERE project_id=? AND layer=?", (project_id, layer))
+
+    @staticmethod
+    def reset_layer3(connection: sqlite3.Connection, project_id: str | None = None) -> None:
+        """清空可由事件日志重建的 L3 状态，不触碰 L1/L2。"""
+
+        if project_id is None:
+            connection.execute("DELETE FROM edges WHERE layer=3")
+            connection.execute("DELETE FROM nodes WHERE layer=3")
+            connection.execute("DELETE FROM events")
+            connection.execute("DELETE FROM sessions")
+            connection.execute("DELETE FROM tasks")
+            connection.execute("DELETE FROM applied_log_events")
+            connection.execute(
+                """
+                DELETE FROM nodes
+                WHERE layer=2 AND kind='concept' AND source='task-event-replay'
+                  AND data_json LIKE '%"replay_placeholder":true%'
+                  AND NOT EXISTS (SELECT 1 FROM edges WHERE source_id=nodes.id OR target_id=nodes.id)
+                """
+            )
+            return
+        connection.execute("DELETE FROM edges WHERE project_id=? AND layer=3", (project_id,))
+        connection.execute("DELETE FROM nodes WHERE project_id=? AND layer=3", (project_id,))
+        connection.execute("DELETE FROM events WHERE project_id=?", (project_id,))
+        connection.execute("DELETE FROM sessions WHERE project_id=?", (project_id,))
+        connection.execute("DELETE FROM tasks WHERE project_id=?", (project_id,))
+        connection.execute("DELETE FROM applied_log_events WHERE project_id=?", (project_id,))
+        connection.execute(
+            """
+            DELETE FROM nodes
+            WHERE project_id=? AND layer=2 AND kind='concept' AND source='task-event-replay'
+              AND data_json LIKE '%"replay_placeholder":true%'
+              AND NOT EXISTS (SELECT 1 FROM edges WHERE source_id=nodes.id OR target_id=nodes.id)
+            """,
+            (project_id,),
+        )
+
+    @staticmethod
+    def mark_log_event(
+        connection: sqlite3.Connection,
+        *,
+        event_id: str,
+        project_id: str,
+        event_type: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO applied_log_events(event_id, project_id, event_type, applied_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (event_id, project_id, event_type, utc_now()),
+        )
+
+    @staticmethod
+    def log_event_applied(connection: sqlite3.Connection, event_id: str) -> bool:
+        return (
+            connection.execute(
+                "SELECT 1 FROM applied_log_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def mark_overlay_event(
+        connection: sqlite3.Connection,
+        *,
+        event_id: str,
+        project_id: str,
+        event_type: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO applied_overlay_events(event_id, project_id, event_type, applied_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (event_id, project_id, event_type, utc_now()),
+        )
+
+    @staticmethod
+    def overlay_event_applied(connection: sqlite3.Connection, event_id: str) -> bool:
+        return (
+            connection.execute(
+                "SELECT 1 FROM applied_overlay_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+            is not None
+        )
 
     @staticmethod
     def delete_nodes(connection: sqlite3.Connection, node_ids: Sequence[str]) -> None:

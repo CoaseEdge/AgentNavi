@@ -76,7 +76,7 @@ def search_nodes(
             connection.execute(
                 """
                 SELECT * FROM nodes
-                WHERE project_id=? AND NOT (layer=2 AND kind='concept' AND data_json LIKE '%\"active\":false%')
+                WHERE project_id=? AND NOT (layer=2 AND kind='concept' AND data_json LIKE '%"active":false%')
                 ORDER BY layer DESC, updated_at DESC LIMIT ?
                 """,
                 (project_id, limit),
@@ -97,8 +97,38 @@ def search_nodes(
             (project_id, pattern, pattern, pattern),
         ):
             candidates[row["id"]] = row
+
+    # 长任务描述经常只保留较长 n-gram，例如“修改会员升级和支付逻辑”。
+    # 此时短概念“会员升级”不会满足 query-term-in-label，但它本身明显包含于原任务。
+    # 对活跃概念做一次有界的反向包含检查，并同时检查别名和关键词，
+    # 可以恢复这类高价值命中，而不会把所有文件重新塞回候选集。
     full_query = " ".join(query.lower().split())
-    ranked = sorted(candidates.values(), key=lambda row: (-_node_score(row, terms, full_query), row["label"]))
+    if full_query:
+        for row in connection.execute(
+            """
+            SELECT * FROM nodes
+            WHERE project_id=? AND layer=2 AND kind='concept'
+              AND data_json NOT LIKE '%"active":false%'
+            LIMIT 5000
+            """,
+            (project_id,),
+        ):
+            data = json_loads(row["data_json"], {})
+            values = [str(row["label"]), str(row["key"])]
+            for field in ("aliases", "keywords", "headings", "link_labels", "symbols"):
+                field_values = data.get(field, [])
+                if isinstance(field_values, list):
+                    values.extend(str(value) for value in field_values)
+            if any(
+                len(value.strip()) >= 2 and value.strip().lower() in full_query
+                for value in values
+            ):
+                candidates[row["id"]] = row
+
+    ranked = sorted(
+        candidates.values(),
+        key=lambda row: (-_node_score(row, terms, full_query), row["label"]),
+    )
     return ranked[:limit]
 
 

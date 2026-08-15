@@ -3,16 +3,17 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
-import os
 import shutil
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from .benchmark import compare_suite, evaluate_retrieval_suite, record_observed_run
 from .config import Settings
 from .database import Database, ensure_database
 from .engine import scan_project
+from .eventlog import backfill_event_log, replay_event_log, verify_event_log
 from .exporter import export_obsidian
 from .hooks import ingest_stdin
 from .integrations import CONTEXT_FIRST_SKILL, hook_template, install_integration
@@ -31,8 +32,19 @@ from .registry import (
     remove_project,
     resolve_project,
 )
+from .semantic_overlays import (
+    ACTIONS,
+    add_correction,
+    decide_review_candidate,
+    list_corrections,
+    list_review_candidates,
+    remove_correction,
+    backfill_semantic_overlay_log,
+    replay_semantic_overlay_log,
+    verify_semantic_overlay_log,
+)
 from .tasks import close_task, create_task, get_task, list_tasks, record_event
-from .utils import json_dumps
+from .utils import json_loads
 
 
 def _database(args: argparse.Namespace) -> Database:
@@ -52,6 +64,8 @@ def command_init(args: argparse.Namespace) -> int:
     database = _database(args)
     print(f"AgentNavi 已初始化：{database.settings.home}")
     print(f"图谱数据库：{database.settings.database_path}")
+    print(f"L3 事件日志：{database.settings.event_log_path}")
+    print(f"L2 人工校正日志：{database.settings.semantic_overlay_log_path}")
     print(f"Obsidian 默认导出目录：{database.settings.obsidian_vault}")
     return 0
 
@@ -252,6 +266,356 @@ def command_task_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_event_log_verify(args: argparse.Namespace) -> int:
+    database = _database(args)
+    report = verify_event_log(args.path or database.settings.event_log_path)
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(f"事件日志：{report.path}")
+        print(
+            f"{report.lines} 行 / {report.valid} 个有效事件 / "
+            f"{report.invalid} 个无效事件 / {report.duplicate_ids} 个重复 ID / "
+            f"{report.projects} 个项目"
+        )
+        for event_type, count in sorted((report.event_types or {}).items()):
+            print(f"- {event_type}: {count}")
+        for error in (report.errors or [])[:20]:
+            print(f"错误：{error}", file=sys.stderr)
+    return 0 if report.invalid == 0 else 1
+
+
+def command_event_log_backfill(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project_id = _resolve(database, args.project)["id"] if args.project else None
+    report = backfill_event_log(database, project_id=project_id)
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(
+            f"L3 历史补写完成：{report.path}\n"
+            f"{report.projects} 个项目 / 新写入 {report.events_written} 个事件 / "
+            f"跳过 {report.events_skipped} 个已有事件"
+        )
+    return 0
+
+
+def command_replay_l3(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project_id = _resolve(database, args.project)["id"] if args.project else None
+    report = replay_event_log(
+        database,
+        path=args.path,
+        reset=args.reset,
+        project_id=project_id,
+        strict=args.strict,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(
+            f"L3 重放完成：{report.path}\n"
+            f"扫描 {report.total} 个事件 / 应用 {report.applied} / "
+            f"跳过 {report.skipped} / 无效 {report.invalid} / {report.projects} 个项目"
+        )
+        for error in (report.errors or [])[:20]:
+            print(f"错误：{error}", file=sys.stderr)
+    return 0 if report.invalid == 0 else 1
+
+
+def _format_benchmark_result(result: dict[str, Any]) -> str:
+    metrics = result["metrics"]
+    return (
+        f"{result['case']} · {result['mode']} · "
+        f"候选 {metrics['candidate_count']}/{metrics['total_files']} · "
+        f"召回 {metrics['recall']:.1%} · "
+        f"估算上下文 {metrics['estimated_context_tokens']} tokens · "
+        f"缩减 {metrics['estimated_token_reduction']:.1%}"
+    )
+
+
+def command_benchmark_evaluate(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    results = evaluate_retrieval_suite(
+        database,
+        project,
+        cases_path=args.cases,
+        suite=args.suite,
+        modes=args.mode or ("full-scan", "filename-search", "agentnavi"),
+        file_limit=args.file_limit,
+        chars_per_token=args.chars_per_token,
+    )
+    if args.json:
+        _print_json(results)
+    else:
+        for result in results:
+            print(_format_benchmark_result(result))
+        print("说明：这里是候选文件与文件体积的可重复估算；真实 Agent Token 请用 benchmark record 录入。")
+    return 0
+
+
+def command_benchmark_record(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    success = None if args.status == "unknown" else args.status == "success"
+    result = record_observed_run(
+        database,
+        project,
+        suite=args.suite,
+        case_key=args.case,
+        mode=args.mode,
+        task_id=args.task_id,
+        expected_files=args.expected or (),
+        exploration_tokens=args.exploration_tokens,
+        output_tokens=args.output_tokens,
+        duration_ms=args.duration_ms,
+        success=success,
+    )
+    if args.json:
+        _print_json(result)
+    else:
+        metrics = result["metrics"]
+        print(
+            f"实测记录已保存：{result['run_id']} · {result['case']} · {result['mode']}\n"
+            f"读取 {metrics['read_file_count']} 个文件 / 触及 {metrics['observed_file_count']} 个文件 / "
+            f"探索 Token {metrics['exploration_tokens']}"
+        )
+    return 0
+
+
+def command_benchmark_compare(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    data = compare_suite(
+        database,
+        project["id"],
+        suite=args.suite,
+        run_kind=None if args.kind == "all" else args.kind,
+    )
+    if args.json:
+        _print_json(data)
+        return 0
+    print(f"基准套件：{data['suite']} · 最新有效记录 {data['latest_runs']} 条")
+    for summary in data["summaries"]:
+        averages = summary["averages"]
+        parts = []
+        for key in ("recall", "candidate_count", "estimated_context_tokens", "read_file_count", "exploration_tokens"):
+            value = averages.get(key)
+            if value is not None:
+                parts.append(f"{key}={value:.2f}")
+        print(
+            f"- {summary['run_kind']} / {summary['mode']} / {summary['cases']} 个用例"
+            + (f" · {' · '.join(parts)}" if parts else "")
+        )
+    for comparison in data["comparisons"]:
+        reduction = comparison["reduction"]
+        reduction_text = "无法计算" if reduction is None else f"{reduction:.1%}"
+        print(
+            f"对比：{comparison['run_kind']} · {comparison['baseline']} → agentnavi · "
+            f"{comparison['metric']} 减少 {reduction_text} · "
+            f"配对 {comparison['paired_cases']} / 质量合格 {comparison['eligible_cases']} 个用例"
+        )
+        if comparison.get("excluded_for_low_quality"):
+            print(
+                f"  排除 {comparison['excluded_for_low_quality']} 个低质量或未验证用例；"
+                f"门槛：{comparison.get('quality_gate', '')}"
+            )
+    return 0
+
+
+def command_semantic_log_verify(args: argparse.Namespace) -> int:
+    database = _database(args)
+    report = verify_semantic_overlay_log(
+        args.path or database.settings.semantic_overlay_log_path
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(f"人工校正日志：{report.path}")
+        print(
+            f"{report.lines} 行 / {report.valid} 个有效事件 / "
+            f"{report.invalid} 个无效事件 / {report.duplicate_ids} 个重复 ID / "
+            f"{report.projects} 个项目"
+        )
+        for error in (report.errors or [])[:20]:
+            print(f"错误：{error}", file=sys.stderr)
+    return 0 if report.invalid == 0 else 1
+
+
+def command_semantic_log_backfill(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project_id = _resolve(database, args.project)["id"] if args.project else None
+    report = backfill_semantic_overlay_log(database, project_id=project_id)
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(
+            f"人工校正补写完成：{report.path}\n"
+            f"{report.projects} 个项目 / 新写入 {report.events_written} 个事件 / "
+            f"跳过 {report.events_skipped} 个已有事件"
+        )
+    return 0
+
+
+def command_semantic_log_replay(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project_id = _resolve(database, args.project)["id"] if args.project else None
+    report = replay_semantic_overlay_log(
+        database,
+        path=args.path,
+        reset=args.reset,
+        project_id=project_id,
+        strict=args.strict,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(
+            f"人工校正重放完成：{report.path}\n"
+            f"扫描 {report.total} 个事件 / 应用 {report.applied} / "
+            f"跳过 {report.skipped} / 无效 {report.invalid} / {report.projects} 个项目"
+        )
+        print("校正表已恢复；运行 agentnavi scan 重新叠加到 L2 图谱。")
+        for error in (report.errors or [])[:20]:
+            print(f"错误：{error}", file=sys.stderr)
+    return 0 if report.invalid == 0 else 1
+
+
+def command_semantic_review_list(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    rows = list_review_candidates(
+        database,
+        project["id"],
+        limit=args.limit,
+        include_reviewed=args.all,
+    )
+    if args.json:
+        _print_json(rows)
+    elif not rows:
+        print("没有待审查的语义候选。")
+    else:
+        for row in rows:
+            if row["kind"] == "concept":
+                detail = f"概念 {row['label']} ({row['subject_key']})"
+            else:
+                detail = (
+                    f"{row['label']} ({row['subject_key']}) "
+                    f"--{row['relation']}--> {row['object_label']} ({row['object_key']})"
+                )
+            decision = f" · 已{row['decision']}" if row["decision"] else ""
+            print(
+                f"- {row['id']} · {detail} · 置信度 {row['confidence']:.2f} · "
+                f"{row['source']}{decision}"
+            )
+    return 0
+
+
+def command_semantic_review_decide(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    row = decide_review_candidate(
+        database,
+        project_id=project["id"],
+        candidate_id=args.candidate_id,
+        decision=args.decision,
+        note=args.note or "",
+    )
+    report = scan_project(database, project, full=False)
+    if args.json:
+        _print_json({"correction": dict(row), "scan": asdict(report)})
+    else:
+        print(f"审查决定已保存：{row['id']} · {row['action']}")
+        _print_scan_report(report)
+    return 0
+
+
+def _correction_value(args: argparse.Namespace) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    if args.value_json:
+        parsed = json.loads(args.value_json)
+        if not isinstance(parsed, dict):
+            raise ValueError("--value-json 必须是 JSON 对象")
+        value.update(parsed)
+    if args.label:
+        value["label"] = args.label
+    if args.alias:
+        value["alias"] = args.alias
+    return value
+
+
+def command_semantic_correction_add(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    row = add_correction(
+        database,
+        project_id=project["id"],
+        action=args.action,
+        subject_key=args.subject,
+        relation=args.relation or "",
+        object_key=args.object or "",
+        value=_correction_value(args),
+        note=args.note or "",
+    )
+    report = scan_project(database, project, full=False)
+    if args.json:
+        _print_json({"correction": dict(row), "scan": asdict(report)})
+    else:
+        print(f"人工校正已保存：{row['id']} · {row['action']}")
+        _print_scan_report(report)
+    return 0
+
+
+def command_semantic_correction_list(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    rows = list_corrections(database, project["id"], include_disabled=args.all)
+    payload = []
+    for row in rows:
+        item = dict(row)
+        item["value"] = json_loads(row["value_json"], {})
+        payload.append(item)
+    if args.json:
+        _print_json(payload)
+    elif not rows:
+        print("尚无人工校正。")
+    else:
+        for item in payload:
+            suffix = ""
+            if item["relation"] or item["object_key"]:
+                suffix = f" · {item['relation']} · {item['object_key']}"
+            print(
+                f"- {item['id']} · {item['action']} · {item['subject_key']}{suffix} · "
+                f"{'启用' if item['enabled'] else '停用'}"
+            )
+    return 0
+
+
+def command_semantic_correction_remove(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    row = remove_correction(database, project["id"], args.correction_id)
+    report = scan_project(database, project, full=False)
+    if args.json:
+        _print_json({"removed": dict(row), "scan": asdict(report)})
+    else:
+        print(f"已删除人工校正：{row['id']}")
+        _print_scan_report(report)
+    return 0
+
+
+def command_semantic_correction_apply(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    report = scan_project(database, project, full=False)
+    if args.json:
+        _print_json(asdict(report))
+    else:
+        _print_scan_report(report)
+    return 0
+
+
 def command_export_obsidian(args: argparse.Namespace) -> int:
     database = _database(args)
     report = export_obsidian(
@@ -287,7 +651,6 @@ def command_hook_ingest(args: argparse.Namespace) -> int:
             print(result.stdout)
     except Exception as exc:  # noqa: BLE001 - Hook 必须 fail-open
         print(f"AgentNavi hook 记录失败：{exc}", file=sys.stderr)
-        # Stop hook 输出合法 JSON，其他事件保持空输出；全部返回 0，不阻断 Agent。
         print("{}")
     return 0
 
@@ -324,11 +687,25 @@ def command_doctor(args: argparse.Namespace) -> int:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("数据目录", database.settings.home.exists(), str(database.settings.home)))
     checks.append(("SQLite 数据库", database.settings.database_path.exists(), str(database.settings.database_path)))
+    checks.append(("L3 事件日志", database.settings.event_log_path.exists(), str(database.settings.event_log_path)))
+    checks.append((
+        "L2 人工校正日志",
+        database.settings.semantic_overlay_log_path.exists(),
+        str(database.settings.semantic_overlay_log_path),
+    ))
     checks.append(("Git", shutil.which("git") is not None, shutil.which("git") or "未找到"))
     checks.append(("CLI", shutil.which("agentnavi") is not None, shutil.which("agentnavi") or sys.executable))
     projects = list_projects(database)
     missing = [project["root"] for project in projects if not Path(project["root"]).exists()]
     checks.append(("项目注册表", not missing, f"{len(projects)} 个项目" + (f"；失效：{missing}" if missing else "")))
+    verify = verify_event_log(database.settings.event_log_path)
+    checks.append(("L3 日志格式", verify.invalid == 0, f"{verify.valid} 个有效事件 / {verify.invalid} 个无效事件"))
+    overlay_verify = verify_semantic_overlay_log(database.settings.semantic_overlay_log_path)
+    checks.append((
+        "L2 人工校正日志格式",
+        overlay_verify.invalid == 0,
+        f"{overlay_verify.valid} 个有效事件 / {overlay_verify.invalid} 个无效事件",
+    ))
     if database.settings.semantic_command:
         executable = database.settings.semantic_command.split()[0]
         checks.append(("外部语义提供器", shutil.which(executable) is not None, database.settings.semantic_command))
@@ -434,6 +811,123 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.add_argument("--json", action="store_true")
     task_list.set_defaults(func=command_task_list)
 
+    event_log_parser = subparsers.add_parser("event-log", help="管理可重放的 L3 JSONL 事件日志")
+    event_log_sub = event_log_parser.add_subparsers(dest="event_log_command", required=True)
+    event_verify = event_log_sub.add_parser("verify", help="验证日志格式、事件 ID 和项目快照")
+    event_verify.add_argument("--path")
+    event_verify.add_argument("--json", action="store_true")
+    event_verify.set_defaults(func=command_event_log_verify)
+    event_backfill = event_log_sub.add_parser("backfill", help="把升级前 SQLite 中已有 L3 历史补写到日志")
+    event_backfill.add_argument("--project")
+    event_backfill.add_argument("--json", action="store_true")
+    event_backfill.set_defaults(func=command_event_log_backfill)
+
+    replay_parser = subparsers.add_parser("replay", help="从事实日志重建派生状态")
+    replay_sub = replay_parser.add_subparsers(dest="replay_command", required=True)
+    replay_l3 = replay_sub.add_parser("l3", help="从 JSONL 完整重建任务、事件、会话和 L3 关系")
+    replay_l3.add_argument("--path")
+    replay_l3.add_argument("--project", help="按稳定 project_id 只重放一个项目")
+    replay_l3.add_argument("--reset", action="store_true", help="先清空对应 L3，再从头重放")
+    replay_l3.add_argument("--strict", action="store_true", help="遇到首个坏事件立即失败")
+    replay_l3.add_argument("--json", action="store_true")
+    replay_l3.set_defaults(func=command_replay_l3)
+
+    benchmark_parser = subparsers.add_parser("benchmark", help="评估候选文件缩减和真实 Agent 探索成本")
+    benchmark_sub = benchmark_parser.add_subparsers(dest="benchmark_command", required=True)
+    benchmark_evaluate = benchmark_sub.add_parser("evaluate", help="运行可重复的检索基准")
+    benchmark_evaluate.add_argument("cases", help="JSON 用例文件")
+    benchmark_evaluate.add_argument("--suite", required=True)
+    benchmark_evaluate.add_argument("--project")
+    benchmark_evaluate.add_argument("--mode", action="append", choices=["full-scan", "filename-search", "agentnavi"])
+    benchmark_evaluate.add_argument("--file-limit", type=int, default=12)
+    benchmark_evaluate.add_argument("--chars-per-token", type=float, default=4.0)
+    benchmark_evaluate.add_argument("--json", action="store_true")
+    benchmark_evaluate.set_defaults(func=command_benchmark_evaluate)
+    benchmark_record = benchmark_sub.add_parser("record", help="把一次真实 Agent 会话记录为 baseline 或 AgentNavi 实测")
+    benchmark_record.add_argument("task_id")
+    benchmark_record.add_argument("--suite", required=True)
+    benchmark_record.add_argument("--case", required=True)
+    benchmark_record.add_argument("--mode", required=True, choices=["baseline", "agentnavi"])
+    benchmark_record.add_argument("--project")
+    benchmark_record.add_argument("--expected", action="append")
+    benchmark_record.add_argument("--exploration-tokens", type=int)
+    benchmark_record.add_argument("--output-tokens", type=int)
+    benchmark_record.add_argument("--duration-ms", type=int)
+    benchmark_record.add_argument("--status", choices=["success", "failure", "unknown"], default="unknown")
+    benchmark_record.add_argument("--json", action="store_true")
+    benchmark_record.set_defaults(func=command_benchmark_record)
+    benchmark_compare = benchmark_sub.add_parser("compare", help="比较同一套件中最新的配对结果")
+    benchmark_compare.add_argument("--suite", required=True)
+    benchmark_compare.add_argument("--project")
+    benchmark_compare.add_argument("--kind", choices=["retrieval", "observed", "all"], default="all")
+    benchmark_compare.add_argument("--json", action="store_true")
+    benchmark_compare.set_defaults(func=command_benchmark_compare)
+
+    semantic_parser = subparsers.add_parser("semantic", help="审查和校正 L2 语义层")
+    semantic_sub = semantic_parser.add_subparsers(dest="semantic_command", required=True)
+    semantic_log = semantic_sub.add_parser("log", help="验证、回填和重放人工校正事实日志")
+    semantic_log_sub = semantic_log.add_subparsers(dest="semantic_log_command", required=True)
+    semantic_log_verify = semantic_log_sub.add_parser("verify")
+    semantic_log_verify.add_argument("--path")
+    semantic_log_verify.add_argument("--json", action="store_true")
+    semantic_log_verify.set_defaults(func=command_semantic_log_verify)
+    semantic_log_backfill = semantic_log_sub.add_parser("backfill")
+    semantic_log_backfill.add_argument("--project")
+    semantic_log_backfill.add_argument("--json", action="store_true")
+    semantic_log_backfill.set_defaults(func=command_semantic_log_backfill)
+    semantic_log_replay = semantic_log_sub.add_parser("replay")
+    semantic_log_replay.add_argument("--path")
+    semantic_log_replay.add_argument("--project")
+    semantic_log_replay.add_argument("--reset", action="store_true")
+    semantic_log_replay.add_argument("--strict", action="store_true")
+    semantic_log_replay.add_argument("--json", action="store_true")
+    semantic_log_replay.set_defaults(func=command_semantic_log_replay)
+
+    semantic_review = semantic_sub.add_parser("review", help="查看并接受/拒绝自动语义候选")
+    semantic_review_sub = semantic_review.add_subparsers(dest="semantic_review_command", required=True)
+    semantic_review_list = semantic_review_sub.add_parser("list")
+    semantic_review_list.add_argument("--project")
+    semantic_review_list.add_argument("--limit", type=int, default=50)
+    semantic_review_list.add_argument("--all", action="store_true", help="同时显示已审查项")
+    semantic_review_list.add_argument("--json", action="store_true")
+    semantic_review_list.set_defaults(func=command_semantic_review_list)
+    for decision in ("accept", "reject"):
+        decision_parser = semantic_review_sub.add_parser(decision)
+        decision_parser.add_argument("candidate_id")
+        decision_parser.add_argument("--project")
+        decision_parser.add_argument("--note")
+        decision_parser.add_argument("--json", action="store_true")
+        decision_parser.set_defaults(func=command_semantic_review_decide, decision=decision)
+
+    semantic_correction = semantic_sub.add_parser("correction", help="维护独立于项目仓库的人工 Overlay")
+    correction_sub = semantic_correction.add_subparsers(dest="semantic_correction_command", required=True)
+    correction_add = correction_sub.add_parser("add")
+    correction_add.add_argument("action", choices=sorted(ACTIONS))
+    correction_add.add_argument("subject")
+    correction_add.add_argument("--relation")
+    correction_add.add_argument("--object")
+    correction_add.add_argument("--label")
+    correction_add.add_argument("--alias")
+    correction_add.add_argument("--value-json")
+    correction_add.add_argument("--note")
+    correction_add.add_argument("--project")
+    correction_add.add_argument("--json", action="store_true")
+    correction_add.set_defaults(func=command_semantic_correction_add)
+    correction_list = correction_sub.add_parser("list")
+    correction_list.add_argument("--project")
+    correction_list.add_argument("--all", action="store_true")
+    correction_list.add_argument("--json", action="store_true")
+    correction_list.set_defaults(func=command_semantic_correction_list)
+    correction_remove = correction_sub.add_parser("remove")
+    correction_remove.add_argument("correction_id")
+    correction_remove.add_argument("--project")
+    correction_remove.add_argument("--json", action="store_true")
+    correction_remove.set_defaults(func=command_semantic_correction_remove)
+    correction_apply = correction_sub.add_parser("apply", help="重建自动层并重新叠加全部人工校正")
+    correction_apply.add_argument("--project")
+    correction_apply.add_argument("--json", action="store_true")
+    correction_apply.set_defaults(func=command_semantic_correction_apply)
+
     export_parser = subparsers.add_parser("export", help="导出派生视图")
     export_sub = export_parser.add_subparsers(dest="export_command", required=True)
     export_obsidian_parser = export_sub.add_parser("obsidian", help="生成可删除、可重建的 Obsidian Vault 视图")
@@ -460,7 +954,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install.add_argument("--no-skill", action="store_true")
     integration_install.set_defaults(func=command_integration_install)
 
-    doctor_parser = subparsers.add_parser("doctor", help="检查本机安装和项目注册表")
+    doctor_parser = subparsers.add_parser("doctor", help="检查本机安装、项目注册表和事件日志")
     doctor_parser.set_defaults(func=command_doctor)
     return parser
 
@@ -470,7 +964,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (ProjectNotFoundError, FileNotFoundError, LookupError, ValueError, RuntimeError, sqlite3.Error) as exc:
+    except (ProjectNotFoundError, FileNotFoundError, LookupError, ValueError, RuntimeError, sqlite3.Error, json.JSONDecodeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
