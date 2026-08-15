@@ -1,0 +1,11 @@
+[
+  {
+    "id": "membership-upgrade",
+    "task": "修改会员升级和支付逻辑，并运行对应测试",
+    "expected_files": [
+      "src/membership/upgrade.py",
+      "src/payment/service.py",
+      "tests/test_upgrade.py"
+    ]
+  }
+]

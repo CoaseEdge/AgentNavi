@@ -104,6 +104,10 @@ def list_projects(database: Database) -> list[sqlite3.Row]:
 def remove_project(database: Database, selector: str) -> sqlite3.Row:
     with database.connect() as connection:
         project = resolve_project_in_connection(connection, selector=selector)
+        # 旧版数据库的 applied_* 表可能尚未带外键；显式清理可避免重新关联后
+        # 日志事件被错误判定为“已经应用”。事实 JSONL 本身不会被删除。
+        connection.execute("DELETE FROM applied_log_events WHERE project_id=?", (project["id"],))
+        connection.execute("DELETE FROM applied_overlay_events WHERE project_id=?", (project["id"],))
         connection.execute("DELETE FROM projects WHERE id=?", (project["id"],))
         connection.commit()
         return project
@@ -118,12 +122,17 @@ def resolve_project_in_connection(
     if selector:
         row = connection.execute(
             "SELECT * FROM projects WHERE id=? OR name=? OR root=?",
-            (selector, selector, str(Path(selector).expanduser().resolve()) if Path(selector).expanduser().exists() else selector),
+            (
+                selector,
+                selector,
+                str(Path(selector).expanduser().resolve())
+                if Path(selector).expanduser().exists()
+                else selector,
+            ),
         ).fetchone()
         if row is not None:
             return row
 
-        # 允许用项目路径内的任意子路径定位。
         candidate = Path(selector).expanduser()
         if candidate.exists():
             candidate = candidate.resolve()
