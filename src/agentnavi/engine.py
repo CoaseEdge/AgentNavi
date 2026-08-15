@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from .database import Database
 from .scanning import ScanReport, scan_physical_layer
+from .semantic_formats import apply_extractor_semantics
 from .semantic_overlays import apply_semantic_overlays, replay_semantic_overlay_log
 from .semantics import build_semantic_layer
 
@@ -15,8 +16,9 @@ def scan_project(database: Database, project: sqlite3.Row, *, full: bool = False
     replay_semantic_overlay_log(database, project_id=project["id"], strict=False)
     physical = scan_physical_layer(database, project, full=full)
     build_semantic_layer(database, project)
-    # 自动语义层可以随时重建；人工 Overlay 在其后重复叠加，因而不会被扫描覆盖。
+    # 提取器角色属于可重建的确定性语义提示；人工 Overlay 仍在最后叠加，优先级最高。
     with database.connect() as connection:
+        apply_extractor_semantics(connection, database, project)
         apply_semantic_overlays(connection, database, project)
         connection.commit()
         semantic_nodes = connection.execute(
