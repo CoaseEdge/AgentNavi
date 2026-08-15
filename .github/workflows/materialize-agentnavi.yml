@@ -1,0 +1,63 @@
+name: 物化 AgentNavi 0.2 实现
+
+on:
+  push:
+    branches:
+      - agent/l3-replay-benchmark-semantic-overlay
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agentnavi-materialize-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: contains(github.event.head_commit.message, 'bootstrap durable replay implementation')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出引导提交
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 解包实现
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .agentnavi-bootstrap/part-* | base64 --decode > /tmp/agentnavi-bootstrap.tar.gz
+          tar -xzf /tmp/agentnavi-bootstrap.tar.gz
+          rm -rf .agentnavi-bootstrap
+          rm -f .github/workflows/materialize-agentnavi.yml
+
+      - name: 安装并验证
+        shell: bash
+        env:
+          AGENTNAVI_HOME: ${{ runner.temp }}/agentnavi-home
+        run: |
+          set -euo pipefail
+          python -m pip install -e .
+          python -m compileall -q src
+          python -m unittest discover -s tests -v
+          agentnavi init
+          agentnavi doctor
+
+      - name: 提交实际实现
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有需要提交的变化。"
+            exit 0
+          fi
+          git commit -m "feat: add durable replay, benchmarks, and semantic overlays"
+          git push origin HEAD:${GITHUB_REF_NAME}
