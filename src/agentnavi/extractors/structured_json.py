@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 
-from .api import ExtractedResource, ExtractionContext, ExtractionResult
+from .api import ExtractedResource, ExtractionContext, ExtractionResult, FileDependency
 from .structured_common import _path_dependencies_from_value, _roles_for_structured
 
 def _json_extract(context: ExtractionContext) -> ExtractionResult:
@@ -70,26 +70,51 @@ def _json_extract(context: ExtractionContext) -> ExtractionResult:
 
 
 def _json_lines_extract(context: ExtractionContext) -> ExtractionResult:
-    assert context.text is not None
     count = 0
     invalid = 0
     keys: Counter[str] = Counter()
     value_types: Counter[str] = Counter()
     dependencies: list[FileDependency] = []
-    for line_no, line in enumerate(context.text.splitlines(), 1):
-        if not line.strip():
-            continue
-        count += 1
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            invalid += 1
-            continue
-        value_types[type(value).__name__] += 1
-        if isinstance(value, dict):
-            keys.update(map(str, value.keys()))
-        if line_no <= 5000:
-            dependencies.extend(_path_dependencies_from_value(value, context, limit=20))
+    handle = None
+    try:
+        if context.text is not None:
+            lines = iter(context.text.splitlines())
+        else:
+            handle = context.absolute_path.open("r", encoding="utf-8-sig", errors="replace")
+            lines = iter(handle)
+        truncated = False
+        for line_no, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            count += 1
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                invalid += 1
+                continue
+            value_types[type(value).__name__] += 1
+            if isinstance(value, dict):
+                keys.update(map(str, value.keys()))
+            if line_no <= 5000:
+                dependencies.extend(_path_dependencies_from_value(value, context, limit=20))
+            if count >= 100_000:
+                truncated = True
+                break
+    except OSError as exc:
+        return ExtractionResult(
+            "builtin.structured.json-lines",
+            "1",
+            roles=("dataset", "structured_data"),
+            warnings=(f"JSON Lines 读取失败：{exc}",),
+        )
+    finally:
+        if handle is not None:
+            handle.close()
+    warnings: list[str] = []
+    if invalid:
+        warnings.append(f"发现 {invalid} 行无效 JSON")
+    if truncated:
+        warnings.append("记录数超过 100000，仅索引前 100000 条")
     return ExtractionResult(
         "builtin.structured.json-lines",
         "1",
@@ -98,10 +123,10 @@ def _json_lines_extract(context: ExtractionContext) -> ExtractionResult:
             "invalid_records": invalid,
             "common_keys": [key for key, _ in keys.most_common(100)],
             "record_types": dict(value_types),
+            "record_count_truncated": truncated,
+            "streamed": context.text is None,
         },
         roles=("dataset", "structured_data"),
         dependencies=tuple({(item.relation, item.target_path): item for item in dependencies}.values()),
-        warnings=((f"发现 {invalid} 行无效 JSON" if invalid else ""),) if invalid else (),
+        warnings=tuple(warnings),
     )
-
-

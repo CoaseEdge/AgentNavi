@@ -15,7 +15,9 @@ class StructuredTextExtractor:
     def matches(self, context: ExtractionContext) -> int:
         if context.suffix not in STRUCTURED_EXTENSIONS:
             return 0
-        if context.suffix == ".xlsx":
+        # CSV/JSON Lines are intentionally streamable: they remain useful even when they exceed
+        # the generic text-size budget and no in-memory text representation was created.
+        if context.suffix in {".xlsx", ".csv", ".tsv", ".jsonl", ".ndjson"}:
             return 80
         return 80 if context.text is not None else 0
 

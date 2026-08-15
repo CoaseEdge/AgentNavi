@@ -6,6 +6,7 @@ import struct
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 from agentnavi.extractors.api import ExtractionContext
@@ -126,6 +127,20 @@ class ExtractorTestCase(unittest.TestCase):
         self.assertEqual(result.metadata["sheet_count"], 2)
         self.assertEqual([item.label for item in result.resources], ["Inputs", "Forecast"])
         self.assertIn("spreadsheet", result.roles)
+
+
+    def test_large_csv_and_jsonl_can_stream_without_in_memory_text(self) -> None:
+        self.write_text("large.csv", "id,value\n1,2\n2,3\n")
+        self.write_text("large.jsonl", '{"id": 1}\n{"id": 2}\n')
+        registry = load_registry(include_plugins=False)
+        csv_context = replace(self.context("large.csv"), is_text=False, text=None, max_file_bytes=1)
+        jsonl_context = replace(self.context("large.jsonl"), is_text=False, text=None, max_file_bytes=1)
+        csv_result = registry.extract(csv_context)
+        jsonl_result = registry.extract(jsonl_context)
+        self.assertTrue(csv_result.metadata["streamed"])
+        self.assertEqual(csv_result.metadata["row_count"], 2)
+        self.assertTrue(jsonl_result.metadata["streamed"])
+        self.assertEqual(jsonl_result.metadata["record_count"], 2)
 
     def test_more_programming_languages_extract_imports_and_symbols(self) -> None:
         self.write_text("go.mod", "module example.com/app\n")

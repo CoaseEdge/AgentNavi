@@ -29,30 +29,47 @@ def _infer_scalar_type(value: str) -> str:
 
 
 def _csv_extract(context: ExtractionContext) -> ExtractionResult:
-    assert context.text is not None
     delimiter = "\t" if context.suffix == ".tsv" else ","
-    sample = context.text[:65536]
-    if context.suffix == ".csv":
-        try:
-            delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
-        except csv.Error:
-            pass
-    reader = csv.reader(io.StringIO(context.text), delimiter=delimiter)
+    handle: io.TextIOBase | None = None
     try:
-        header = next(reader)
-    except StopIteration:
-        header = []
-    column_types: list[Counter[str]] = [Counter() for _ in header]
-    row_count = 0
-    truncated = False
-    for row in reader:
-        row_count += 1
-        if row_count <= 5000:
-            for index, value in enumerate(row[: len(header)]):
-                column_types[index][_infer_scalar_type(value)] += 1
-        if row_count >= 100_000:
-            truncated = True
-            break
+        if context.text is not None:
+            handle = io.StringIO(context.text)
+        else:
+            handle = context.absolute_path.open("r", encoding="utf-8-sig", errors="replace", newline="")
+        sample = handle.read(65536)
+        handle.seek(0)
+        if context.suffix == ".csv":
+            try:
+                delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+            except csv.Error:
+                pass
+        reader = csv.reader(handle, delimiter=delimiter)
+        try:
+            header = next(reader)
+        except StopIteration:
+            header = []
+        column_types: list[Counter[str]] = [Counter() for _ in header]
+        row_count = 0
+        truncated = False
+        for row in reader:
+            row_count += 1
+            if row_count <= 5000:
+                for index, value in enumerate(row[: len(header)]):
+                    column_types[index][_infer_scalar_type(value)] += 1
+            if row_count >= 100_000:
+                truncated = True
+                break
+    except OSError as exc:
+        return ExtractionResult(
+            "builtin.structured.csv",
+            "1",
+            roles=("dataset", "tabular_data"),
+            warnings=(f"CSV/TSV 读取失败：{exc}",),
+        )
+    finally:
+        if handle is not None:
+            handle.close()
+
     resources = []
     for index, name in enumerate(header[:500]):
         inferred = column_types[index].most_common(1)[0][0] if column_types[index] else "unknown"
@@ -73,10 +90,11 @@ def _csv_extract(context: ExtractionContext) -> ExtractionResult:
             "column_count": len(header),
             "row_count": row_count,
             "row_count_truncated": truncated,
+            "streamed": context.text is None,
         },
         roles=("dataset", "tabular_data"),
         resources=tuple(resources),
-        warnings=("行数超过 100000，仅记录下限" if truncated else "",) if truncated else (),
+        warnings=("行数超过 100000，仅记录下限",) if truncated else (),
     )
 
 
@@ -191,4 +209,5 @@ def _notebook_extract(context: ExtractionContext) -> ExtractionResult:
         if len(cells) > 1000
         else (),
     )
+
 
