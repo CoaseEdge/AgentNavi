@@ -1,0 +1,64 @@
+name: 发布版本
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/release/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 读取发布配置
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/release/current.env
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: 校验版本一致性
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as handle:
+              print(tomllib.load(handle)['project']['version'])
+          PY
+          )"
+          if [ "v${PACKAGE_VERSION}" != "$TAG" ]; then
+            echo "pyproject.toml 版本 v${PACKAGE_VERSION} 与发布标签 ${TAG} 不一致" >&2
+            exit 1
+          fi
+          test -f ".github/release/${TAG}.md"
+
+      - name: 创建 GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} 已存在，跳过。"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME" \
+            --notes-file ".github/release/${TAG}.md" \
+            --latest
