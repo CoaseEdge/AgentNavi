@@ -15,6 +15,7 @@ from .query import build_context
 from .registry import ensure_project_for_cwd, resolve_project
 from .scanning import parse_patch_paths
 from .tasks import (
+    TERMINAL_STATUSES,
     active_task,
     close_task,
     create_task,
@@ -87,6 +88,30 @@ def _summary(payload: dict[str, Any]) -> str:
         value = value.get("text") or value.get("content") or json.dumps(value, ensure_ascii=False)
     text = str(value).strip()
     return text[:8000]
+
+
+def _task_status(payload: dict[str, Any]) -> str:
+    """把不同 Agent 的结束原因收敛为 AgentNavi 的四种终态。"""
+
+    explicit = str(payload.get("task_status") or payload.get("status") or "").strip().lower()
+    if explicit in TERMINAL_STATUSES:
+        return explicit
+
+    reason = payload.get("turn_end_reason") or payload.get("reason")
+    if not isinstance(reason, dict):
+        return "completed"
+    kind = str(reason.get("kind") or "").strip().lower()
+    if kind == "completed":
+        return "completed"
+    if kind == "aborted":
+        cause = reason.get("reason")
+        cause_kind = str(cause.get("kind") or "").strip().lower() if isinstance(cause, dict) else ""
+        return "cancelled" if cause_kind == "user" else "interrupted"
+    if kind == "interrupted":
+        return "interrupted"
+    if kind in {"blocked", "error", "max-tokens", "failed"}:
+        return "failed"
+    return "completed"
 
 
 def _tool_name(payload: dict[str, Any]) -> str:
@@ -194,7 +219,18 @@ def _compact_event_data(payload: dict[str, Any], *, command: str = "") -> dict[s
     data: dict[str, Any] = {}
     if command:
         data["command"] = command[:4000]
-    for key in ("tool_use_id", "permission_mode", "source", "reason"):
+    for key in (
+        "tool_use_id",
+        "permission_mode",
+        "source",
+        "reason",
+        "dsh_event_seq",
+        "dsh_call_seq",
+        "dsh_turn",
+        "dsh_step",
+        "task_status",
+        "turn_end_reason",
+    ):
         if key in payload:
             data[key] = payload[key]
     response = payload.get("tool_response")
@@ -223,7 +259,7 @@ def _current_project(database: Database, cwd: Path) -> sqlite3.Row:
 
 
 def ingest_hook(database: Database, *, agent: str, payload: dict[str, Any]) -> HookResult:
-    """接收 Codex / Claude Code 等 Agent 的 Hook JSON 并写入三层图谱。"""
+    """接收 Codex、Claude Code、DeepSeek Harness 等 Agent 的 Hook JSON。"""
 
     event = _event_name(payload)
     cwd = _cwd(payload)
@@ -270,7 +306,7 @@ def ingest_hook(database: Database, *, agent: str, payload: dict[str, Any]) -> H
             external_session_id=external_session_id,
             task_id=task["id"],
             event_type="prompt",
-            data={"prompt": prompt[:8000]},
+            data={"prompt": prompt[:8000], **_compact_event_data(payload)},
         )
         _ensure_index(database, project)
         project = resolve_project(database, project_id)
@@ -301,6 +337,8 @@ def ingest_hook(database: Database, *, agent: str, payload: dict[str, Any]) -> H
         task = active_task(database, agent=agent, external_session_id=external_session_id)
         if task:
             summary = _summary(payload)
+            status = _task_status(payload)
+            reason = payload.get("turn_end_reason") or payload.get("reason")
             record_event(
                 database,
                 project=project,
@@ -308,10 +346,15 @@ def ingest_hook(database: Database, *, agent: str, payload: dict[str, Any]) -> H
                 external_session_id=external_session_id,
                 task_id=task["id"],
                 event_type="result",
-                data={"summary": summary[:8000]},
+                data={
+                    "summary": summary[:8000],
+                    "status": status,
+                    "reason": reason,
+                    **_compact_event_data(payload),
+                },
             )
             _ensure_index(database, project)
-            close_task(database, task["id"], status="completed", summary=summary)
+            close_task(database, task["id"], status=status, summary=summary)
             return HookResult(stdout="{}", event=event, project_id=project_id, task_id=task["id"])
         return HookResult(stdout="{}", event=event, project_id=project_id)
 
