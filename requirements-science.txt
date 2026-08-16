@@ -1,0 +1,6 @@
+# AgentNavi optional scientific-format enrichers
+astropy>=6
+h5py>=3.10
+netCDF4>=1.6
+pyarrow>=15
+scipy>=1.11
