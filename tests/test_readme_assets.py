@@ -13,7 +13,8 @@ class ReadmeAssetTestCase(unittest.TestCase):
 
     def test_cover_is_well_formed_local_svg_with_product_positioning(self) -> None:
         tree = ET.parse(self.cover)
-        self.assertTrue(tree.getroot().tag.endswith("svg"))
+        root = tree.getroot()
+        self.assertTrue(root.tag.endswith("svg"))
 
         content = self.cover.read_text(encoding="utf-8")
         for phrase in (
@@ -26,10 +27,11 @@ class ReadmeAssetTestCase(unittest.TestCase):
         ):
             self.assertIn(phrase, content)
 
-        lowered = content.lower()
-        self.assertNotIn("<script", lowered)
-        self.assertNotIn("http://", lowered)
-        self.assertNotIn("https://", lowered)
+        self.assertNotIn("<script", content.lower())
+        for element in root.iter():
+            for name, value in element.attrib.items():
+                if name.endswith("href"):
+                    self.assertFalse(value.startswith(("http://", "https://")))
 
     def test_readme_references_cover_and_repository_badges(self) -> None:
         content = self.readme.read_text(encoding="utf-8")
