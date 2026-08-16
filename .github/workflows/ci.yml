@@ -39,3 +39,23 @@ jobs:
         run: |
           agentnavi init
           agentnavi doctor
+
+  deepseek-harness-integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: JavaScript 语法检查
+        working-directory: integrations/deepseek-harness
+        run: npm run check
+
+      - name: 运行协议与事件顺序测试
+        working-directory: integrations/deepseek-harness
+        run: npm test

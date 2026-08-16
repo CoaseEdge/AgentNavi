@@ -1,0 +1,28 @@
+- insert:
+    - id: agentnavi-local-provider
+      name: dsh-agentnavi/provider
+      config:
+        command: agentnavi
+        timeoutMs: 15000
+        maxOutputBytes: 1048576
+        maxErrorBytes: 65536
+        graceMs: 3000
+
+    - id: agentnavi-tools
+      name: dsh-agentnavi/tools
+      config:
+        maxRenderChars: 12000
+
+    - id: agentnavi-context-router
+      name: dsh-agentnavi/context
+      config:
+        enabled: true
+        firstStepOnly: true
+        maxContextChars: 12000
+
+    - id: agentnavi-l3-event-bridge
+      name: dsh-agentnavi/events
+      config:
+        enabled: true
+        recordAgentNaviTools: false
+        maxResultChars: 4000

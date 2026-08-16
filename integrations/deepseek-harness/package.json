@@ -1,0 +1,41 @@
+{
+  "name": "dsh-agentnavi",
+  "version": "0.1.0",
+  "description": "AgentNavi Local Provider、项目上下文工具与 L3 事件桥",
+  "type": "module",
+  "main": "./src/provider.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./provider": "./src/provider.js",
+    "./tools": "./src/tools.js",
+    "./context": "./src/context.js",
+    "./events": "./src/events.js"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check src/service.js && node --check src/protocol.js && node --check src/provider.js && node --check src/tools.js && node --check src/context.js && node --check src/events.js && node --check src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-subprocess": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT"
+}

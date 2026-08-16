@@ -1,5 +1,7 @@
 # Agent 集成
 
+## Codex 与 Claude Code
+
 推荐直接运行：
 
 ```bash
@@ -36,3 +38,23 @@ Claude Code：~/.claude/settings.json
 ```
 
 不要直接用示例覆盖已有配置；使用安装器或人工合并 `hooks` 字段。
+
+## DeepSeek Harness
+
+`deepseek-harness/` 是可由 `dsh plugin add` 安装的 Cordis 插件组合包，包含：
+
+- Local Provider；
+- `agentnavi_context`、`agentnavi_impact`、`agentnavi_history`、`agentnavi_scan`；
+- `agent/pre-step` 自动项目上下文；
+- Harness 会话到 AgentNavi L3 的事件桥。
+
+安装：
+
+```bash
+dsh plugin --profile web add ./integrations/deepseek-harness
+```
+
+详见：
+
+- [`deepseek-harness/README.md`](deepseek-harness/README.md)
+- [`../docs/deepseek-harness.md`](../docs/deepseek-harness.md)
