@@ -6,38 +6,66 @@ from pathlib import PurePosixPath
 from .api import ExtractionContext, ExtractionResult, FileDependency
 from .code_common import _resolve_qualified_name, _resolve_suffix_path, _resource_symbols, _unique
 
+
+def _path_ends_with_parts(path: PurePosixPath, suffix_parts: tuple[str, ...]) -> bool:
+    if not suffix_parts:
+        return path.as_posix() in {"", "."}
+    path_parts = tuple(part.lower() for part in path.parts)
+    expected = tuple(part.lower() for part in suffix_parts)
+    return len(path_parts) >= len(expected) and path_parts[-len(expected) :] == expected
+
+
 def _go_extract(context: ExtractionContext) -> ExtractionResult:
     assert context.text is not None
     text = context.text
     imports = re.findall(r'(?m)^\s*(?:[A-Za-z_][\w]*\s+)?["`]([^"`]+)["`]\s*$', _go_import_body(text))
     dependencies: list[FileDependency] = []
     external: list[str] = []
+    warnings: list[str] = []
+    ambiguous_local_imports: list[dict[str, object]] = []
     module_name = ""
     go_mod = context.project_root / "go.mod"
     try:
         match = re.search(r"(?m)^\s*module\s+(\S+)", go_mod.read_text(encoding="utf-8"))
-        module_name = match.group(1).strip() if match else ""
+        module_name = match.group(1).strip().rstrip("/") if match else ""
     except OSError:
         pass
 
     for item in imports:
         target: str | None = None
+        is_local_module = bool(
+            module_name and (item == module_name or item.startswith(f"{module_name}/"))
+        )
         if item.startswith("."):
             target = _resolve_suffix_path(item, context, extensions=(".go",))
-        elif module_name and item.startswith(module_name):
+        elif is_local_module:
             package_path = item[len(module_name) :].strip("/")
+            package_parts = PurePosixPath(package_path).parts if package_path else ()
             package_files = sorted(
                 path
                 for path in context.all_paths
-                if PurePosixPath(path).suffix == ".go"
+                if PurePosixPath(path).suffix.lower() == ".go"
                 and not PurePosixPath(path).name.endswith("_test.go")
-                and PurePosixPath(path).parent.as_posix().endswith(package_path)
+                and _path_ends_with_parts(PurePosixPath(path).parent, package_parts)
             )
-            if package_files:
+            if len(package_files) == 1:
                 target = package_files[0]
+            elif len(package_files) > 1:
+                ambiguous_local_imports.append(
+                    {
+                        "module": item,
+                        "candidate_count": len(package_files),
+                        "candidates": package_files[:20],
+                    }
+                )
+                warnings.append(
+                    f"Go 本地包 {item} 对应 {len(package_files)} 个文件，"
+                    "未建立任意文件级依赖"
+                )
+                continue
         if target:
             dependencies.append(FileDependency("imports", target, {"module": item}))
-        else:
+        elif not is_local_module:
             external.append(item)
 
     symbols: list[tuple[str, str]] = []
@@ -47,14 +75,17 @@ def _go_extract(context: ExtractionContext) -> ExtractionResult:
     metadata: dict[str, object] = {"symbols": [name for _, name in symbols[:100]]}
     if package:
         metadata["package"] = package.group(1)
+    if ambiguous_local_imports:
+        metadata["ambiguous_local_imports"] = ambiguous_local_imports
     return ExtractionResult(
         "builtin.code.go",
-        "1",
+        "2",
         metadata=metadata,
         roles=("source_code",),
         dependencies=tuple(dependencies),
         external_dependencies=_unique(external),
         resources=_resource_symbols(symbols),
+        warnings=tuple(dict.fromkeys(warnings)),
     )
 
 
@@ -97,12 +128,10 @@ def _rust_extract(context: ExtractionContext) -> ExtractionResult:
         symbols.extend((kind, name) for name in re.findall(pattern, text))
     return ExtractionResult(
         "builtin.code.rust",
-        "1",
+        "2",
         metadata={"symbols": [name for _, name in symbols[:100]]},
         roles=("source_code",),
         dependencies=tuple(dependencies),
         external_dependencies=_unique(external),
         resources=_resource_symbols(symbols),
     )
-
-

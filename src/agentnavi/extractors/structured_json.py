@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 from collections import Counter
 
 from .api import ExtractedResource, ExtractionContext, ExtractionResult, FileDependency
-from .structured_common import _path_dependencies_from_value, _roles_for_structured
+from .structured_common import (
+    BoundedLineIterator,
+    _path_dependencies_from_value,
+    _roles_for_structured,
+)
+
 
 def _json_extract(context: ExtractionContext) -> ExtractionResult:
     assert context.text is not None
@@ -13,7 +19,7 @@ def _json_extract(context: ExtractionContext) -> ExtractionResult:
     except json.JSONDecodeError as exc:
         return ExtractionResult(
             "builtin.structured.json",
-            "1",
+            "2",
             roles=_roles_for_structured(context),
             warnings=(f"JSON 解析失败：{exc.msg}（第 {exc.lineno} 行）",),
         )
@@ -61,7 +67,7 @@ def _json_extract(context: ExtractionContext) -> ExtractionResult:
         roles.extend(("dataset", "geospatial_data"))
     return ExtractionResult(
         "builtin.structured.json",
-        "1",
+        "2",
         metadata=metadata,
         roles=tuple(dict.fromkeys(roles)),
         dependencies=tuple(dependencies),
@@ -75,15 +81,20 @@ def _json_lines_extract(context: ExtractionContext) -> ExtractionResult:
     keys: Counter[str] = Counter()
     value_types: Counter[str] = Counter()
     dependencies: list[FileDependency] = []
-    handle = None
+    handle: io.TextIOBase | None = None
+    line_iterator: BoundedLineIterator | None = None
+    truncated = False
     try:
         if context.text is not None:
-            lines = iter(context.text.splitlines())
+            handle = io.StringIO(context.text)
         else:
             handle = context.absolute_path.open("r", encoding="utf-8-sig", errors="replace")
-            lines = iter(handle)
-        truncated = False
-        for line_no, line in enumerate(lines, 1):
+        line_iterator = BoundedLineIterator(
+            handle,
+            max_chars=context.max_line_chars,
+            max_total_chars=context.max_stream_chars,
+        )
+        for line_no, line in enumerate(line_iterator, 1):
             if not line.strip():
                 continue
             count += 1
@@ -103,24 +114,41 @@ def _json_lines_extract(context: ExtractionContext) -> ExtractionResult:
     except OSError as exc:
         return ExtractionResult(
             "builtin.structured.json-lines",
-            "1",
+            "2",
             roles=("dataset", "structured_data"),
             warnings=(f"JSON Lines 读取失败：{exc}",),
         )
     finally:
         if handle is not None:
             handle.close()
+
+    oversized_lines = line_iterator.oversized_lines if line_iterator is not None else 0
+    total_chars = line_iterator.total_chars if line_iterator is not None else 0
+    stream_budget_reached = (
+        line_iterator.total_budget_reached if line_iterator is not None else False
+    )
     warnings: list[str] = []
     if invalid:
         warnings.append(f"发现 {invalid} 行无效 JSON")
+    if oversized_lines:
+        warnings.append(
+            f"发现 {oversized_lines} 个超长记录，单行超过 {context.max_line_chars} 字符，已跳过"
+        )
+    if stream_budget_reached:
+        warnings.append(
+            f"JSON Lines 扫描超过 {context.max_stream_chars} 字符总预算，已提前停止"
+        )
     if truncated:
         warnings.append("记录数超过 100000，仅索引前 100000 条")
     return ExtractionResult(
         "builtin.structured.json-lines",
-        "1",
+        "2",
         metadata={
             "record_count": count,
             "invalid_records": invalid,
+            "oversized_lines": oversized_lines,
+            "stream_chars_read": total_chars,
+            "stream_budget_reached": stream_budget_reached,
             "common_keys": [key for key, _ in keys.most_common(100)],
             "record_types": dict(value_types),
             "record_count_truncated": truncated,

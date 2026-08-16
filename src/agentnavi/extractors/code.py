@@ -6,9 +6,10 @@ from .code_go_rust import _go_extract, _rust_extract
 from .code_jvm_native import _c_family_extract, _csharp_extract, _java_kotlin_extract
 from .code_scripting import _lua_extract, _php_extract, _ruby_extract, _shell_extract, _swift_extract
 
+
 class MultiLanguageCodeExtractor:
     extractor_id = "builtin.code.multilanguage"
-    extractor_version = "1"
+    extractor_version = "2"
     priority = 90
 
     def matches(self, context: ExtractionContext) -> int:

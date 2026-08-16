@@ -3,11 +3,12 @@ from __future__ import annotations
 from .api import ExtractedResource, ExtractionContext, ExtractionResult
 from .scientific_common import _module_available
 
+
 def _parquet_extract(context: ExtractionContext) -> ExtractionResult:
     if not _module_available("pyarrow"):
         return ExtractionResult(
             "optional.science.parquet",
-            "1",
+            "2",
             metadata={"format": context.suffix.lstrip("."), "optional_dependency": "pyarrow"},
             roles=("dataset", "columnar_data"),
             warnings=("安装 pyarrow 后可提取列、Schema、行组和统计信息",),
@@ -35,7 +36,7 @@ def _parquet_extract(context: ExtractionContext) -> ExtractionResult:
         }
         return ExtractionResult(
             "optional.science.parquet",
-            "1",
+            "2",
             metadata=metadata,
             roles=("dataset", "columnar_data", "scientific_data"),
             resources=resources,
@@ -43,7 +44,7 @@ def _parquet_extract(context: ExtractionContext) -> ExtractionResult:
     except Exception as exc:  # optional library errors vary by version
         return ExtractionResult(
             "optional.science.parquet",
-            "1",
+            "2",
             roles=("dataset", "columnar_data"),
             warnings=(f"Parquet 解析失败：{exc}",),
         )
@@ -53,32 +54,52 @@ def _arrow_extract(context: ExtractionContext) -> ExtractionResult:
     if not _module_available("pyarrow"):
         return ExtractionResult(
             "optional.science.arrow",
-            "1",
+            "2",
             metadata={"format": context.suffix.lstrip("."), "optional_dependency": "pyarrow"},
             roles=("dataset", "columnar_data"),
             warnings=("安装 pyarrow 后可提取 Arrow/Feather Schema",),
         )
     try:
-        import pyarrow.feather as feather  # type: ignore[import-not-found]
+        import pyarrow as pa  # type: ignore[import-not-found]
+        import pyarrow.ipc as ipc  # type: ignore[import-not-found]
 
-        table = feather.read_table(context.absolute_path, memory_map=True)
-        schema = table.schema
+        with pa.memory_map(str(context.absolute_path), "r") as source:
+            try:
+                reader = ipc.open_file(source)
+                schema = reader.schema
+                batch_count: int | None = reader.num_record_batches
+                container = "file"
+            except (pa.ArrowInvalid, OSError):
+                source.seek(0)
+                reader = ipc.open_stream(source)
+                schema = reader.schema
+                batch_count = None
+                container = "stream"
         resources = tuple(
-            ExtractedResource("column", f"column:{index}:{field.name}", field.name, {"type": str(field.type)})
+            ExtractedResource(
+                "column",
+                f"column:{index}:{field.name}",
+                field.name,
+                {"index": index, "type": str(field.type), "nullable": field.nullable},
+            )
             for index, field in enumerate(schema)
         )
         return ExtractionResult(
             "optional.science.arrow",
-            "1",
-            metadata={"column_count": len(schema), "row_count": table.num_rows, "columns": schema.names},
+            "2",
+            metadata={
+                "column_count": len(schema),
+                "columns": schema.names,
+                "record_batch_count": batch_count,
+                "ipc_container": container,
+            },
             roles=("dataset", "columnar_data", "scientific_data"),
             resources=resources,
         )
     except Exception as exc:
         return ExtractionResult(
             "optional.science.arrow",
-            "1",
+            "2",
             roles=("dataset", "columnar_data"),
             warnings=(f"Arrow/Feather 解析失败：{exc}",),
         )
-

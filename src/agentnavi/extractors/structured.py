@@ -7,9 +7,10 @@ from .structured_json import _json_extract, _json_lines_extract
 from .structured_tabular import _csv_extract, _notebook_extract, _sql_extract
 from .structured_xlsx import _xlsx_extract
 
+
 class StructuredTextExtractor:
     extractor_id = "builtin.structured"
-    extractor_version = "1"
+    extractor_version = "2"
     priority = 80
 
     def matches(self, context: ExtractionContext) -> int:

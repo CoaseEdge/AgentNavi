@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
+from typing import TextIO
 
 from .api import ExtractionContext, FileDependency
 from ..scan_support import resolve_relative_reference
@@ -35,6 +36,52 @@ PATH_VALUE_RE = re.compile(
     r"parquet|feather|arrow|h5|hdf5|nc|nc4|mat|fits|fit|fts|sqlite|sqlite3|db)$",
     re.IGNORECASE,
 )
+
+
+class BoundedLineIterator:
+    """Iterate text lines without materializing an unbounded line or stream.
+
+    Oversized physical lines are drained in bounded chunks and represented as a
+    blank line. Once the total character budget is exhausted iteration stops.
+    """
+
+    def __init__(self, handle: TextIO, *, max_chars: int, max_total_chars: int) -> None:
+        self.handle = handle
+        self.max_chars = max(1, int(max_chars))
+        self.max_total_chars = max(self.max_chars, int(max_total_chars))
+        self.oversized_lines = 0
+        self.total_chars = 0
+        self.total_budget_reached = False
+        self._stopped = False
+
+    def __iter__(self) -> BoundedLineIterator:
+        return self
+
+    def _read_chunk(self) -> str:
+        chunk = self.handle.readline(self.max_chars + 1)
+        self.total_chars += len(chunk)
+        if self.total_chars > self.max_total_chars:
+            self.total_budget_reached = True
+            self._stopped = True
+        return chunk
+
+    def __next__(self) -> str:
+        if self._stopped:
+            raise StopIteration
+        line = self._read_chunk()
+        if line == "":
+            raise StopIteration
+        if self.total_budget_reached:
+            raise StopIteration
+        if len(line) <= self.max_chars:
+            return line
+
+        while line and not line.endswith(("\n", "\r")):
+            line = self._read_chunk()
+            if self.total_budget_reached:
+                break
+        self.oversized_lines += 1
+        return "\n"
 
 
 def _resolve_reference(context: ExtractionContext, reference: str) -> str | None:
@@ -119,5 +166,3 @@ def _roles_for_structured(context: ExtractionContext) -> tuple[str, ...]:
     ):
         return ("configuration", "structured_data")
     return ("structured_data",)
-
-

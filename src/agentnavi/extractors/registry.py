@@ -58,20 +58,39 @@ class ExtractionRegistry:
             for item in self._extractors
         ]
 
-    def matching(self, context: ExtractionContext) -> list[tuple[int, Extractor]]:
+    def _matching_with_warnings(
+        self,
+        context: ExtractionContext,
+    ) -> tuple[list[tuple[int, Extractor]], list[str]]:
         matches: list[tuple[int, Extractor]] = []
+        warnings: list[str] = []
         for extractor in self._extractors:
             try:
                 score = max(0, min(int(extractor.matches(context)), 100))
-            except Exception:
+            except Exception as exc:
+                warnings.append(
+                    f"提取器 {extractor.extractor_id} 匹配失败："
+                    f"{type(exc).__name__}: {exc}"
+                )
                 continue
             if score:
                 matches.append((score, extractor))
-        return sorted(matches, key=lambda pair: (-pair[0], -pair[1].priority, pair[1].extractor_id))
+        return (
+            sorted(
+                matches,
+                key=lambda pair: (-pair[0], -pair[1].priority, pair[1].extractor_id),
+            ),
+            warnings,
+        )
+
+    def matching(self, context: ExtractionContext) -> list[tuple[int, Extractor]]:
+        matches, _ = self._matching_with_warnings(context)
+        return matches
 
     def extract(self, context: ExtractionContext) -> ExtractionResult:
         results: list[ExtractionResult] = []
-        for _, extractor in self.matching(context):
+        matches, match_warnings = self._matching_with_warnings(context)
+        for _, extractor in matches:
             try:
                 result = extractor.extract(context)
             except Exception as exc:  # Extractors are fail-open by design.
@@ -82,7 +101,10 @@ class ExtractionRegistry:
                 )
             results.append(result)
         merged = merge_results(results)
-        if self.load_errors:
+        combined_warnings = tuple(
+            dict.fromkeys((*merged.warnings, *match_warnings, *self.load_errors))
+        )
+        if combined_warnings != merged.warnings:
             merged = ExtractionResult(
                 merged.extractor_id,
                 merged.extractor_version,
@@ -92,7 +114,7 @@ class ExtractionRegistry:
                 external_dependencies=merged.external_dependencies,
                 resources=merged.resources,
                 resource_relations=merged.resource_relations,
-                warnings=tuple(dict.fromkeys((*merged.warnings, *self.load_errors))),
+                warnings=combined_warnings,
             )
         return merged
 

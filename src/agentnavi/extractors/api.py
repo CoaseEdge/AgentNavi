@@ -13,7 +13,8 @@ class ExtractionContext:
     """A read-only view of one project file presented to extractors.
 
     Extractors return data only. They never receive a database connection and must
-    not mutate the indexed project.
+    not mutate the indexed project. Resource budgets are part of the context so
+    built-in and third-party extractors enforce the same deterministic limits.
     """
 
     project_id: str
@@ -27,6 +28,11 @@ class ExtractionContext:
     is_text: bool
     text: str | None
     max_file_bytes: int
+    max_binary_file_bytes: int = 256 * 1024 * 1024
+    max_archive_entries: int = 10_000
+    max_archive_uncompressed_bytes: int = 64 * 1024 * 1024
+    max_line_chars: int = 1024 * 1024
+    max_stream_chars: int = 64 * 1024 * 1024
 
     @property
     def suffix(self) -> str:

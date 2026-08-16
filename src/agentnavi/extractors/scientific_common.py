@@ -42,6 +42,7 @@ def _npy_header(handle: io.BufferedIOBase) -> dict[str, object]:
     if len(version) != 2:
         raise ValueError("NPY 版本头不完整")
     major, minor = version
+    length_bytes = 2 if major == 1 else 4
     if major == 1:
         raw_length = handle.read(2)
         if len(raw_length) != 2:
@@ -57,6 +58,8 @@ def _npy_header(handle: io.BufferedIOBase) -> dict[str, object]:
     if header_length > 1_048_576:
         raise ValueError("NPY header 超过 1 MiB 安全上限")
     header = handle.read(header_length)
+    if len(header) != header_length:
+        raise ValueError("NPY header 内容不完整")
     encoding = "latin1" if major < 3 else "utf-8"
     parsed = ast.literal_eval(header.decode(encoding).strip())
     if not isinstance(parsed, dict):
@@ -68,5 +71,5 @@ def _npy_header(handle: io.BufferedIOBase) -> dict[str, object]:
         "fortran_order": bool(parsed.get("fortran_order", False)),
         "shape": list(shape) if isinstance(shape, tuple) else shape,
         "dimensions": len(shape) if isinstance(shape, tuple) else None,
+        "header_bytes": 6 + 2 + length_bytes + header_length,
     }
-
