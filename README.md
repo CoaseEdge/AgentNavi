@@ -1,4 +1,44 @@
-# AgentNavi：让 AI Agent 先看懂项目，再开始工作
+<p align="center">
+  <img src="assets/readme/agentnavi-cover.svg" alt="AgentNavi — Project Context Navigation Engine，让 AI Agent 先看懂项目，再开始工作" width="100%" />
+</p>
+
+<h1 align="center">AgentNavi</h1>
+
+<p align="center">
+  <strong>项目上下文导航引擎 · Project Context Navigation Engine</strong><br/>
+  让 AI Agent 先看懂项目，再开始工作。
+</p>
+
+<p align="center">
+  <a href="https://github.com/Andrewlislin/AgentNavi/actions/workflows/ci.yml"><img src="https://github.com/Andrewlislin/AgentNavi/actions/workflows/ci.yml/badge.svg?branch=main" alt="持续集成" /></a>
+  <a href="https://github.com/Andrewlislin/AgentNavi/commits/main"><img src="https://img.shields.io/github/last-commit/Andrewlislin/AgentNavi?style=flat-square&amp;logo=github&amp;label=last%20commit" alt="最后提交" /></a>
+  <a href="https://github.com/Andrewlislin/AgentNavi/graphs/commit-activity"><img src="https://img.shields.io/github/commit-activity/m/Andrewlislin/AgentNavi?style=flat-square&amp;logo=git&amp;label=commits" alt="每月提交" /></a>
+  <a href="https://github.com/Andrewlislin/AgentNavi/issues"><img src="https://img.shields.io/github/issues/Andrewlislin/AgentNavi?style=flat-square&amp;logo=github" alt="开放议题" /></a>
+  <a href="https://github.com/Andrewlislin/AgentNavi/stargazers"><img src="https://img.shields.io/github/stars/Andrewlislin/AgentNavi?style=flat-square&amp;logo=github" alt="GitHub Stars" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Andrewlislin/AgentNavi?style=flat-square" alt="许可证" /></a>
+  <a href="https://github.com/Andrewlislin/AgentNavi"><img src="https://img.shields.io/github/repo-size/Andrewlislin/AgentNavi?style=flat-square&amp;label=repo%20size" alt="仓库体积" /></a>
+</p>
+
+<!-- 仓库保持私有时，Shields 的 GitHub 统计徽章可能无法读取；仓库公开后会自动显示实时数据。 -->
+
+<p align="center">
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11+" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.2.0-5C7CFA?style=flat-square" alt="版本 0.2.0" /></a>
+  <img src="https://img.shields.io/badge/status-Alpha-F59E0B?style=flat-square" alt="Alpha" />
+  <a href="integrations/deepseek-harness/README.md"><img src="https://img.shields.io/badge/DeepSeek%20Harness-supported-4D6BFE?style=flat-square" alt="支持 DeepSeek Harness" /></a>
+  <a href="integrations/README.md"><img src="https://img.shields.io/badge/Codex-supported-111827?style=flat-square&amp;logo=openai&amp;logoColor=white" alt="支持 Codex" /></a>
+  <a href="integrations/README.md"><img src="https://img.shields.io/badge/Claude%20Code-supported-D97757?style=flat-square&amp;logo=anthropic&amp;logoColor=white" alt="支持 Claude Code" /></a>
+  <a href="#一组必须说明边界的-token-数据"><img src="https://img.shields.io/badge/benchmark%20fixture-75%25%20fewer%20exploration%20tokens-00A892?style=flat-square" alt="测试夹具中探索 Token 降低 75%" /></a>
+</p>
+
+<p align="center">
+  <a href="#一句话理解-agentnavi">项目定位</a> ·
+  <a href="#三层项目地图">三层架构</a> ·
+  <a href="#一组必须说明边界的-token-数据">基准数据</a> ·
+  <a href="#已支持-deepseek-harness">DeepSeek Harness</a> ·
+  <a href="#五分钟开始使用">快速开始</a> ·
+  <a href="#文档">文档</a>
+</p>
 
 > 一个独立于项目仓库、具体 Agent 和 Obsidian 的项目上下文导航引擎。
 >
@@ -357,7 +397,6 @@ SessionEnd
 ---
 
 # 五分钟开始使用
-
 要求 Python 3.11 或更高版本。
 
 ```bash
