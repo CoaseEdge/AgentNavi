@@ -41,6 +41,17 @@ class ReadmeAssetTestCase(unittest.TestCase):
         self.assertIn("DeepSeek%20Harness-supported", content)
         self.assertIn("benchmark%20fixture-75%25", content)
 
+    def test_license_metadata_is_consistently_apache_2_0(self) -> None:
+        license_text = (self.root / "LICENSE").read_text(encoding="utf-8")
+        project_text = (self.root / "pyproject.toml").read_text(encoding="utf-8")
+        readme_text = self.readme.read_text(encoding="utf-8")
+
+        self.assertIn("Apache License", license_text)
+        self.assertIn("Version 2.0, January 2004", license_text)
+        self.assertIn('license = {text = "Apache-2.0"}', project_text)
+        self.assertIn("License :: OSI Approved :: Apache Software License", project_text)
+        self.assertTrue(readme_text.rstrip().endswith("Apache-2.0"))
+
 
 if __name__ == "__main__":
     unittest.main()
