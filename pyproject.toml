@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "独立于项目仓库和具体 Agent 的三层项目认知导航引擎"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
   {name = "AgentNavi contributors"}
 ]
@@ -16,7 +16,7 @@ keywords = ["agent", "context", "knowledge-graph", "obsidian", "codex", "claude-
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
