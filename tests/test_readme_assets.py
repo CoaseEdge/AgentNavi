@@ -37,7 +37,7 @@ class ReadmeAssetTestCase(unittest.TestCase):
         content = self.readme.read_text(encoding="utf-8")
         self.assertIn("assets/readme/agentnavi-cover.svg", content)
         self.assertIn("actions/workflows/ci.yml/badge.svg", content)
-        self.assertIn("img.shields.io/github/last-commit/Andrewlislin/AgentNavi", content)
+        self.assertIn("img.shields.io/github/last-commit/CoaseEdge/AgentNavi", content)
         self.assertIn("DeepSeek%20Harness-supported", content)
         self.assertIn("benchmark%20fixture-75%25", content)
 
