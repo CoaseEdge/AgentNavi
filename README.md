@@ -10,13 +10,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Andrewlislin/AgentNavi/actions/workflows/ci.yml"><img src="https://github.com/Andrewlislin/AgentNavi/actions/workflows/ci.yml/badge.svg?branch=main" alt="持续集成" /></a>
-  <a href="https://github.com/Andrewlislin/AgentNavi/commits/main"><img src="https://img.shields.io/github/last-commit/Andrewlislin/AgentNavi?style=flat-square&amp;logo=github&amp;label=last%20commit" alt="最后提交" /></a>
-  <a href="https://github.com/Andrewlislin/AgentNavi/graphs/commit-activity"><img src="https://img.shields.io/github/commit-activity/m/Andrewlislin/AgentNavi?style=flat-square&amp;logo=git&amp;label=commits" alt="每月提交" /></a>
-  <a href="https://github.com/Andrewlislin/AgentNavi/issues"><img src="https://img.shields.io/github/issues/Andrewlislin/AgentNavi?style=flat-square&amp;logo=github" alt="开放议题" /></a>
-  <a href="https://github.com/Andrewlislin/AgentNavi/stargazers"><img src="https://img.shields.io/github/stars/Andrewlislin/AgentNavi?style=flat-square&amp;logo=github" alt="GitHub Stars" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Andrewlislin/AgentNavi?style=flat-square" alt="许可证" /></a>
-  <a href="https://github.com/Andrewlislin/AgentNavi"><img src="https://img.shields.io/github/repo-size/Andrewlislin/AgentNavi?style=flat-square&amp;label=repo%20size" alt="仓库体积" /></a>
+  <a href="https://github.com/CoaseEdge/AgentNavi/actions/workflows/ci.yml"><img src="https://github.com/CoaseEdge/AgentNavi/actions/workflows/ci.yml/badge.svg?branch=main" alt="持续集成" /></a>
+  <a href="https://github.com/CoaseEdge/AgentNavi/commits/main"><img src="https://img.shields.io/github/last-commit/CoaseEdge/AgentNavi?style=flat-square&amp;logo=github&amp;label=last%20commit" alt="最后提交" /></a>
+  <a href="https://github.com/CoaseEdge/AgentNavi/graphs/commit-activity"><img src="https://img.shields.io/github/commit-activity/m/CoaseEdge/AgentNavi?style=flat-square&amp;logo=git&amp;label=commits" alt="每月提交" /></a>
+  <a href="https://github.com/CoaseEdge/AgentNavi/issues"><img src="https://img.shields.io/github/issues/CoaseEdge/AgentNavi?style=flat-square&amp;logo=github" alt="开放议题" /></a>
+  <a href="https://github.com/CoaseEdge/AgentNavi/stargazers"><img src="https://img.shields.io/github/stars/CoaseEdge/AgentNavi?style=flat-square&amp;logo=github" alt="GitHub Stars" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/CoaseEdge/AgentNavi?style=flat-square" alt="许可证" /></a>
+  <a href="https://github.com/CoaseEdge/AgentNavi"><img src="https://img.shields.io/github/repo-size/CoaseEdge/AgentNavi?style=flat-square&amp;label=repo%20size" alt="仓库体积" /></a>
 </p>
 
 <!-- 仓库保持私有时，Shields 的 GitHub 统计徽章可能无法读取；仓库公开后会自动显示实时数据。 -->
@@ -340,7 +340,7 @@ Harness 继续保存完整模型与工具轨迹；AgentNavi 只保存未来导�
 先安装 AgentNavi：
 
 ```bash
-git clone https://github.com/Andrewlislin/AgentNavi.git
+git clone https://github.com/CoaseEdge/AgentNavi.git
 cd AgentNavi
 python -m pip install -e .
 agentnavi init
@@ -400,7 +400,7 @@ SessionEnd
 要求 Python 3.11 或更高版本。
 
 ```bash
-git clone https://github.com/Andrewlislin/AgentNavi.git
+git clone https://github.com/CoaseEdge/AgentNavi.git
 cd AgentNavi
 python -m pip install -e .
 agentnavi init
