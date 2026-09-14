@@ -9,6 +9,7 @@ from typing import Any
 from .database import Database
 from .privacy import contains_private_path, is_canonical_relative_path
 from .query import _context_evidence, _fresh_context_paths
+from .semantic_relations import CONCEPT_FILE_MAPPING_RELATIONS_SQL
 from .utils import json_loads, stable_id
 
 IMPACT_ANCHOR_LIMIT = 8
@@ -45,8 +46,8 @@ def _raw_edge_window(connection: sqlite3.Connection, project_id: str, *,
     if semantic:
         if layer != 2:
             raise ValueError("semantic window only supports layer 2")
-        index = "idx_edges_source_semantic" if endpoint == "source_id" else "idx_edges_target_semantic"
-        category_sql = " AND edge.relation NOT IN ('implemented_by','configured_by','tested_by')"
+        index = "idx_edges_source_semantic_v2" if endpoint == "source_id" else "idx_edges_target_semantic_v2"
+        category_sql = f" AND edge.relation NOT IN {CONCEPT_FILE_MAPPING_RELATIONS_SQL}"
         category_values = ()
         layer_sql, layer_values = "edge.layer=2", ()
     elif relation is not None:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from .config import Settings
+from .semantic_relations import CONCEPT_FILE_MAPPING_RELATIONS_SQL
 from .utils import json_dumps, stable_id, utc_now
 
 SCHEMA_VERSION = 3
@@ -71,10 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_edges_target_endpoint ON edges(project_id, target
 CREATE INDEX IF NOT EXISTS idx_edges_source_relation ON edges(project_id, layer, source_id, relation);
 CREATE INDEX IF NOT EXISTS idx_edges_target_relation ON edges(project_id, layer, target_id, relation);
 CREATE INDEX IF NOT EXISTS idx_edges_target_provenance ON edges(project_id, layer, target_id, source);
-CREATE INDEX IF NOT EXISTS idx_edges_source_semantic ON edges(project_id, source_id)
-WHERE layer=2 AND relation NOT IN ('implemented_by','configured_by','tested_by');
-CREATE INDEX IF NOT EXISTS idx_edges_target_semantic ON edges(project_id, target_id)
-WHERE layer=2 AND relation NOT IN ('implemented_by','configured_by','tested_by');
+CREATE INDEX IF NOT EXISTS idx_edges_source_semantic_v2 ON edges(project_id, source_id)
+WHERE layer=2 AND relation NOT IN __CONCEPT_FILE_MAPPING_RELATIONS__;
+CREATE INDEX IF NOT EXISTS idx_edges_target_semantic_v2 ON edges(project_id, target_id)
+WHERE layer=2 AND relation NOT IN __CONCEPT_FILE_MAPPING_RELATIONS__;
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(project_id, relation);
 
 CREATE TABLE IF NOT EXISTS file_state (
@@ -188,7 +189,7 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 
 CREATE INDEX IF NOT EXISTS idx_benchmark_suite
     ON benchmark_runs(project_id, suite, run_kind, mode, created_at DESC);
-"""
+""".replace("__CONCEPT_FILE_MAPPING_RELATIONS__", CONCEPT_FILE_MAPPING_RELATIONS_SQL)
 
 
 class Database:

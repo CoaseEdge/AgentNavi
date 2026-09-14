@@ -5,21 +5,9 @@ from collections import Counter
 from pathlib import PurePosixPath
 
 from .database import Database
+from .semantic_relations import ROLE_RELATIONS
 from .utils import json_loads
 
-ROLE_RELATIONS = {
-    "test": "tested_by",
-    "document": "documented_by",
-    "configuration": "configured_by",
-    "manifest": "configured_by",
-    "dataset": "data_provided_by",
-    "scientific_data": "data_provided_by",
-    "database": "data_provided_by",
-    "notebook": "analyzed_by",
-    "analysis": "analyzed_by",
-    "media_asset": "uses_asset",
-    "generated_output": "produced_by",
-}
 TEST_MARKERS = ("test_", ".test.", ".spec.", "/tests/", "/test/", "/spec/")
 KEYWORD_FIELDS = (
     "columns",
