@@ -347,7 +347,7 @@ def _source_state(core_data: Mapping[str, Any]) -> tuple[SourceState, tuple[Warn
 
 def _core_warnings(core_data: Mapping[str, Any]) -> tuple[Warning, ...]:
     result = []
-    for raw in _sequence(core_data.get("warnings", []), "context.warnings")[:8]:
+    for raw in _sequence(core_data.get("warnings", []), "context.warnings"):
         item = _mapping(raw, "context.warnings[]")
         result.append(Warning(
             code=_required_text(item.get("code"), "warning.code", limit=80),

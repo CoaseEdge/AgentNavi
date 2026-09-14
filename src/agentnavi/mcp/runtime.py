@@ -344,7 +344,7 @@ class ContextViewOutput(_ExtensibleModel):
     project: ProjectOutput
     source_state: SourceStateOutput = Field(alias="sourceState")
     data: ContextDataOutput
-    warnings: list[WarningOutput]
+    warnings: list[WarningOutput] = Field(max_length=10)
 
     @model_validator(mode="before")
     @classmethod

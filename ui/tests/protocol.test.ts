@@ -69,6 +69,14 @@ assert(view.data.files[0]?.path === "src/membership.py", "应接受 POSIX 相对
 
 assert(parseContextView({ ...fixture, schemaVersion: "future" }) === undefined, "应拒绝未知协议");
 assert(parseContextView({ ...fixture, view: "repo-overview" }) === undefined, "Context parser 应拒绝其他视图");
+const tenWarnings = structuredClone(fixture) as any;
+tenWarnings.warnings = Array.from(
+  { length: 10 }, (_, index) => ({ code: `WARNING_${index}`, message: `提示 ${index}`, evidence: [] }),
+);
+assert(parseContextView(tenWarnings)?.warnings.length === 10, "Context UI 应完整保留十项公开 warning");
+const elevenWarnings = structuredClone(tenWarnings) as any;
+elevenWarnings.warnings.push({ code: "WARNING_10", message: "超出固定集合", evidence: [] });
+assert(parseContextView(elevenWarnings) === undefined, "Context UI 不得静默截断超预算 warning");
 const unsafe = structuredClone(fixture);
 unsafe.data.files[0]!.path = "/private/project.py";
 assert(parseContextView(unsafe) === undefined, "应拒绝候选与导航不一致的绝对路径");

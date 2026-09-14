@@ -144,6 +144,10 @@ import agentnavi.mcp.server
                     "context",
                 )
                 self.assertEqual(
+                    context_tool.output_schema["properties"]["warnings"]["maxItems"],
+                    10,
+                )
+                self.assertEqual(
                     context_tool.output_schema["properties"]["data"]["$ref"],
                     "#/$defs/ContextDataOutput",
                 )

@@ -606,6 +606,10 @@ function contextNavigation(
 }
 
 export function parseContextView(value: unknown): ContextView | undefined {
+  const rawEnvelope = record(value);
+  if (!Array.isArray(rawEnvelope?.warnings) || rawEnvelope.warnings.length > 10) {
+    return undefined;
+  }
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "context") return undefined;
   const { project, sourceState, data, warnings } = common;

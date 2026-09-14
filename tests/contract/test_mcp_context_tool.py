@@ -238,6 +238,43 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             self.assertNotIn(private_message, wire)
             self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_context_projects_all_nine_navigation_warnings_without_text_drift(self) -> None:
+        from agentnavi.query import context_data
+
+        self._add_project(scanned=False)
+        with self.database.connect() as connection:
+            project = connection.execute(
+                "SELECT * FROM projects WHERE id='fixture'"
+            ).fetchone()
+        assert project is not None
+        core = context_data(self.database, project, "会员")
+        codes = [
+            "CONTEXT_NAVIGATION_STALE_FILES",
+            "CONTEXT_NAVIGATION_FRESHNESS_BUDGET",
+            "CONTEXT_NAVIGATION_SYMLINK_UNVERIFIABLE",
+            "CONTEXT_NAVIGATION_RELATION_EVIDENCE_INSUFFICIENT",
+            "CONTEXT_NAVIGATION_RELATION_EVIDENCE_TRUNCATED",
+            "CONTEXT_NAVIGATION_EVIDENCE_INSUFFICIENT",
+            "CONTEXT_NAVIGATION_DEPENDENCY_TRUNCATED",
+            "CONTEXT_NAVIGATION_HISTORY_TRUNCATED",
+            "CONTEXT_NAVIGATION_HISTORY_FILTERED",
+        ]
+        core["warnings"] = [
+            {"code": code, "message": f"{code} message", "evidence": []}
+            for code in codes
+        ]
+        with patch("agentnavi.query.context_data", return_value=core):
+            result = asyncio.run(
+                self._call({"query": "会员", "project_id": "fixture"})
+            )
+
+        self.assertFalse(result.is_error)
+        structured = [item["code"] for item in result.structured_content["warnings"]]
+        self.assertEqual(structured, ["SOURCE_NOT_INDEXED", *codes])
+        self.assertEqual(len(structured), 10)
+        for warning in result.structured_content["warnings"]:
+            self.assertIn(f"[{warning['code']}] {warning['message']}", result.content[0].text)
+
     def test_visualize_tool_returns_repository_overview_without_query(self) -> None:
         self._add_project()
         self._add_overview_documents()

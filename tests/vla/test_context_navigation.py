@@ -11,7 +11,7 @@ from agentnavi.config import Settings
 from agentnavi.database import Database, ensure_database
 from agentnavi.engine import scan_project
 from agentnavi.mcp.adapters.context import context_text, context_view
-from agentnavi.query import _fresh_context_paths, context_data
+from agentnavi.query import _context_file_actions, _fresh_context_paths, context_data
 from agentnavi.registry import add_project, resolve_project
 from agentnavi.utils import utc_now
 
@@ -368,6 +368,136 @@ class ContextNavigationTestCase(unittest.TestCase):
         warning_codes = {warning["code"] for warning in data["warnings"]}
         self.assertIn("CONTEXT_NAVIGATION_HISTORY_TRUNCATED", warning_codes)
         self.assertIn("CONTEXT_NAVIGATION_HISTORY_FILTERED", warning_codes)
+
+    def test_fourth_safe_history_marks_display_truncation(self) -> None:
+        now = utc_now()
+        with self.database.connect() as connection:
+            upgrade = connection.execute(
+                "SELECT id FROM nodes WHERE project_id=? AND kind='file' AND key=?",
+                (self.project["id"], "src/membership/upgrade.py"),
+            ).fetchone()
+            self.assertIsNotNone(upgrade)
+            for index in range(4):
+                task_id = f"safe-history-{index}"
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, project_id, agent, title, status, summary,
+                           created_at, updated_at, closed_at
+                       ) VALUES (?, ?, 'codex', ?, 'completed', '', ?, ?, ?)""",
+                    (task_id, self.project["id"], f"安全任务 {index}", now, now, now),
+                )
+                task_node = Database.upsert_node(
+                    connection, project_id=self.project["id"], layer=3, kind="task",
+                    key=task_id, label=f"安全任务 {index}", source="task-events",
+                )
+                Database.upsert_edge(
+                    connection, project_id=self.project["id"], layer=3,
+                    source_id=task_node, relation="modified", target_id=upgrade["id"],
+                    source="task-events",
+                )
+            connection.commit()
+
+        data = context_data(self.database, self.project, "membership")
+        upgrade_item = next(
+            item for item in data["navigation"]["readingOrder"]
+            if item["path"] == "src/membership/upgrade.py"
+        )
+        self.assertEqual(len(upgrade_item["history"]), 3)
+        history_action = next(
+            item for item in upgrade_item["actions"] if item["kind"] == "history"
+        )
+        self.assertIn("近期相关历史任务（最多 3 项）", history_action["summary"])
+        self.assertIn(
+            "CONTEXT_NAVIGATION_HISTORY_TRUNCATED",
+            {warning["code"] for warning in data["warnings"]},
+        )
+
+    def test_large_history_uses_indexed_per_target_constant_query_budget(self) -> None:
+        baseline = context_data(self.database, self.project, "membership")
+        payment = next(
+            item for item in baseline["navigation"]["readingOrder"]
+            if item["path"] == "src/payment/service.py"
+        )
+        chain = payment["chains"][0]
+        file_id = chain["file"]["id"]
+        now = utc_now()
+        task_rows = []
+        node_rows = []
+        edge_rows = []
+        for index in range(5000):
+            task_id = f"bulk-history-{index:04d}"
+            node_id = Database.node_id(self.project["id"], 3, "task", task_id)
+            edge_id = Database.edge_id(
+                self.project["id"], 3, node_id, "modified", file_id
+            )
+            task_rows.append((
+                task_id, self.project["id"], "codex", f"批量历史 {index}",
+                "completed", "", now, now, now,
+            ))
+            node_rows.append((
+                node_id, self.project["id"], 3, "task", task_id,
+                f"批量历史 {index}", "{}", 1.0, "task-events", now, now,
+            ))
+            edge_rows.append((
+                edge_id, self.project["id"], 3, node_id, "modified", file_id,
+                "{}", 1.0, "task-events", now, now,
+            ))
+        statements: list[str] = []
+        vm_steps = 0
+
+        def count_step() -> int:
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        with self.database.connect() as connection:
+            connection.executemany(
+                """INSERT INTO tasks(
+                       id, project_id, agent, title, status, summary,
+                       created_at, updated_at, closed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                task_rows,
+            )
+            connection.executemany(
+                "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", node_rows
+            )
+            connection.executemany(
+                "INSERT INTO edges VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", edge_rows
+            )
+            connection.commit()
+            plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                SELECT task.id FROM edges AS edge INDEXED BY idx_edges_target
+                JOIN nodes task_node ON task_node.id=edge.source_id
+                JOIN tasks task ON task.id=task_node.key
+                WHERE edge.project_id=? AND edge.layer=3 AND edge.target_id=?
+                ORDER BY edge.rowid
+                LIMIT 41""",
+                (self.project["id"], file_id),
+            ).fetchall()
+            connection.set_trace_callback(statements.append)
+            connection.set_progress_handler(count_step, 1)
+            try:
+                actions, state = _context_file_actions(
+                    connection,
+                    self.project["id"],
+                    [{"path": payment["path"]}],
+                    [{"path": payment["path"], "_chains": [chain]}],
+                )
+            finally:
+                connection.set_progress_handler(None, 0)
+                connection.set_trace_callback(None)
+
+        self.assertTrue(any("idx_edges_target" in str(tuple(row)) for row in plan))
+        self.assertFalse(any("TEMP B-TREE" in str(tuple(row)) for row in plan))
+        history_sql = [
+            statement for statement in statements
+            if "context-navigation-history-indexed" in statement
+        ]
+        self.assertEqual(len(history_sql), 1)
+        self.assertLess(vm_steps, 10000)
+        self.assertTrue(state["history_truncated"])
+        self.assertEqual(len(actions[payment["path"]]["history"]), 3)
 
     def test_symlink_candidate_is_rejected_from_explanation_layer(self) -> None:
         target = self.root / "src/payment/real-service.py"

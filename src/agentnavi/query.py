@@ -656,6 +656,7 @@ def _context_file_actions(
         return {}, {
             "dependency_truncated": False,
             "history_truncated": False,
+            "history_display_truncated": False,
             "history_filtered": False,
         }
     source_placeholders = ",".join("?" for _ in source_paths)
@@ -711,67 +712,64 @@ def _context_file_actions(
             })
 
     history: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    scanned = 0
-    cursor = connection.execute(
-        f"""WITH ranked AS (
-                SELECT file.key AS path, task.id, task.title, task.status,
-                       task.created_at, edge.relation, edge.source, edge.confidence,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY file.id
-                           ORDER BY COALESCE(
-                               task.closed_at, task.updated_at, task.created_at
-                           ) DESC, task.id, edge.relation, edge.id
-                       ) AS ordinal
-                FROM edges edge
-                JOIN nodes file ON file.id=edge.target_id
-                  AND file.layer=1 AND file.kind='file'
-                JOIN nodes task_node ON task_node.id=edge.source_id
-                  AND task_node.layer=3 AND task_node.kind='task'
-                JOIN tasks task ON task.id=task_node.key
-                WHERE edge.project_id=? AND edge.layer=3
-                  AND file.key IN ({target_placeholders})
-            )
-            SELECT * FROM ranked WHERE ordinal<=?
-            ORDER BY path COLLATE NOCASE, path, ordinal
-            LIMIT ?""",
-        (
-            project_id, *target_paths,
-            _CONTEXT_HISTORY_PER_FILE_LIMIT + 1,
-            _CONTEXT_HISTORY_SCAN_LIMIT + 1,
-        ),
-    )
     history_truncated = False
     history_filtered = False
-    for row in cursor:
-        scanned += 1
-        if (
-            scanned > _CONTEXT_HISTORY_SCAN_LIMIT
-            or int(row["ordinal"]) > _CONTEXT_HISTORY_PER_FILE_LIMIT
-        ):
+    history_display_truncated = False
+    history_targets = sorted(
+        (
+            str(item["path"]),
+            str(item["_chains"][0]["file"]["id"]),
+        )
+        for item in navigable_files
+    )[:12]
+    for path, file_id in history_targets:
+        rows = list(connection.execute(
+            """/* context-navigation-history-indexed */
+            SELECT task.id, task.title, task.status, task.created_at,
+                   task.closed_at, task.updated_at,
+                   edge.id AS edge_id, edge.relation, edge.source, edge.confidence
+            FROM edges AS edge INDEXED BY idx_edges_target
+            JOIN nodes task_node ON task_node.id=edge.source_id
+              AND task_node.layer=3 AND task_node.kind='task'
+            JOIN tasks task ON task.id=task_node.key
+            WHERE edge.project_id=? AND edge.layer=3 AND edge.target_id=?
+            ORDER BY edge.rowid
+            LIMIT ?""",
+            (project_id, file_id, _CONTEXT_HISTORY_PER_FILE_LIMIT + 1),
+        ))
+        if len(rows) > _CONTEXT_HISTORY_PER_FILE_LIMIT:
             history_truncated = True
-            continue
-        path = str(row["path"])
-        title = str(row["title"])
-        if contains_private_path(title):
-            history_filtered = True
-            continue
-        if len(history[path]) >= 3:
-            continue
-        history[path].append({
-            "id": str(row["id"]),
-            "title": title[:160],
-            "status": str(row["status"])[:40],
-            "createdAt": str(row["created_at"])[:64],
-            "relation": str(row["relation"])[:80],
-            "_evidence": _context_evidence(
-                kind="task-file-relation",
-                summary=f"历史任务以 {row['relation']} 关系关联此文件。",
-                layer="L3",
-                source=str(row["source"]),
-                confidence=float(row["confidence"]),
-                path=path,
+        bounded_rows = sorted(
+            rows[:_CONTEXT_HISTORY_PER_FILE_LIMIT],
+            key=lambda row: (
+                str(row["closed_at"] or row["updated_at"] or row["created_at"]),
+                str(row["id"]), str(row["relation"]), str(row["edge_id"]),
             ),
-        })
+            reverse=True,
+        )
+        for row in bounded_rows:
+            title = str(row["title"])
+            if contains_private_path(title):
+                history_filtered = True
+                continue
+            if len(history[path]) >= 3:
+                history_display_truncated = True
+                continue
+            history[path].append({
+                "id": str(row["id"]),
+                "title": title[:160],
+                "status": str(row["status"])[:40],
+                "createdAt": str(row["created_at"])[:64],
+                "relation": str(row["relation"])[:80],
+                "_evidence": _context_evidence(
+                    kind="task-file-relation",
+                    summary=f"历史任务以 {row['relation']} 关系关联此文件。",
+                    layer="L3",
+                    source=str(row["source"]),
+                    confidence=float(row["confidence"]),
+                    path=path,
+                ),
+            })
 
     result: dict[str, dict[str, Any]] = {}
     for item in navigable_files:
@@ -803,12 +801,15 @@ def _context_file_actions(
                 ) if dependencies else "当前有界候选结果中未展示依赖它的文件。"
             ),
             "history": (
-                "相关历史任务：" + "、".join(entry["title"] for entry in task_history)
+                "近期相关历史任务（最多 3 项）：" + "、".join(
+                    entry["title"] for entry in task_history
+                )
                 if task_history else "当前有界结果中未展示安全且可追溯的历史修改任务。"
             ),
             "impact": (
                 f"修改前先核对 {len(dependencies)} 个已选依赖方与 "
-                f"{len(task_history)} 个历史任务，再用 Impact 查询完整影响。"
+                f"当前有界结果中的 {len(task_history)} 个近期历史任务（最多 3 项），"
+                "再用 Impact 查询完整影响。"
             ),
         }
         result[path] = {
@@ -838,6 +839,7 @@ def _context_file_actions(
     return result, {
         "dependency_truncated": dependency_truncated,
         "history_truncated": history_truncated,
+        "history_display_truncated": history_display_truncated,
         "history_filtered": history_filtered,
     }
 
@@ -1120,12 +1122,16 @@ def context_data(
                 "message": f"每个文件的依赖展示达到 {_CONTEXT_DEPENDENCY_PER_FILE_LIMIT} 项预算，局部结果可能不完整。",
                 "evidence": [],
             })
-        if action_state["history_truncated"]:
+        if (
+            action_state["history_truncated"]
+            or action_state["history_display_truncated"]
+        ):
             navigation_warnings.append({
                 "code": "CONTEXT_NAVIGATION_HISTORY_TRUNCATED",
                 "message": (
-                    f"历史关系扫描达到总 {_CONTEXT_HISTORY_SCAN_LIMIT} 项或每文件 "
-                    f"{_CONTEXT_HISTORY_PER_FILE_LIMIT} 项预算，局部历史可能不完整。"
+                    "历史展示最多保留每文件 3 项；索引查询最多覆盖 12 个文件、"
+                    f"每文件 {_CONTEXT_HISTORY_PER_FILE_LIMIT + 1} 条关系"
+                    f"（总扫描预算 {_CONTEXT_HISTORY_SCAN_LIMIT}），局部历史可能不完整。"
                 ),
                 "evidence": [],
             })
