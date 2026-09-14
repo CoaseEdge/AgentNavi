@@ -4,13 +4,19 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 from agentnavi.config import Settings
 from agentnavi.database import Database, ensure_database
 from agentnavi.mcp.adapters.repo_tour import repo_tour_text, repo_tour_view
-from agentnavi.repository_views import _tour_graph_facts, repository_tour_data
+from agentnavi.repository_views import (
+    MAX_TOUR_HISTORY_CANDIDATES,
+    MAX_TOUR_HISTORY_SQL_QUERIES,
+    _tour_graph_facts,
+    repository_tour_data,
+)
 
 
 class RepositoryTourTestCase(unittest.TestCase):
@@ -418,12 +424,22 @@ class RepositoryTourTestCase(unittest.TestCase):
         with self.database.connect() as connection:
             for index in range(17):
                 moment = f"2026-09-15T11:00:{index:02d}+00:00"
+                task_id = f"unsafe-window-{index:02d}"
                 connection.execute(
                     """INSERT INTO tasks(
                            id, project_id, title, status, summary,
                            created_at, updated_at, closed_at
                        ) VALUES (?, 'fixture', ?, 'completed', 'unsafe', ?, ?, ?)""",
-                    (f"unsafe-window-{index:02d}", f"/private/task-{index}", moment, moment, moment),
+                    (task_id, f"/private/task-{index}", moment, moment, moment),
+                )
+                Database.upsert_node(
+                    connection,
+                    project_id="fixture",
+                    layer=3,
+                    kind="task",
+                    key=task_id,
+                    label=f"Unsafe {index}",
+                    source="task-events",
                 )
             connection.commit()
 
@@ -473,6 +489,71 @@ class RepositoryTourTestCase(unittest.TestCase):
             if stop["kind"] == "task-history"
         )
         self.assertEqual(history_stop["plainLanguage"], "调整模型边界")
+
+    def test_large_no_history_population_is_query_bounded_and_warned(self) -> None:
+        self.assertEqual(MAX_TOUR_HISTORY_CANDIDATES, 160)
+        with self.database.connect() as connection:
+            moment = "2026-09-15T11:00:00+00:00"
+            for index in range(MAX_TOUR_HISTORY_CANDIDATES + 1):
+                task_id = f"no-history-{index:03d}"
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, project_id, title, status, summary,
+                           created_at, updated_at, closed_at
+                       ) VALUES (?, 'fixture', ?, 'completed', 'safe summary', ?, ?, ?)""",
+                    (task_id, f"Safe task {index}", moment, moment, moment),
+                )
+                Database.upsert_node(
+                    connection,
+                    project_id="fixture",
+                    layer=3,
+                    kind="task",
+                    key=task_id,
+                    label=f"Safe task {index}",
+                    source="task-events",
+                )
+            connection.commit()
+
+        original_connect = self.database.connect
+
+        def render_with_trace():
+            statements: list[str] = []
+
+            @contextmanager
+            def traced_connect():
+                with original_connect() as connection:
+                    connection.set_trace_callback(statements.append)
+                    try:
+                        yield connection
+                    finally:
+                        connection.set_trace_callback(None)
+
+            with patch.object(self.database, "connect", traced_connect):
+                tour = repository_tour_data(self.database, self._project())
+            history_sql = [
+                statement
+                for statement in statements
+                if "repository-tour-history-" in statement
+            ]
+            return tour, history_sql
+
+        first, first_sql = render_with_trace()
+        second, second_sql = render_with_trace()
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first_sql), MAX_TOUR_HISTORY_SQL_QUERIES)
+        self.assertEqual(len(second_sql), MAX_TOUR_HISTORY_SQL_QUERIES)
+        self.assertIn(
+            "TOUR_HISTORY_TRUNCATED",
+            {warning["code"] for warning in first["warnings"]},
+        )
+        self.assertFalse(
+            any(
+                warning["code"] == "TOUR_EVIDENCE_INSUFFICIENT"
+                and "task-history" in warning["message"]
+                for warning in first["warnings"]
+            )
+        )
 
     def test_real_entity_refs_match_node_rows_in_snapshot(self) -> None:
         overrides = {

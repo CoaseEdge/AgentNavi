@@ -31,6 +31,10 @@ MAX_READING_ORDER = 7
 MAX_FRESHNESS_PATHS = 48
 MAX_FRESHNESS_FILE_BYTES = 256 * 1024
 MAX_TOTAL_FRESHNESS_BYTES = 1024 * 1024
+TOUR_HISTORY_PAGE_SIZE = 32
+MAX_TOUR_HISTORY_PAGES = 5
+MAX_TOUR_HISTORY_CANDIDATES = TOUR_HISTORY_PAGE_SIZE * MAX_TOUR_HISTORY_PAGES
+MAX_TOUR_HISTORY_SQL_QUERIES = MAX_TOUR_HISTORY_PAGES * 2
 
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
@@ -1231,19 +1235,26 @@ def _iter_safe_completed_tasks(
         rows = list(
             connection.execute(
                 """
-                SELECT id, title, status, summary, created_at, updated_at, closed_at,
-                       COALESCE(closed_at, updated_at, created_at) AS sort_time
-                FROM tasks
-                WHERE project_id=? AND status='completed'
+                /* repository-tour-task-example-page */
+                SELECT task.id, task.title, task.status, task.summary,
+                       task.created_at, task.updated_at, task.closed_at,
+                       task_node.id AS node_id,
+                       COALESCE(task.closed_at, task.updated_at, task.created_at) AS sort_time
+                FROM tasks task
+                JOIN nodes task_node
+                  ON task_node.project_id=task.project_id
+                 AND task_node.layer=3 AND task_node.kind='task'
+                 AND task_node.key=task.id
+                WHERE task.project_id=? AND task.status='completed'
                   AND (
                     ? IS NULL
-                    OR COALESCE(closed_at, updated_at, created_at) < ?
+                    OR COALESCE(task.closed_at, task.updated_at, task.created_at) < ?
                     OR (
-                      COALESCE(closed_at, updated_at, created_at) = ?
-                      AND id < ?
+                      COALESCE(task.closed_at, task.updated_at, task.created_at) = ?
+                      AND task.id < ?
                     )
                   )
-                ORDER BY sort_time DESC, id DESC
+                ORDER BY sort_time DESC, task.id DESC
                 LIMIT ?
                 """,
                 (
@@ -1268,6 +1279,124 @@ def _iter_safe_completed_tasks(
         cursor_id = str(last["id"])
         if len(rows) < page_size:
             return
+
+
+def _tour_task_history(
+    connection: sqlite3.Connection,
+    project_id: str,
+    evidence_paths: list[str],
+) -> tuple[list[dict[str, Any]], bool]:
+    """批量分页读取任务边，严格限制候选、页数与 SQL 数量。"""
+
+    if not evidence_paths:
+        return [], False
+    path_placeholders = ",".join("?" for _ in evidence_paths)
+    cursor_time: str | None = None
+    cursor_id: str | None = None
+    history: list[dict[str, Any]] = []
+    for page_index in range(MAX_TOUR_HISTORY_PAGES):
+        task_rows = list(
+            connection.execute(
+                """
+                /* repository-tour-history-task-page */
+                SELECT task.id, task.title, task.status, task.summary,
+                       task_node.id AS node_id,
+                       COALESCE(task.closed_at, task.updated_at, task.created_at) AS sort_time
+                FROM tasks task
+                JOIN nodes task_node
+                  ON task_node.project_id=task.project_id
+                 AND task_node.layer=3 AND task_node.kind='task'
+                 AND task_node.key=task.id
+                WHERE task.project_id=? AND task.status='completed'
+                  AND (
+                    ? IS NULL
+                    OR COALESCE(task.closed_at, task.updated_at, task.created_at) < ?
+                    OR (
+                      COALESCE(task.closed_at, task.updated_at, task.created_at) = ?
+                      AND task.id < ?
+                    )
+                  )
+                ORDER BY sort_time DESC, task.id DESC
+                LIMIT ?
+                """,
+                (
+                    project_id,
+                    cursor_time,
+                    cursor_time,
+                    cursor_time,
+                    cursor_id,
+                    TOUR_HISTORY_PAGE_SIZE,
+                ),
+            )
+        )
+        if not task_rows:
+            return history, False
+        safe_tasks: list[dict[str, Any]] = []
+        for row in task_rows:
+            title = _safe_prose(str(row["title"]), limit=240)
+            detail = _safe_prose(str(row["summary"] or row["status"]), limit=320)
+            if title and detail:
+                safe_tasks.append(
+                    {**dict(row), "safe_title": title, "safe_detail": detail}
+                )
+        if safe_tasks:
+            task_by_node = {str(task["node_id"]): task for task in safe_tasks}
+            node_ids = list(task_by_node)
+            node_placeholders = ",".join("?" for _ in node_ids)
+            rank_order = " ".join(
+                f"WHEN ? THEN {index}" for index in range(len(node_ids))
+            )
+            edge_rows = connection.execute(
+                f"""
+                /* repository-tour-history-edge-batch */
+                SELECT edge.id AS edge_id, edge.source_id, edge.target_id,
+                       edge.relation, edge.source, edge.confidence,
+                       file.key AS path
+                FROM edges edge
+                JOIN nodes file
+                  ON file.id=edge.target_id
+                 AND file.layer=1 AND file.kind='file'
+                WHERE edge.project_id=? AND edge.layer=3
+                  AND edge.source_id IN ({node_placeholders})
+                  AND edge.relation IN ('read', 'modified', 'tested', 'searched')
+                  AND file.key IN ({path_placeholders})
+                ORDER BY CASE edge.source_id {rank_order} ELSE {len(node_ids)} END,
+                         edge.relation, file.key COLLATE NOCASE, file.key, edge.id
+                LIMIT ?
+                """,
+                (
+                    project_id,
+                    *node_ids,
+                    *evidence_paths,
+                    *node_ids,
+                    3 - len(history),
+                ),
+            )
+            for row in edge_rows:
+                task = task_by_node[str(row["source_id"])]
+                history.append(
+                    {
+                        "title": task["safe_title"],
+                        "summary": task["safe_detail"],
+                        "edge_id": str(row["edge_id"]),
+                        "source_id": str(row["source_id"]),
+                        "target_id": str(row["target_id"]),
+                        "relation": str(row["relation"]),
+                        "source": str(row["source"]),
+                        "confidence": float(row["confidence"]),
+                        "path": str(row["path"]),
+                    }
+                )
+            if len(history) >= 3:
+                return history, False
+        last = task_rows[-1]
+        cursor_time = str(last["sort_time"])
+        cursor_id = str(last["id"])
+        if len(task_rows) < TOUR_HISTORY_PAGE_SIZE:
+            return history, False
+        if page_index + 1 == MAX_TOUR_HISTORY_PAGES:
+            return history, True
+    raise AssertionError("Tour history 分页必须在显式预算内结束。")
 
 
 def _tour_node_entity(
@@ -1341,62 +1470,11 @@ def repository_tour_data(
         evidence_paths.update(entry["path"] for entry in reading_order)
         project_id = str(project["id"])
         graph_facts = _tour_graph_facts(connection, project_id, evidence_paths)
-        task_example: dict[str, Any] | None = None
-        task_history: list[dict[str, Any]] = []
         ordered_evidence_paths = sorted(evidence_paths)
-        path_placeholders = ",".join("?" for _ in ordered_evidence_paths)
-        for task in _iter_safe_completed_tasks(connection, project_id):
-            task_node = connection.execute(
-                """SELECT id FROM nodes
-                   WHERE project_id=? AND layer=3 AND kind='task' AND key=?""",
-                (project_id, str(task["id"])),
-            ).fetchone()
-            if task_node is None:
-                continue
-            if task_example is None:
-                task_example = {**task, "node_id": str(task_node["id"])}
-            if ordered_evidence_paths and len(task_history) < 3:
-                history_rows = connection.execute(
-                    f"""
-                    SELECT edge.id AS edge_id, edge.source_id, edge.target_id,
-                           edge.relation, edge.source, edge.confidence,
-                           file.key AS path
-                    FROM edges edge
-                    JOIN nodes file
-                      ON file.id=edge.target_id
-                     AND file.layer=1 AND file.kind='file'
-                    WHERE edge.project_id=? AND edge.layer=3
-                      AND edge.source_id=?
-                      AND edge.relation IN ('read', 'modified', 'tested', 'searched')
-                      AND file.key IN ({path_placeholders})
-                    ORDER BY edge.relation, file.key COLLATE NOCASE, file.key, edge.id
-                    LIMIT ?
-                    """,
-                    (
-                        project_id,
-                        str(task_node["id"]),
-                        *ordered_evidence_paths,
-                        3 - len(task_history),
-                    ),
-                )
-                for row in history_rows:
-                    task_history.append(
-                        {
-                            "title": task["safe_title"],
-                            "summary": task["safe_detail"],
-                            "edge_id": str(row["edge_id"]),
-                            "source_id": str(row["source_id"]),
-                            "target_id": str(row["target_id"]),
-                            "relation": str(row["relation"]),
-                            "source": str(row["source"]),
-                            "confidence": float(row["confidence"]),
-                            "path": str(row["path"]),
-                        }
-                    )
-            if task_example is not None and (
-                not ordered_evidence_paths or len(task_history) >= 3
-            ):
-                break
+        task_example = next(_iter_safe_completed_tasks(connection, project_id), None)
+        task_history, history_truncated = _tour_task_history(
+            connection, project_id, ordered_evidence_paths
+        )
 
         def document_entity(stop_id: str, kind: str, value: dict[str, Any]) -> dict[str, Any] | None:
             if not value["evidence"]:
@@ -1714,10 +1792,22 @@ def repository_tour_data(
         }
         tiers: list[dict[str, Any]] = []
         tour_warnings: list[dict[str, Any]] = []
+        if history_truncated:
+            tour_warnings.append({
+                "code": "TOUR_HISTORY_TRUNCATED",
+                "message": (
+                    f"任务历史已达 {MAX_TOUR_HISTORY_CANDIDATES} 个候选的扫描预算"
+                    f"（最多 {MAX_TOUR_HISTORY_PAGES} 页 / "
+                    f"{MAX_TOUR_HISTORY_SQL_QUERIES} 条 SQL），结果可能不完整。"
+                ),
+                "evidence": [],
+            })
         for depth, label, limit in _TOUR_DEPTHS:
             stops = [item for item in tiers_by_depth[depth] if item is not None][:limit]
             tiers.append({"depth": depth, "label": label, "stops": stops})
             missing = sorted(required_kinds[depth] - {item["kind"] for item in stops})
+            if history_truncated and depth == "source-deep-dive":
+                missing = [kind for kind in missing if kind != "task-history"]
             if missing:
                 tour_warnings.append({
                     "code": "TOUR_EVIDENCE_INSUFFICIENT",
