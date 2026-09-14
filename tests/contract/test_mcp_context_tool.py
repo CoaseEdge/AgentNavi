@@ -249,6 +249,56 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertNotIn(str(self.project_root.resolve()), wire)
         self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_architecture_adapter_rejection_returns_public_error_dto(self) -> None:
+        self._add_project()
+        self._add_overview_documents()
+        private_message = f"too much evidence at {self.database.settings.database_path}"
+        evidence = {
+            "kind": "graph", "summary": "mapping", "layer": "L2",
+            "source": "semantic-heuristic", "confidence": 0.8,
+            "path": "src/membership.py",
+        }
+        bad_core = {
+            "project": {"id": "fixture", "name": "Fixture", "kind": "software"},
+            "sourceState": {"status": "ready"},
+            "layout": "cognitive-components",
+            "summary": {
+                "text": "Fixture architecture",
+                "explanationSource": "derived-presentation",
+                "evidence": [evidence],
+            },
+            "components": [{
+                "id": "concept:membership", "name": "Membership", "group": "core",
+                "responsibility": "Handles membership", "paths": ["src/membership.py"],
+                "entity": {
+                    "id": "concept:membership", "kind": "concept", "label": "Membership",
+                    "layer": "L2", "source": "semantic-heuristic", "confidence": 0.8,
+                    "evidence": [evidence],
+                },
+                "evidence": [evidence, evidence, evidence, {**evidence, "summary": private_message}],
+            }],
+            "connections": [], "entryPoints": [],
+            "stats": {"files": 1, "concepts": 1, "tasks": 0, "documentsRead": 2},
+            "warnings": [],
+        }
+
+        with patch(
+            "agentnavi.repository_views.repository_architecture_data",
+            return_value=bad_core,
+        ):
+            result = asyncio.run(
+                self._call(
+                    {"view": "architecture", "project_id": "fixture"},
+                    tool_name="agentnavi_visualize",
+                )
+            )
+
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+        wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+        self.assertNotIn(private_message, wire)
+        self.assertNotIn(str(self.database.settings.database_path), wire)
+
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()
 

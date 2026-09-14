@@ -20,6 +20,13 @@ from .repo_overview import (
 from .repo_tour import _entity, _relation
 
 
+def _required_text(value: Any, field: str, *, limit: int = 320) -> str:
+    candidate = _text(value, field, limit=limit)
+    if not candidate.strip():
+        raise ValueError(f"{field} 不得为空。")
+    return candidate
+
+
 def _stats(value: Any) -> dict[str, int]:
     item = _mapping(value, "architecture.stats")
     return {
@@ -51,15 +58,18 @@ def _architecture_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         paths = [_path(path, "component.paths[]") for path in _sequence(item.get("paths", []), "component.paths")]
         if not paths or len(paths) > 3 or len(paths) != len(set(paths)):
             raise ValueError("architecture component paths 无效。")
-        evidence = _evidence_list(item.get("evidence", []), "component.evidence")
+        raw_evidence = _sequence(item.get("evidence", []), "component.evidence")
+        if len(raw_evidence) > 3:
+            raise ValueError("architecture component evidence 超过上限。")
+        evidence = _evidence_list(raw_evidence, "component.evidence")
         entity = _entity(item.get("entity"), "component.entity")
         if not evidence or entity["id"] != component_id:
             raise ValueError("architecture component provenance 无效。")
         components.append({
             "id": component_id,
-            "name": _text(item.get("name"), "component.name", limit=240),
+            "name": _required_text(item.get("name"), "component.name", limit=240),
             "group": group,
-            "responsibility": _text(item.get("responsibility"), "component.responsibility"),
+            "responsibility": _required_text(item.get("responsibility"), "component.responsibility"),
             "paths": paths,
             "entity": entity,
             "evidence": evidence,
@@ -84,12 +94,16 @@ def _architecture_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     for raw in raw_entries:
         item = _mapping(raw, "architecture.entryPoints[]")
         evidence = _evidence_list(item.get("evidence", []), "entryPoint.evidence")
+        path = _path(item.get("path"), "entryPoint.path")
+        entity = _entity(item.get("entity"), "entryPoint.entity")
         if not evidence:
             raise ValueError("architecture entryPoint evidence 不得为空。")
+        if entity["kind"] != "file" or entity.get("path") != path:
+            raise ValueError("architecture entryPoint entity/path 无效。")
         entries.append({
-            "path": _path(item.get("path"), "entryPoint.path"),
-            "reason": _text(item.get("reason"), "entryPoint.reason"),
-            "entity": _entity(item.get("entity"), "entryPoint.entity"),
+            "path": path,
+            "reason": _required_text(item.get("reason"), "entryPoint.reason"),
+            "entity": entity,
             "evidence": evidence,
         })
     if len({item["path"] for item in entries}) != len(entries):
@@ -97,7 +111,7 @@ def _architecture_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "layout": "cognitive-components",
         "summary": {
-            "text": _text(summary.get("text"), "summary.text"),
+            "text": _required_text(summary.get("text"), "summary.text"),
             "explanationSource": "derived-presentation",
             "evidence": _evidence_list(summary.get("evidence", []), "summary.evidence"),
         },
@@ -135,9 +149,14 @@ def architecture_text(core_data: Mapping[str, Any]) -> str:
             for item in selected
         )
     if payload["connections"]:
+        component_names = {
+            item["id"]: item["name"] for item in payload["components"]
+        }
         lines.extend(["", "真实组件关系："])
         lines.extend(
-            f"- {edge['sourceId']} --{edge['relation']}--> {edge['targetId']} · "
+            f"- {component_names[edge['sourceId']]}（{edge['sourceId']}） "
+            f"--{edge['relation']}--> "
+            f"{component_names[edge['targetId']]}（{edge['targetId']}） · "
             f"{_evidence_reference(edge['evidence'])}"
             for edge in payload["connections"]
         )

@@ -97,7 +97,7 @@ function tourFixture() {
 
 function architectureFixture() {
   const evidence = { kind: "physical-edge", summary: "imports", layer: "L1", source: "ast-import", confidence: 1, path: "src/cli.py" };
-  const entity = (id, label, path) => ({ id, kind: "concept", label, path, layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] });
+  const entity = (id, label, path, kind = "concept") => ({ id, kind, label, path, layer: kind === "file" ? "L1" : "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] });
   return {
     schemaVersion: "agentnavi.vla.v1",
     view: "architecture",
@@ -111,7 +111,7 @@ function architectureFixture() {
         { id: "core", name: "Core", group: "core", responsibility: "处理请求", paths: ["src/core.py"], entity: entity("core", "Core", "src/core.py"), evidence: [evidence] },
       ],
       connections: [{ id: "edge", sourceId: "cli", targetId: "core", relation: "depends_on", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] }],
-      entryPoints: [{ path: "src/cli.py", reason: "入口", entity: entity("file:cli", "src/cli.py", "src/cli.py"), evidence: [evidence] }],
+      entryPoints: [{ path: "src/cli.py", reason: "入口", entity: entity("file:cli", "src/cli.py", "src/cli.py", "file"), evidence: [evidence] }],
       stats: { files: 2, concepts: 2, tasks: 0, documentsRead: 2 },
     },
     warnings: [],
@@ -231,7 +231,7 @@ test("architecture uses grouped cards and only included real connections", () =>
   assert.equal(document.querySelector("#architecture-view").hidden, false);
   assert.equal(document.querySelector("#architecture-entry").children.length, 1);
   assert.equal(document.querySelector("#architecture-core").children.length, 1);
-  assert.equal(document.querySelector("#architecture-connections strong").textContent, "cli → core");
+  assert.equal(document.querySelector("#architecture-connections strong").textContent, "CLI → Core");
   assert.equal(document.querySelector("#architecture-summary script"), null);
   assert.equal(document.querySelector("#architecture-summary").textContent, "[内容含路径，已隐藏]");
 
@@ -248,7 +248,8 @@ test("flow renders a local five-step expandable timeline and clears across views
   assert.equal(document.querySelector("#flow-view").hidden, false);
   assert.equal(document.querySelectorAll("#flow-steps > li").length, 5);
   assert.equal(document.querySelector("#flow-steps details summary strong").textContent, "步骤 1");
-  assert.equal(document.querySelector("#flow-steps details dl dt").textContent, "输入");
+  assert.equal(document.querySelector("#flow-steps details dl dt").textContent, "作用");
+  assert.match(document.querySelector("#flow-steps details dl").textContent, /证据/);
   assert.equal(document.querySelector("#flow-task script"), null);
   assert.equal(document.querySelector("#flow-task").textContent, "[内容含路径，已隐藏]");
 

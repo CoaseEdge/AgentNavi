@@ -27,12 +27,10 @@ function flowStep(step: FlowStep): HTMLLIElement {
   replaceText(number, String(step.step).padStart(2, "0"));
   replaceText(title, step.title);
   summary.append(number, title);
-  const purpose = document.createElement("p");
-  purpose.className = "flow-purpose";
-  replaceText(purpose, step.purpose);
   const facts = document.createElement("dl");
   const files = step.keyFiles.map((file) => file.path).join("、") || "未命中关键源码";
   facts.append(
+    row("作用", step.purpose),
     row("输入", step.input),
     row("输出", step.output),
     row("关键源码", files),
@@ -40,7 +38,7 @@ function flowStep(step: FlowStep): HTMLLIElement {
     row("下一步", step.nextStep ?? "交给 Agent"),
     row("证据", step.evidence.map(evidenceText).join(" · ")),
   );
-  details.append(summary, purpose, facts);
+  details.append(summary, facts);
   item.append(details);
   return item;
 }

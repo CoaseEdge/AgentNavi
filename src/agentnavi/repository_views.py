@@ -39,6 +39,11 @@ MAX_ARCHITECTURE_COMPONENTS = 8
 MAX_ARCHITECTURE_CONNECTIONS = 12
 MAX_ARCHITECTURE_ENTRY_POINTS = 3
 MAX_FLOW_FILES = 18
+MAX_STRUCTURE_MAPPING_CANDIDATES = 48
+MAX_STRUCTURE_MAPPING_QUERIES = 1
+_STRUCTURE_FILE_RELATIONS = (
+    "implemented_by", "tested_by", "documented_by", "configured_by",
+)
 
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
@@ -463,9 +468,16 @@ def _execution_workflow(
 ) -> tuple[list[dict[str, Any]], bool]:
     """只接受明示的运行主流程，避免把安装或阅读清单当成执行链。"""
 
-    heading_terms = (
-        "主流程", "执行流程", "任务流程", "workflow",
-        "request flow", "data flow",
+    execution_terms = (
+        "主流程", "执行流程", "任务流程", "请求流程", "数据流", "运行流程",
+        "main flow", "execution flow", "task flow", "request flow", "data flow",
+        "runtime flow", "processing flow", "workflow",
+    )
+    excluded_terms = (
+        "事件", "生命周期", "安装", "设置", "发布", "迁移", "清单", "检查表",
+        "持续集成", "流水线", "event", "lifecycle", "installation", "install",
+        "setup", "release", "migration", "checklist", "continuous integration",
+        "ci workflow", "ci flow", "pipeline",
     )
     groups: list[tuple[int, int, list[tuple[int, int, str, str]]]] = []
     for doc_index, document in enumerate(documents):
@@ -484,7 +496,10 @@ def _execution_workflow(
                 if accepted_heading and len(current) >= 5:
                     groups.append((doc_index, group_start, current))
                 title = " ".join(heading.group(1).lower().split())
-                accepted_heading = any(term in title for term in heading_terms)
+                accepted_heading = (
+                    any(term in title for term in execution_terms)
+                    and not any(term in title for term in excluded_terms)
+                )
                 group_start = line_number
                 current = []
                 continue
@@ -1049,6 +1064,9 @@ def _repository_overview_data(
                 {
                     "documents": documents,
                     "freshness": dict(freshness),
+                    "root": root,
+                    "states": states,
+                    "freshnessBudget": freshness_budget,
                 }
             )
 
@@ -1925,6 +1943,7 @@ def _architecture_connection_evidence(
     project_id: str,
     edge: sqlite3.Row,
     fresh_paths: set[str],
+    component_paths: dict[str, set[str]],
 ) -> list[dict[str, Any]]:
     if str(edge["source"]) == "human-overlay":
         return [{
@@ -1955,6 +1974,8 @@ def _architecture_connection_evidence(
             or not is_canonical_relative_path(target_path)
             or source_path not in fresh_paths
             or target_path not in fresh_paths
+            or source_path not in component_paths.get(str(edge["source_id"]), set())
+            or target_path not in component_paths.get(str(edge["target_id"]), set())
         ):
             continue
         physical = connection.execute(
@@ -2024,76 +2045,147 @@ def _structure_snapshot(
         )
     }
 
+    selected_modules = [
+        module for module in modules[:MAX_ARCHITECTURE_COMPONENTS]
+        if module["paths"] and module["evidence"]
+    ]
+    mapping_rows: list[sqlite3.Row] = []
+    mapping_truncated = False
+    if selected_modules:
+        module_ids = [str(module["id"]) for module in selected_modules]
+        module_placeholders = ",".join("?" for _ in module_ids)
+        relation_placeholders = ",".join("?" for _ in _STRUCTURE_FILE_RELATIONS)
+        mapping_parameters: list[Any] = [
+            project_id, *module_ids, *_STRUCTURE_FILE_RELATIONS,
+            MAX_STRUCTURE_MAPPING_CANDIDATES + 1,
+        ]
+        mapping_rows = list(connection.execute(
+            f"""-- repository-structure-mappings
+                SELECT concept.id AS concept_id, concept.key AS concept_key,
+                       concept.label AS concept_label,
+                       concept.data_json AS concept_data_json,
+                       concept.source AS concept_source,
+                       concept.confidence AS concept_confidence,
+                       edge.id AS edge_id, edge.source_id, edge.target_id,
+                       edge.relation, edge.source AS edge_source,
+                       edge.confidence AS edge_confidence,
+                       file.id AS file_id, file.key AS path, file.label AS file_label,
+                       file.source AS file_source, file.confidence AS file_confidence
+                FROM nodes concept
+                JOIN edges edge
+                  ON edge.project_id=concept.project_id AND edge.layer=2
+                 AND edge.source_id=concept.id
+                JOIN nodes file
+                  ON file.project_id=concept.project_id AND file.id=edge.target_id
+                 AND file.layer=1 AND file.kind='file'
+                WHERE concept.project_id=? AND concept.layer=2 AND concept.kind='concept'
+                  AND concept.id IN ({module_placeholders})
+                  AND edge.relation IN ({relation_placeholders})
+                ORDER BY concept.id, file.key COLLATE NOCASE, file.key,
+                         CASE edge.relation
+                           WHEN 'implemented_by' THEN 0 WHEN 'tested_by' THEN 1
+                           WHEN 'documented_by' THEN 2 WHEN 'configured_by' THEN 3
+                           ELSE 4 END,
+                         edge.id
+                LIMIT ?""",
+            mapping_parameters,
+        ))
+        mapping_truncated = len(mapping_rows) > MAX_STRUCTURE_MAPPING_CANDIDATES
+        mapping_rows = mapping_rows[:MAX_STRUCTURE_MAPPING_CANDIDATES]
+
+    rows_by_module: dict[str, list[sqlite3.Row]] = {}
+    seen_mappings: set[tuple[str, str]] = set()
+    structure_freshness = snapshot_context.get("freshness", {})
+    structure_states = snapshot_context.get("states", {})
+    structure_budget = snapshot_context.get("freshnessBudget")
+    structure_root = snapshot_context.get("root")
+    try:
+        resolved_structure_root = (
+            structure_root.resolve(strict=True)
+            if isinstance(structure_root, Path) else None
+        )
+    except (OSError, RuntimeError):
+        resolved_structure_root = None
+    for row in mapping_rows:
+        module_id = str(row["concept_id"])
+        path = str(row["path"])
+        mapping_key = (module_id, path)
+        if (
+            path not in structure_freshness
+            and resolved_structure_root is not None
+            and isinstance(structure_budget, _FreshnessBudget)
+        ):
+            _fresh_path(
+                resolved_structure_root, path, structure_states,
+                structure_freshness, structure_budget,
+            )
+        if (
+            mapping_key in seen_mappings
+            or not structure_freshness.get(path, False)
+            or not is_canonical_relative_path(path)
+        ):
+            continue
+        fresh_paths.add(path)
+        seen_mappings.add(mapping_key)
+        rows_by_module.setdefault(module_id, []).append(row)
+
     components: list[dict[str, Any]] = []
     file_facts: list[dict[str, Any]] = []
     component_ids: list[str] = []
-    for module in modules[:MAX_ARCHITECTURE_COMPONENTS]:
-        node = connection.execute(
-            """SELECT id, key, label, data_json, source, confidence
-               FROM nodes WHERE project_id=? AND id=? AND layer=2 AND kind='concept'""",
-            (project_id, module["id"]),
-        ).fetchone()
-        if node is None or not module["paths"] or not module["evidence"]:
+    component_paths: dict[str, set[str]] = {}
+    for module in selected_modules:
+        module_id = str(module["id"])
+        rows = rows_by_module.get(module_id, [])[:3]
+        if not rows:
             continue
-        path_placeholders = ",".join("?" for _ in module["paths"])
-        mapping_rows = list(
-            connection.execute(
-                f"""SELECT edge.id, edge.source_id, edge.target_id, edge.relation,
-                           edge.source, edge.confidence, file.key AS path
-                    FROM edges edge
-                    JOIN nodes file
-                      ON file.id=edge.target_id AND file.layer=1 AND file.kind='file'
-                    WHERE edge.project_id=? AND edge.layer=2 AND edge.source_id=?
-                      AND file.key IN ({path_placeholders})
-                    ORDER BY edge.relation, file.key COLLATE NOCASE, file.key, edge.id""",
-                (project_id, module["id"], *module["paths"]),
-            )
-        )
-        mappings: list[dict[str, Any]] = []
+        first_row = rows[0]
         relation_counts: dict[str, int] = {}
-        data = json_loads(node["data_json"], {})
+        data = json_loads(first_row["concept_data_json"], {})
         keywords = data.get("keywords", [])
-        match_terms = {
-            str(node["key"]), str(node["label"]),
+        common_match_terms = {
+            str(first_row["concept_key"]), str(first_row["concept_label"]),
             *(str(item) for item in keywords if isinstance(item, str)),
         }
-        for row in mapping_rows:
+        for row in rows:
             path = str(row["path"])
-            if path not in fresh_paths:
-                continue
             evidence = [_file_evidence(path, "概念与已核对仓库文件的真实映射。")]
-            entity = _tour_node_entity(
-                connection, project_id, str(row["target_id"]), evidence, path=path
-            )
-            if entity is None:
-                continue
+            entity = {
+                "id": str(row["file_id"]),
+                "kind": "file",
+                "label": str(row["file_label"]),
+                "path": path,
+                "layer": "L1",
+                "source": str(row["file_source"]),
+                "confidence": float(row["file_confidence"]),
+                "evidence": evidence,
+            }
             relation = {
-                "id": str(row["id"]),
+                "id": str(row["edge_id"]),
                 "sourceId": str(row["source_id"]),
                 "targetId": str(row["target_id"]),
                 "relation": str(row["relation"]),
                 "layer": "L2",
-                "source": str(row["source"]),
-                "confidence": float(row["confidence"]),
+                "source": str(row["edge_source"]),
+                "confidence": float(row["edge_confidence"]),
                 "evidence": evidence,
             }
-            mappings.append(relation)
             relation_counts[relation["relation"]] = relation_counts.get(relation["relation"], 0) + 1
-            match_terms.update((path, PurePosixPath(path).stem))
             file_facts.append({
                 "path": path,
-                "moduleId": str(node["id"]),
-                "moduleName": str(node["label"]),
+                "moduleId": module_id,
+                "moduleName": str(first_row["concept_label"]),
                 "entity": entity,
                 "relation": relation,
                 "evidence": evidence,
-                "matchTerms": sorted(match_terms),
+                "matchTerms": sorted({
+                    *common_match_terms, path, PurePosixPath(path).stem,
+                }),
             })
-        if not mappings:
-            continue
-        if any(path in entry_paths for path in module["paths"]):
+        selected_paths = {str(row["path"]) for row in rows}
+        component_paths[module_id] = selected_paths
+        if any(path in entry_paths for path in selected_paths):
             group = "entry"
-        elif any(item["relation"] == "implemented_by" for item in mappings):
+        elif "implemented_by" in relation_counts:
             group = "core"
         else:
             group = "support"
@@ -2101,21 +2193,25 @@ def _structure_snapshot(
             f"{relation} 关联 {count} 个已核对文件"
             for relation, count in sorted(relation_counts.items())
         )
-        entity = _tour_node_entity(
-            connection, project_id, str(node["id"]), module["evidence"]
-        )
-        if entity is None:
-            continue
+        entity = {
+            "id": module_id,
+            "kind": "concept",
+            "label": str(first_row["concept_label"]),
+            "layer": "L2",
+            "source": str(first_row["concept_source"]),
+            "confidence": float(first_row["concept_confidence"]),
+            "evidence": module["evidence"][:3],
+        }
         components.append({
-            "id": str(node["id"]),
-            "name": str(node["label"]),
+            "id": module_id,
+            "name": str(first_row["concept_label"]),
             "group": group,
             "responsibility": responsibility,
-            "paths": sorted({item["path"] for item in file_facts if item["moduleId"] == node["id"]})[:3],
+            "paths": sorted(selected_paths, key=lambda item: (item.lower(), item))[:3],
             "entity": entity,
             "evidence": module["evidence"][:3],
         })
-        component_ids.append(str(node["id"]))
+        component_ids.append(module_id)
 
     connections: list[dict[str, Any]] = []
     dropped_connections = False
@@ -2132,7 +2228,7 @@ def _structure_snapshot(
         )
         for row in rows:
             evidence = _architecture_connection_evidence(
-                connection, project_id, row, fresh_paths
+                connection, project_id, row, fresh_paths, component_paths
             )
             if not evidence:
                 dropped_connections = True
@@ -2181,6 +2277,7 @@ def _structure_snapshot(
         "entryPoints": entry_points,
         "fileFacts": file_facts,
         "droppedConnections": dropped_connections,
+        "mappingTruncated": mapping_truncated,
     }
 
 
@@ -2210,7 +2307,7 @@ def repository_architecture_data(
         summary = {
             "text": (
                 "系统由 " + "、".join(component["name"] for component in components) + " 构成。"
-                if components else ""
+                if components else "暂无足够的组件证据。"
             ),
             "explanationSource": "derived-presentation",
             "evidence": summary_evidence,
@@ -2226,6 +2323,15 @@ def repository_architecture_data(
             warnings.append({
                 "code": "ARCHITECTURE_CONNECTIONS_TRUNCATED",
                 "message": "部分概念连接缺少可核验物理证据或超过上限，已剪除。",
+                "evidence": [],
+            })
+        if snapshot["mappingTruncated"]:
+            warnings.append({
+                "code": "REPOSITORY_STRUCTURE_MAPPINGS_TRUNCATED",
+                "message": (
+                    f"组件文件映射达到 {MAX_STRUCTURE_MAPPING_CANDIDATES} 个候选 / "
+                    f"{MAX_STRUCTURE_MAPPING_QUERIES} 条 SQL 的预算，结果已稳定截断。"
+                ),
                 "evidence": [],
             })
         source_state = {
@@ -2274,11 +2380,21 @@ def repository_flow_data(
         snapshot = _structure_snapshot(database, project, connection)
         overview = snapshot["overview"]
         workflow, truncated = _execution_workflow(snapshot["documents"])
-        safe_query = _safe_prose(query, limit=320) if isinstance(query, str) else None
+        query_provided = isinstance(query, str)
+        query_redacted = query_provided and contains_private_path(query)
+        safe_query = (
+            _safe_prose(query, limit=320)
+            if query_provided and not query_redacted else None
+        )
         example_task: dict[str, Any] | None = None
-        if safe_query:
+        if query_redacted:
+            example_task = {
+                "title": "[查询含路径，已隐藏]",
+                "source": "request-redacted",
+            }
+        elif safe_query:
             example_task = {"title": safe_query, "source": "request"}
-        else:
+        elif not query_provided:
             task = next(_iter_safe_completed_tasks(connection, str(project["id"])), None)
             if task is not None:
                 evidence = [{
@@ -2352,6 +2468,21 @@ def repository_flow_data(
             })
 
         warnings: list[dict[str, Any]] = []
+        if query_redacted:
+            warnings.append({
+                "code": "FLOW_QUERY_REDACTED",
+                "message": "任务描述包含本地绝对路径或文件 URI，已隐藏且未回退历史任务。",
+                "evidence": [],
+            })
+        if snapshot["mappingTruncated"]:
+            warnings.append({
+                "code": "REPOSITORY_STRUCTURE_MAPPINGS_TRUNCATED",
+                "message": (
+                    f"组件文件映射达到 {MAX_STRUCTURE_MAPPING_CANDIDATES} 个候选 / "
+                    f"{MAX_STRUCTURE_MAPPING_QUERIES} 条 SQL 的预算，结果已稳定截断。"
+                ),
+                "evidence": [],
+            })
         if not workflow:
             warnings.append({
                 "code": "FLOW_EXECUTION_EVIDENCE_MISSING",
@@ -2408,6 +2539,8 @@ __all__ = [
     "MAX_TOTAL_DOCUMENT_BYTES",
     "MAX_FRESHNESS_FILE_BYTES",
     "MAX_TOTAL_FRESHNESS_BYTES",
+    "MAX_STRUCTURE_MAPPING_CANDIDATES",
+    "MAX_STRUCTURE_MAPPING_QUERIES",
     "repository_architecture_data",
     "repository_flow_data",
     "repository_overview_data",

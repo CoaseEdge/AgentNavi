@@ -223,8 +223,8 @@ const emptyWorkflow = structuredClone(overviewFixture);
 emptyWorkflow.data.workflow = [];
 assert(parseRepositoryOverviewView(emptyWorkflow)?.data.workflow.length === 0, "空 workflow 是合法的证据不足状态");
 
-const architectureEntity = (id: string, label: string, path: string) => ({
-  id, kind: "concept", label, path, layer: "L2", source: "semantic-heuristic", confidence: 0.8,
+const architectureEntity = (id: string, label: string, path: string, kind = "concept") => ({
+  id, kind, label, path, layer: kind === "file" ? "L1" : "L2", source: "semantic-heuristic", confidence: 0.8,
   evidence: [tourEvidence],
 });
 const architectureFixture = {
@@ -240,7 +240,7 @@ const architectureFixture = {
       { id: "core", name: "Core", group: "core", responsibility: "处理请求", paths: ["src/core.py"], entity: architectureEntity("core", "Core", "src/core.py"), evidence: [tourEvidence] },
     ],
     connections: [{ id: "edge:cli-core", sourceId: "cli", targetId: "core", relation: "depends_on", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [tourEvidence] }],
-    entryPoints: [{ path: "src/cli.py", reason: "命令入口", entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py"), evidence: [tourEvidence] }],
+    entryPoints: [{ path: "src/cli.py", reason: "命令入口", entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py", "file"), evidence: [tourEvidence] }],
     stats: { files: 2, concepts: 2, tasks: 0, documentsRead: 2 },
   },
   warnings: [],
@@ -255,6 +255,19 @@ const duplicateComponent = structuredClone(architectureFixture);
 duplicateComponent.data.components[1]!.id = "cli";
 duplicateComponent.data.components[1]!.entity.id = "cli";
 assert(parseArchitectureView(duplicateComponent) === undefined, "应拒绝重复 component id");
+for (const mutate of [
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.kind = "concept"; },
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.path = "src/other.py"; },
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.reason = ""; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.name = ""; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.responsibility = ""; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.evidence = [tourEvidence, tourEvidence, tourEvidence, tourEvidence]; },
+  (value: typeof architectureFixture) => { value.data.summary.text = ""; },
+]) {
+  const malformed = structuredClone(architectureFixture);
+  mutate(malformed);
+  assert(parseArchitectureView(malformed) === undefined, "应拒绝 Architecture 的空文本或错配 entry entity");
+}
 
 const flowFixture = {
   schemaVersion: "agentnavi.vla.v1",
@@ -273,7 +286,7 @@ const flowFixture = {
       output: index === 4 ? "主流程结果" : `交给步骤 ${index + 2}`,
       keyFiles: index === 0 ? [{
         path: "src/cli.py", moduleId: "cli", moduleName: "CLI",
-        entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py"),
+        entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py", "file"),
         relation: { id: "edge:cli-file", sourceId: "cli", targetId: "file:cli", relation: "implemented_by", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [tourEvidence] },
         evidence: [tourEvidence],
       }] : [],
@@ -298,6 +311,22 @@ assert(parseFlowView(duplicateFlow) === undefined, "应拒绝重复 Flow id");
 const wrongNextFlow = structuredClone(flowFixture);
 wrongNextFlow.data.steps[0]!.nextStep = "步骤 5";
 assert(parseFlowView(wrongNextFlow) === undefined, "应拒绝未指向紧邻步骤的 nextStep");
+for (const mutate of [
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.moduleId = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.moduleName = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.kind = "concept"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.path = "src/other.py"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.sourceId = "other"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.targetId = "other"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.purpose = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.input = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.output = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.why = ""; },
+]) {
+  const malformed = structuredClone(flowFixture);
+  mutate(malformed);
+  assert(parseFlowView(malformed) === undefined, "应拒绝 Flow 的空文本或错配 keyFile provenance");
+}
 const shortFlow = structuredClone(flowFixture);
 shortFlow.data.steps = shortFlow.data.steps.slice(0, 4);
 assert(parseFlowView(shortFlow) === undefined, "应拒绝非空但少于 5 步的 Flow");

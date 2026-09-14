@@ -38,6 +38,9 @@ export function clearArchitecture(): void {
 
 export function renderArchitecture(view: ArchitectureView): void {
   replaceText(byId("architecture-summary"), view.data.summary.text);
+  const componentNames = new Map(
+    view.data.components.map((component) => [component.id, component.name]),
+  );
   for (const group of ["entry", "core", "support"] as const) {
     byId(`architecture-${group}`).replaceChildren(
       ...view.data.components.filter((component) => component.group === group).map(componentCard),
@@ -46,7 +49,10 @@ export function renderArchitecture(view: ArchitectureView): void {
   byId("architecture-connections").replaceChildren(...view.data.connections.map((connection) => {
     const item = document.createElement("li");
     const direction = document.createElement("strong");
-    replaceText(direction, `${connection.sourceId} → ${connection.targetId}`);
+    replaceText(
+      direction,
+      `${componentNames.get(connection.sourceId)} → ${componentNames.get(connection.targetId)}`,
+    );
     const relation = document.createElement("span");
     replaceText(relation, connection.relation);
     const evidence = document.createElement("small");

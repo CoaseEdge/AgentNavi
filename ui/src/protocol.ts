@@ -673,6 +673,20 @@ function repositoryStats(value: unknown): RepositoryOverviewView["data"]["stats"
   };
 }
 
+function nonBlank(value: string | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function completeEntity(entity: TourStop["entity"]): boolean {
+  return nonBlank(entity.id) && nonBlank(entity.kind) && nonBlank(entity.label) &&
+    nonBlank(entity.source) && entity.evidence.length > 0;
+}
+
+function completeRelation(relation: TourStop["relations"][number]): boolean {
+  return nonBlank(relation.id) && nonBlank(relation.sourceId) && nonBlank(relation.targetId) &&
+    nonBlank(relation.relation) && nonBlank(relation.source) && relation.evidence.length > 0;
+}
+
 export function parseArchitectureView(value: unknown): ArchitectureView | undefined {
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "architecture" || common.data.layout !== "cognitive-components") {
@@ -692,16 +706,20 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
     const entity = tourEntity(item?.entity);
     const rawPaths = Array.isArray(item?.paths) ? item.paths : [];
     const paths = rawPaths.map((path) => text(path));
-    const evidence = evidenceList(item?.evidence);
+    const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : [];
+    const evidence = evidenceList(rawEvidence);
+    const responsibility = displayText(item?.responsibility);
     if (
-      !item || !id || !name || !entity || entity.id !== id ||
+      !item || !nonBlank(id) || !nonBlank(name) || !nonBlank(responsibility) ||
+      !entity || !completeEntity(entity) || entity.id !== id ||
       (group !== "entry" && group !== "core" && group !== "support") ||
       paths.length === 0 || paths.length > 3 || new Set(paths).size !== paths.length ||
-      paths.some((path) => !isCanonicalRelativePath(path)) || evidence.length === 0
+      paths.some((path) => !isCanonicalRelativePath(path)) || rawEvidence.length > 3 ||
+      evidence.length !== rawEvidence.length || evidence.length === 0
     ) return [];
     return [{
       id, name, group: group as ArchitectureComponent["group"],
-      responsibility: displayText(item.responsibility), paths, entity, evidence,
+      responsibility, paths, entity, evidence,
     }];
   });
   const componentIds = components.map((component) => component.id);
@@ -715,7 +733,7 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
   const included = new Set(componentIds);
   if (
     connections.length !== rawConnections.length || new Set(connectionIds).size !== connectionIds.length ||
-    connections.some((edge) => !included.has(edge.sourceId) || !included.has(edge.targetId) || edge.evidence.length === 0)
+    connections.some((edge) => !completeRelation(edge) || !included.has(edge.sourceId) || !included.has(edge.targetId))
   ) return undefined;
   const rawEntries = Array.isArray(common.data.entryPoints) ? common.data.entryPoints : [];
   if (rawEntries.length > 3) return undefined;
@@ -724,12 +742,18 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
     const path = text(item?.path);
     const entity = tourEntity(item?.entity);
     const evidence = evidenceList(item?.evidence);
-    if (!item || !isCanonicalRelativePath(path) || !entity || evidence.length === 0) return [];
-    return [{ path, reason: displayText(item.reason), entity, evidence }];
+    const reason = displayText(item?.reason);
+    if (
+      !item || !isCanonicalRelativePath(path) || !nonBlank(reason) || !entity ||
+      !completeEntity(entity) || entity.kind !== "file" || entity.path !== path || evidence.length === 0
+    ) return [];
+    return [{ path, reason, entity, evidence }];
   });
   if (entryPoints.length !== rawEntries.length || new Set(entryPoints.map((entry) => entry.path)).size !== entryPoints.length) {
     return undefined;
   }
+  const summaryText = displayText(summary.text);
+  if (!nonBlank(summaryText)) return undefined;
   return {
     schemaVersion: SCHEMA_VERSION,
     view: "architecture",
@@ -738,7 +762,7 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
     data: {
       layout: "cognitive-components",
       summary: {
-        text: displayText(summary.text), explanationSource: "derived-presentation",
+        text: summaryText, explanationSource: "derived-presentation",
         evidence: evidenceList(summary.evidence),
       },
       components,
@@ -769,7 +793,7 @@ export function parseFlowView(value: unknown): FlowView | undefined {
     const expectedNext = index + 1 < rawSteps.length ? record(rawSteps[index + 1])?.title : null;
     const evidence = evidenceList(item?.evidence);
     if (
-      !item || step !== index + 1 || !id || ids.has(id) || !title ||
+      !item || step !== index + 1 || !nonBlank(id) || ids.has(id) || !nonBlank(title) ||
       item.explanationSource !== "derived-presentation" || item.nextStep !== expectedNext || evidence.length === 0
     ) return undefined;
     ids.add(id);
@@ -782,28 +806,41 @@ export function parseFlowView(value: unknown): FlowView | undefined {
       const entity = tourEntity(file?.entity);
       const relation = tourRelation(file?.relation);
       const fileEvidence = evidenceList(file?.evidence);
-      if (!file || !isCanonicalRelativePath(path) || paths.has(path) || !entity || !relation || fileEvidence.length === 0) {
+      const moduleId = displayText(file?.moduleId);
+      const moduleName = displayText(file?.moduleName);
+      if (
+        !file || !isCanonicalRelativePath(path) || paths.has(path) ||
+        !nonBlank(moduleId) || !nonBlank(moduleName) || !entity || !completeEntity(entity) ||
+        entity.kind !== "file" || entity.path !== path || !relation || !completeRelation(relation) ||
+        relation.sourceId !== moduleId || relation.targetId !== entity.id ||
+        relation.evidence.length === 0 || fileEvidence.length === 0
+      ) {
         return undefined;
       }
       paths.add(path);
       keyFiles.push({
         path,
-        moduleId: displayText(file.moduleId),
-        moduleName: displayText(file.moduleName),
+        moduleId,
+        moduleName,
         entity,
         relation,
         evidence: fileEvidence,
       });
     }
+    const purpose = displayText(item.purpose);
+    const input = displayText(item.input);
+    const output = displayText(item.output);
+    const why = displayText(item.why);
+    if (!nonBlank(purpose) || !nonBlank(input) || !nonBlank(output) || !nonBlank(why)) return undefined;
     steps.push({
       step,
       id,
       title,
-      purpose: displayText(item.purpose),
-      input: displayText(item.input),
-      output: displayText(item.output),
+      purpose,
+      input,
+      output,
       keyFiles,
-      why: displayText(item.why),
+      why,
       nextStep: item.nextStep === null ? null : displayText(item.nextStep),
       explanationSource: "derived-presentation",
       evidence,
@@ -816,7 +853,7 @@ export function parseFlowView(value: unknown): FlowView | undefined {
     const task = record(rawTask);
     const title = displayText(task?.title);
     const source = displayText(task?.source);
-    if (!task || !title || !source) return undefined;
+    if (!task || !nonBlank(title) || !nonBlank(source)) return undefined;
     const entity = task.entity === undefined ? undefined : tourEntity(task.entity);
     const evidence = task.evidence === undefined ? undefined : evidenceList(task.evidence);
     if ((task.entity !== undefined && !entity) || (task.evidence !== undefined && !evidence?.length)) return undefined;

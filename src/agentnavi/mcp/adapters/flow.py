@@ -20,6 +20,13 @@ from .repo_overview import (
 from .repo_tour import _entity, _relation
 
 
+def _required_text(value: Any, field: str, *, limit: int = 320) -> str:
+    candidate = _text(value, field, limit=limit)
+    if not candidate.strip():
+        raise ValueError(f"{field} 不得为空。")
+    return candidate
+
+
 def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     data = _mapping(core_data, "flow")
     if data.get("layout") != "numbered-task-flow":
@@ -29,8 +36,8 @@ def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     if raw_task is not None:
         item = _mapping(raw_task, "flow.exampleTask")
         task = {
-            "title": _text(item.get("title"), "exampleTask.title"),
-            "source": _text(item.get("source"), "exampleTask.source", limit=120),
+            "title": _required_text(item.get("title"), "exampleTask.title"),
+            "source": _required_text(item.get("source"), "exampleTask.source", limit=120),
             **({"entity": _entity(item.get("entity"), "exampleTask.entity")} if item.get("entity") is not None else {}),
             **({"evidence": _evidence_list(item.get("evidence", []), "exampleTask.evidence")} if item.get("evidence") is not None else {}),
         }
@@ -46,7 +53,7 @@ def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(position, bool) or not isinstance(position, int) or position != index + 1:
             raise ValueError("flow.steps 必须连续编号。")
         step_id = _text(item.get("id"), "flow.step.id", limit=240)
-        title = _text(item.get("title"), "flow.step.title", limit=240)
+        title = _required_text(item.get("title"), "flow.step.title", limit=240)
         if not step_id or step_id in ids or item.get("explanationSource") != "derived-presentation":
             raise ValueError("flow step id/source 无效。")
         ids.add(step_id)
@@ -65,15 +72,23 @@ def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
             file_item = _mapping(raw_file, "flow.step.keyFiles[]")
             path = _path(file_item.get("path"), "keyFile.path")
             evidence = _evidence_list(file_item.get("evidence", []), "keyFile.evidence")
-            if path in all_paths or not evidence:
+            module_id = _required_text(file_item.get("moduleId"), "keyFile.moduleId", limit=240)
+            module_name = _required_text(file_item.get("moduleName"), "keyFile.moduleName", limit=240)
+            entity = _entity(file_item.get("entity"), "keyFile.entity")
+            relation = _relation(file_item.get("relation"), "keyFile.relation")
+            if (
+                path in all_paths or not evidence or entity["kind"] != "file"
+                or entity.get("path") != path or relation["sourceId"] != module_id
+                or relation["targetId"] != entity["id"]
+            ):
                 raise ValueError("flow keyFile path/evidence 无效。")
             all_paths.add(path)
             key_files.append({
                 "path": path,
-                "moduleId": _text(file_item.get("moduleId"), "keyFile.moduleId", limit=240),
-                "moduleName": _text(file_item.get("moduleName"), "keyFile.moduleName", limit=240),
-                "entity": _entity(file_item.get("entity"), "keyFile.entity"),
-                "relation": _relation(file_item.get("relation"), "keyFile.relation"),
+                "moduleId": module_id,
+                "moduleName": module_name,
+                "entity": entity,
+                "relation": relation,
                 "evidence": evidence,
             })
         evidence = _evidence_list(item.get("evidence", []), "flow.step.evidence")
@@ -83,11 +98,11 @@ def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
             "step": position,
             "id": step_id,
             "title": title,
-            "purpose": _text(item.get("purpose"), "flow.step.purpose"),
-            "input": _text(item.get("input"), "flow.step.input"),
-            "output": _text(item.get("output"), "flow.step.output"),
+            "purpose": _required_text(item.get("purpose"), "flow.step.purpose"),
+            "input": _required_text(item.get("input"), "flow.step.input"),
+            "output": _required_text(item.get("output"), "flow.step.output"),
             "keyFiles": key_files,
-            "why": _text(item.get("why"), "flow.step.why"),
+            "why": _required_text(item.get("why"), "flow.step.why"),
             "nextStep": _text(next_step, "flow.step.nextStep", limit=240) if next_step is not None else None,
             "explanationSource": "derived-presentation",
             "evidence": evidence,
