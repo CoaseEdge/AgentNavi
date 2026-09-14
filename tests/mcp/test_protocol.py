@@ -224,6 +224,31 @@ class VLAProtocolContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "不得包含绝对路径"):
                     factory()
 
+    def test_absolute_path_canaries_cover_object_keys_but_allow_relative_path_indexes(self) -> None:
+        private_keys = (
+            "/private/project/file.py",
+            "file:///private/project/file.py",
+            "C:\\private\\project\\file.py",
+            "\\\\server\\private\\file.py",
+        )
+        for key in private_keys:
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "不得包含绝对路径"):
+                    AgentNaviView(
+                        view="context",
+                        project=Project(id="agentnavi", name="AgentNavi", kind="software"),
+                        source_state=SourceState(status="ready"),
+                        data={"pathIndex": {key: {"score": 1.0}}},
+                    )
+
+        view = AgentNaviView(
+            view="context",
+            project=Project(id="agentnavi", name="AgentNavi", kind="software"),
+            source_state=SourceState(status="ready"),
+            data={"pathIndex": {"src/agentnavi/query.py": {"score": 1.0}}},
+        )
+        self.assertIn("src/agentnavi/query.py", view.to_dict()["data"]["pathIndex"])
+
     def test_evidence_line_numbers_reject_bool_and_invalid_ranges(self) -> None:
         base = {
             "kind": "source-location",
@@ -267,6 +292,14 @@ class VLAProtocolContractTests(unittest.TestCase):
     def test_extensions_are_additive_and_cannot_override_contract(self) -> None:
         view = self.make_view()
         self.assertEqual(view.to_dict()["traceId"], "trace-1")
+        localized = AgentNaviView(
+            view="context",
+            project=Project(id="agentnavi", name="AgentNavi", kind="software"),
+            source_state=SourceState(status="ready"),
+            data={},
+            extensions={"说明": "一", "标签": "二"},
+        ).to_dict()
+        self.assertEqual((localized["说明"], localized["标签"]), ("一", "二"))
         with self.assertRaisesRegex(ValueError, "保留字段"):
             AgentNaviView(
                 view="context",
@@ -275,6 +308,16 @@ class VLAProtocolContractTests(unittest.TestCase):
                 data={},
                 extensions={"schemaVersion": "future"},
             )
+        for key in ("SchemaVersion", "schema_version", "schema-version"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "保留字段"):
+                    AgentNaviView(
+                        view="context",
+                        project=Project(id="agentnavi", name="AgentNavi", kind="software"),
+                        source_state=SourceState(status="ready"),
+                        data={},
+                        extensions={key: "future"},
+                    )
         with self.assertRaisesRegex(ValueError, "保留字段"):
             Evidence(
                 kind="source-location",
@@ -284,6 +327,37 @@ class VLAProtocolContractTests(unittest.TestCase):
                 confidence=1.0,
                 extensions={"path": "docs/README.md"},
             )
+        for key in ("Path", "line_start", "line-start"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "保留字段"):
+                    Evidence(
+                        kind="source-location",
+                        summary="证据",
+                        layer="L1",
+                        source="repository",
+                        confidence=1.0,
+                        extensions={key: "冲突"},
+                    )
+
+    def test_graph_edges_require_traceable_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "至少包含一个 Evidence"):
+            GraphEdge(
+                id="edge:a-depends-b",
+                source_id="concept:a",
+                target_id="concept:b",
+                relation="depends_on",
+                layer="L2",
+                source="semantic-heuristic",
+                confidence=0.78,
+            )
+
+    def test_source_state_status_is_closed(self) -> None:
+        for status in ("ready", "partial", "stale"):
+            self.assertEqual(SourceState(status=status).to_dict()["status"], status)
+        for status in ("missing", "error", "READY", True):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(ValueError, "ready、partial 或 stale"):
+                    SourceState(status=status)  # type: ignore[arg-type]
 
     def test_frozen_dtos_take_defensive_snapshots(self) -> None:
         source = {"items": [{"label": "before"}]}

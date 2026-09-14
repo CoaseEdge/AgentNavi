@@ -19,7 +19,7 @@ AgentNaviView
 ```
 
 - Core 负责查询项目图谱并返回领域数据，不依赖 MCP 或 UI。
-- Adapter 负责筛选、排序、截断和解释，将 Core 数据转换为 `AgentNaviView`。
+- Adapter 负责筛选、排序、截断和解释，将 Core 数据转换为 `AgentNaviView`。每个 view 必须声明允许输出的字段 allowlist，不能透传 Core mapping、数据库 Row 或事件 payload。
 - `AgentNaviView` 是稳定的 JSON 输出边界。`content` 与 `structuredContent` 表达相同语义，但必须独立生成，不能从 HTML 或彼此反向解析。
 - MCP Apps 只消费 `structuredContent`。UI 不得访问 SQLite、项目文件、日志、`localhost` 或公网。
 - Obsidian 与 MCP Apps 都是投影视图，不是运行事实来源。
@@ -91,7 +91,7 @@ AgentNaviView
 
 包含：
 
-- `status`：结果是否 ready、partial 或 stale，由 Adapter 定义；
+- `status`：只能是 `ready`、`partial` 或 `stale`；
 - `revision`：可选的稳定索引修订标识；
 - `indexedAt`：可选、以 `Z` 结尾的 RFC 3339 UTC 时间文本。
 
@@ -107,7 +107,7 @@ AgentNaviView
 
 ### `GraphEdge`
 
-包含稳定 `id`、`sourceId`、`targetId`、`relation`、`layer`、`source`、`confidence` 和 `evidence`。方向固定为 `sourceId → targetId`，不得依赖 UI 布局猜测关系方向。
+包含稳定 `id`、`sourceId`、`targetId`、`relation`、`layer`、`source`、`confidence` 和 `evidence`。每条新关系必须至少包含一个 Evidence。方向固定为 `sourceId → targetId`，不得依赖 UI 布局猜测关系方向。
 
 ### `Warning`
 
@@ -130,7 +130,7 @@ L1 事实不能伪装成 L2/L3 解释，自动推断也不能省略置信度或�
 
 ## 六、路径与隐私
 
-所有进入 VLA 的项目路径必须是规范的 POSIX 相对路径，例如 `src/agentnavi/query.py`。协议层 fail closed，拒绝：
+所有进入 VLA 的项目路径必须是规范的 POSIX 相对路径，例如 `src/agentnavi/query.py`。协议层以 defense-in-depth 方式拒绝：
 
 - `/Users/...` 等 POSIX 绝对路径；
 - Windows drive path 和 UNC path；
@@ -145,7 +145,14 @@ MCP 输出不得包含：
 - 未筛选的事件 payload；
 - 完整源文件正文。
 
-`data`、`details`、`extensions` 和嵌套 DTO 都执行相同的递归 JSON-safe 与隐私校验。绝对路径检测覆盖所有 wire 字符串，不只检查名为 `path` 的字段，因此说明文本与错误详情也不能成为旁路。只允许字符串字段名、JSON scalar、array 和 object；拒绝 `NaN`、Infinity、`Path`、bytes 和任意 Python 对象。
+`data`、`details`、`extensions` 和嵌套 DTO 都执行相同的递归 JSON-safe 与显式 canary 检查。绝对路径检测覆盖所有 wire key 和字符串 value，不只检查名为 `path` 的字段，因此说明文本、错误详情和 path-index key 也会经过检查。只允许字符串字段名、JSON scalar、array 和 object；拒绝 `NaN`、Infinity、`Path`、bytes 和任意 Python 对象。
+
+这些检查只是 defense-in-depth，不能完整证明语义隐私。通用 denylist 无法判断任意业务字段是否实际包含原始 Row、未筛选事件或正文；后续每个 Adapter 都必须：
+
+1. 按对应 view 的字段 allowlist 逐项构造 DTO，不使用 `dict(row)` 或同类透传；
+2. 只复制完成展示所需的已筛选事件字段与短证据摘要；
+3. 用 view 级合同测试证明原始 SQLite Row、未经筛选的 event payload 和完整正文无法到达 wire；
+4. 把新的敏感形态同时加入 Adapter 测试，并在适用时增加协议 canary。
 
 ## 七、序列化与兼容策略
 
@@ -155,7 +162,7 @@ MCP 输出不得包含：
 
 1. 既有字段不得删除、改名或改变含义；
 2. 可选字段只能增量新增，消费者必须忽略不认识的 extension 字段；
-3. extension 不得覆盖任何当前或可选的保留字段；
+3. extension 不得覆盖任何当前或可选的保留字段；比较时忽略大小写及 camelCase、snake_case、kebab-case 的分隔差异；
 4. 增加 enum 值前要确认旧消费者具有安全降级行为；
 5. 删除字段、改变类型、改变方向或改变既有语义时，必须升级 `schemaVersion`；
 6. `schemaVersion` 变化必须新增迁移说明和跨版本合同测试。

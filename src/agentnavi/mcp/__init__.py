@@ -14,6 +14,7 @@ from .protocol import (
     GraphEdge,
     Project,
     SourceState,
+    SourceStatus,
     Warning,
 )
 
@@ -28,5 +29,6 @@ __all__ = [
     "GraphEdge",
     "Project",
     "SourceState",
+    "SourceStatus",
     "Warning",
 ]

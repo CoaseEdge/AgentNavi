@@ -1,7 +1,8 @@
 """AgentNavi VLA 的稳定 wire protocol。
 
-本模块位于 Core 与 MCP SDK 之间，只负责定义 JSON-safe DTO 和输出边界。
-它不读取数据库、项目文件或外部日志，也不依赖 MCP SDK。
+本模块位于 Core 与 MCP SDK 之间，只负责定义 JSON-safe DTO 和通用防御检查。
+它不读取数据库、项目文件或外部日志，也不依赖 MCP SDK。字段名 denylist
+不能理解数据的业务语义，因此后续每个 Adapter 仍必须按 view allowlist 构造 DTO。
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ ViewName: TypeAlias = Literal[
     "history",
     "semantic-review",
 ]
+SourceStatus: TypeAlias = Literal["ready", "partial", "stale"]
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 
@@ -159,8 +161,14 @@ def _normalized_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", key.lower())
 
 
+def _extension_semantic_key(key: str) -> str:
+    """统一 camel/snake/kebab 变体，同时保留非 ASCII 字段身份。"""
+
+    return key.casefold().replace("_", "").replace("-", "")
+
+
 def _normalize_json(value: Any, *, parent_key: str | None = None) -> JsonValue:
-    """复制并验证一个严格的 JSON 值，同时执行输出隐私边界。"""
+    """复制严格 JSON 值并执行 defense-in-depth canary，不代替 Adapter allowlist。"""
 
     if isinstance(value, _WireDTO):
         return value.to_dict()
@@ -180,6 +188,7 @@ def _normalize_json(value: Any, *, parent_key: str | None = None) -> JsonValue:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("JSON 对象的字段名必须是字符串。")
+            _reject_absolute_path_text(key)
             normalized = _normalized_key(key)
             if normalized in _FORBIDDEN_KEYS:
                 raise ValueError(f"禁止输出字段：{key}")
@@ -225,9 +234,18 @@ def _merge_extensions(
         raise TypeError("extensions 必须是 JSON 对象。")
     normalized = _normalize_json(extensions)
     assert isinstance(normalized, dict)
-    collision = reserved.intersection(normalized)
-    if collision:
-        fields = "、".join(sorted(collision))
+    reserved_by_normalized = {_extension_semantic_key(key): key for key in reserved}
+    extension_by_normalized: dict[str, str] = {}
+    collisions: list[str] = []
+    for key in normalized:
+        semantic_key = _extension_semantic_key(key)
+        if semantic_key in reserved_by_normalized:
+            collisions.append(key)
+        if semantic_key in extension_by_normalized:
+            collisions.extend((extension_by_normalized[semantic_key], key))
+        extension_by_normalized[semantic_key] = key
+    if collisions:
+        fields = "、".join(sorted(set(collisions)))
         raise ValueError(f"extensions 不能覆盖协议保留字段：{fields}")
     payload.update(normalized)
     result = _normalize_json(payload)
@@ -389,6 +407,8 @@ class GraphEdge(_WireDTO):
             "evidence",
             _snapshot_evidence(self.evidence, "GraphEdge.evidence"),
         )
+        if not self.evidence:
+            raise ValueError("GraphEdge.evidence 必须至少包含一个 Evidence。")
         object.__setattr__(
             self,
             "extensions",
@@ -511,13 +531,14 @@ class Project(_WireDTO):
 
 @dataclass(frozen=True, slots=True)
 class SourceState(_WireDTO):
-    status: str
+    status: SourceStatus
     revision: str | None = None
     indexed_at: str | None = None
     extensions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _require_text(self.status, "SourceState.status")
+        if self.status not in {"ready", "partial", "stale"}:
+            raise ValueError("SourceState.status 必须是 ready、partial 或 stale。")
         if self.revision is not None:
             _require_text(self.revision, "SourceState.revision")
         if self.indexed_at is not None:
@@ -552,7 +573,7 @@ class SourceState(_WireDTO):
 
 @dataclass(frozen=True, slots=True)
 class AgentNaviView(_WireDTO):
-    """统一的 VLA envelope，也就是 Presentation Adapter 的输出边界。"""
+    """统一 VLA envelope；data 必须由按 view allowlist 实现的 Adapter 提供。"""
 
     view: ViewName
     project: Project
@@ -623,6 +644,7 @@ __all__ = [
     "Layer",
     "Project",
     "SourceState",
+    "SourceStatus",
     "ViewName",
     "Warning",
 ]
