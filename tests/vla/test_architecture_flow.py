@@ -13,6 +13,8 @@ from agentnavi.database import Database, ensure_database
 from agentnavi.mcp.adapters.architecture import architecture_text, architecture_view
 from agentnavi.mcp.adapters.flow import flow_text, flow_view
 from agentnavi.repository_views import (
+    MAX_ARCHITECTURE_PHYSICAL_EDGE_QUERIES,
+    MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES,
     MAX_STRUCTURE_MAPPING_CANDIDATES,
     MAX_STRUCTURE_MAPPING_QUERIES,
     repository_architecture_data,
@@ -298,6 +300,57 @@ class ArchitectureFlowTestCase(unittest.TestCase):
             {warning["code"] for warning in architecture["warnings"]},
         )
 
+    def test_large_connection_evidence_uses_one_physical_edge_query_and_truncates(self) -> None:
+        entry_id = Database.node_id("fixture", 2, "concept", "entry")
+        scanner_id = Database.node_id("fixture", 2, "concept", "scanner")
+        edge_id = Database.edge_id("fixture", 2, entry_id, "depends_on", scanner_id)
+        invalid = {
+            "source": "src/fixture/cli.py",
+            "target": "src/fixture/scanner.py",
+            "physical_relation": "not-a-physical-edge",
+        }
+        valid = {
+            "source": "src/fixture/cli.py",
+            "target": "src/fixture/scanner.py",
+            "physical_relation": "imports",
+        }
+        raw_evidence = [invalid] * MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES
+        raw_evidence.extend([valid] + [invalid] * (500 - len(raw_evidence) - 1))
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE edges SET data_json=? WHERE id=?",
+                (json.dumps({"evidence": raw_evidence}), edge_id),
+            )
+            connection.commit()
+
+        statements: list[str] = []
+        original_connect = self.database.connect
+
+        @contextmanager
+        def traced_connect():
+            with original_connect() as connection:
+                connection.set_trace_callback(statements.append)
+                try:
+                    yield connection
+                finally:
+                    connection.set_trace_callback(None)
+
+        project = self._project()
+        with patch.object(self.database, "connect", traced_connect):
+            architecture = repository_architecture_data(self.database, project)
+
+        physical_sql = [
+            statement for statement in statements
+            if "repository-architecture-physical-edges" in statement
+        ]
+        self.assertEqual(MAX_ARCHITECTURE_PHYSICAL_EDGE_QUERIES, 1)
+        self.assertEqual(len(physical_sql), MAX_ARCHITECTURE_PHYSICAL_EDGE_QUERIES)
+        self.assertNotIn(edge_id, {edge["id"] for edge in architecture["connections"]})
+        self.assertIn(
+            "ARCHITECTURE_CONNECTION_EVIDENCE_TRUNCATED",
+            {warning["code"] for warning in architecture["warnings"]},
+        )
+
     def test_connection_cap_keeps_endpoints_and_preserves_a_real_cycle(self) -> None:
         concept_ids = [
             Database.node_id("fixture", 2, "concept", key)
@@ -391,6 +444,7 @@ class ArchitectureFlowTestCase(unittest.TestCase):
             "Event Lifecycle", "Installation Workflow", "Release Flow",
             "Migration Workflow", "CI Workflow", "事件生命周期",
             "安装工作流", "发布流程", "迁移清单", "持续集成流程",
+            "CI/CD Workflow", "Continuous-Integration Workflow", "C.I. Workflow",
         )
         for heading in headings:
             with self.subTest(heading=heading):
@@ -406,6 +460,16 @@ class ArchitectureFlowTestCase(unittest.TestCase):
                     "FLOW_EXECUTION_EVIDENCE_MISSING",
                     {warning["code"] for warning in flow["warnings"]},
                 )
+        for heading in ("Request/Flow", "Data-Flow", "Workflow", "请求/流程"):
+            with self.subTest(accepted_heading=heading):
+                document.write_text(
+                    f"# Architecture\n\n## {heading}\n\n"
+                    "1. One\n2. Two\n3. Three\n4. Four\n5. Five\n",
+                    encoding="utf-8",
+                )
+                self._index_file_state("docs/architecture.md")
+                flow = repository_flow_data(self.database, self._project())
+                self.assertEqual(len(flow["steps"]), 5)
 
     def test_file_match_terms_do_not_leak_between_sibling_paths(self) -> None:
         document = self.root / "docs" / "architecture.md"
@@ -622,6 +686,48 @@ class ArchitectureFlowTestCase(unittest.TestCase):
             malformed = json.loads(json.dumps(flow))
             malformed["steps"][0][field] = ""
             with self.assertRaises(ValueError):
+                flow_view(malformed)
+
+        for path, layer in (
+            (("components", 0, "entity"), "L1"),
+            (("connections", 0), "L1"),
+            (("entryPoints", 0, "entity"), "L2"),
+        ):
+            malformed = json.loads(json.dumps(architecture))
+            target = malformed
+            for part in path:
+                target = target[part]
+            target["layer"] = layer
+            with self.assertRaises(ValueError):
+                architecture_view(malformed)
+        for field, layer in (("entity", "L2"), ("relation", "L1")):
+            malformed = json.loads(json.dumps(flow))
+            malformed["steps"][0]["keyFiles"][0][field]["layer"] = layer
+            with self.assertRaises(ValueError):
+                flow_view(malformed)
+
+        request_with_provenance = json.loads(json.dumps(flow))
+        request_with_provenance["exampleTask"]["entity"] = flow["steps"][0]["keyFiles"][0]["entity"]
+        request_with_provenance["exampleTask"]["evidence"] = flow["steps"][0]["evidence"]
+        with self.assertRaises(ValueError):
+            flow_view(request_with_provenance)
+
+        history = repository_flow_data(self.database, self._project())
+        history_wire = flow_view(history).to_dict()
+        self.assertEqual(history_wire["data"]["exampleTask"]["source"], "task-events")
+        self.assertEqual(history_wire["data"]["exampleTask"]["entity"]["kind"], "task")
+        self.assertEqual(history_wire["data"]["exampleTask"]["entity"]["layer"], "L3")
+        for mutate in (
+            lambda value: value["exampleTask"].pop("entity"),
+            lambda value: value["exampleTask"]["entity"].update(kind="file"),
+            lambda value: value["exampleTask"]["entity"].update(layer="L2"),
+            lambda value: value["exampleTask"]["entity"].update(source="repository"),
+            lambda value: value["exampleTask"]["evidence"][0].update(layer="L2"),
+            lambda value: value["exampleTask"]["evidence"][0].update(source="repository"),
+        ):
+            malformed = json.loads(json.dumps(history))
+            mutate(malformed)
+            with self.assertRaises((TypeError, ValueError)):
                 flow_view(malformed)
 
 

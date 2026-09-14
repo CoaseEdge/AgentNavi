@@ -35,12 +35,31 @@ def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     task = None
     if raw_task is not None:
         item = _mapping(raw_task, "flow.exampleTask")
+        task_source = _required_text(item.get("source"), "exampleTask.source", limit=120)
+        if task_source not in {"request", "request-redacted", "task-events"}:
+            raise ValueError("flow.exampleTask.source 无效。")
         task = {
             "title": _required_text(item.get("title"), "exampleTask.title"),
-            "source": _required_text(item.get("source"), "exampleTask.source", limit=120),
-            **({"entity": _entity(item.get("entity"), "exampleTask.entity")} if item.get("entity") is not None else {}),
-            **({"evidence": _evidence_list(item.get("evidence", []), "exampleTask.evidence")} if item.get("evidence") is not None else {}),
+            "source": task_source,
         }
+        if task_source in {"request", "request-redacted"}:
+            if "entity" in item or "evidence" in item:
+                raise ValueError("request exampleTask 不得包含 entity/evidence。")
+        else:
+            if item.get("entity") is None or item.get("evidence") is None:
+                raise ValueError("task-events exampleTask 缺少 entity/evidence。")
+            entity = _entity(item.get("entity"), "exampleTask.entity")
+            evidence = _evidence_list(item.get("evidence"), "exampleTask.evidence")
+            if (
+                entity["kind"] != "task" or entity["layer"] != "L3"
+                or entity["source"] != "task-events" or not evidence
+                or any(
+                    entry["layer"] != "L3" or entry["source"] != "task-events"
+                    for entry in evidence
+                )
+            ):
+                raise ValueError("task-events exampleTask provenance 无效。")
+            task.update({"entity": entity, "evidence": evidence})
     raw_steps = _sequence(data.get("steps", []), "flow.steps")
     if raw_steps and not 5 <= len(raw_steps) <= 7:
         raise ValueError("flow.steps 必须为空或 5–7 步。")
@@ -78,7 +97,8 @@ def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
             relation = _relation(file_item.get("relation"), "keyFile.relation")
             if (
                 path in all_paths or not evidence or entity["kind"] != "file"
-                or entity.get("path") != path or relation["sourceId"] != module_id
+                or entity["layer"] != "L1" or entity.get("path") != path
+                or relation["layer"] != "L2" or relation["sourceId"] != module_id
                 or relation["targetId"] != entity["id"]
             ):
                 raise ValueError("flow keyFile path/evidence 无效。")

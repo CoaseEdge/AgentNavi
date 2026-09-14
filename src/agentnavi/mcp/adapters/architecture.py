@@ -63,7 +63,7 @@ def _architecture_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("architecture component evidence 超过上限。")
         evidence = _evidence_list(raw_evidence, "component.evidence")
         entity = _entity(item.get("entity"), "component.entity")
-        if not evidence or entity["id"] != component_id:
+        if not evidence or entity["id"] != component_id or entity["layer"] != "L2":
             raise ValueError("architecture component provenance 无效。")
         components.append({
             "id": component_id,
@@ -82,7 +82,7 @@ def _architecture_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     connections = [_relation(item, "architecture.connections[]") for item in raw_connections]
     connection_ids = [item["id"] for item in connections]
     if len(connection_ids) != len(set(connection_ids)) or any(
-        item["sourceId"] not in component_ids or item["targetId"] not in component_ids
+        item["layer"] != "L2" or item["sourceId"] not in component_ids or item["targetId"] not in component_ids
         for item in connections
     ):
         raise ValueError("architecture connection endpoint/id 无效。")
@@ -98,7 +98,7 @@ def _architecture_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         entity = _entity(item.get("entity"), "entryPoint.entity")
         if not evidence:
             raise ValueError("architecture entryPoint evidence 不得为空。")
-        if entity["kind"] != "file" or entity.get("path") != path:
+        if entity["kind"] != "file" or entity["layer"] != "L1" or entity.get("path") != path:
             raise ValueError("architecture entryPoint entity/path 无效。")
         entries.append({
             "path": path,

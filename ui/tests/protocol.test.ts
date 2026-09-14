@@ -258,6 +258,9 @@ assert(parseArchitectureView(duplicateComponent) === undefined, "应拒绝重复
 for (const mutate of [
   (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.kind = "concept"; },
   (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.path = "src/other.py"; },
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.layer = "L2"; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.entity.layer = "L1"; },
+  (value: typeof architectureFixture) => { value.data.connections[0]!.layer = "L1"; },
   (value: typeof architectureFixture) => { value.data.entryPoints[0]!.reason = ""; },
   (value: typeof architectureFixture) => { value.data.components[0]!.name = ""; },
   (value: typeof architectureFixture) => { value.data.components[0]!.responsibility = ""; },
@@ -316,6 +319,8 @@ for (const mutate of [
   (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.moduleName = ""; },
   (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.kind = "concept"; },
   (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.path = "src/other.py"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.layer = "L2"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.layer = "L1"; },
   (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.sourceId = "other"; },
   (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.targetId = "other"; },
   (value: typeof flowFixture) => { value.data.steps[0]!.purpose = ""; },
@@ -333,5 +338,32 @@ assert(parseFlowView(shortFlow) === undefined, "应拒绝非空但少于 5 步�
 const emptyFlow = structuredClone(flowFixture);
 emptyFlow.data.steps = [];
 assert(parseFlowView(emptyFlow)?.data.steps.length === 0, "证据不足时空 Flow 合法");
+
+const requestWithProvenance = structuredClone(flowFixture) as any;
+requestWithProvenance.data.exampleTask.entity = architectureEntity("task", "Task", "src/cli.py", "file");
+requestWithProvenance.data.exampleTask.evidence = [tourEvidence];
+assert(parseFlowView(requestWithProvenance) === undefined, "request task 不得携带 provenance");
+
+const historyFlow = structuredClone(flowFixture) as any;
+const taskEvidence = { kind: "task-record", summary: "任务事实", layer: "L3", source: "task-events", confidence: 1 };
+historyFlow.data.exampleTask = {
+  title: "历史任务",
+  source: "task-events",
+  entity: { id: "task", kind: "task", label: "历史任务", layer: "L3", source: "task-events", confidence: 1, evidence: [taskEvidence] },
+  evidence: [taskEvidence],
+};
+assert(parseFlowView(historyFlow)?.data.exampleTask?.source === "task-events", "应接受完整 L3 历史任务 provenance");
+for (const mutate of [
+  (value: any) => { delete value.data.exampleTask.entity; },
+  (value: any) => { value.data.exampleTask.entity.kind = "file"; },
+  (value: any) => { value.data.exampleTask.entity.layer = "L2"; },
+  (value: any) => { value.data.exampleTask.entity.source = "repository"; },
+  (value: any) => { value.data.exampleTask.evidence[0].layer = "L2"; },
+  (value: any) => { value.data.exampleTask.evidence[0].source = "repository"; },
+]) {
+  const malformed = structuredClone(historyFlow);
+  mutate(malformed);
+  assert(parseFlowView(malformed) === undefined, "应拒绝不完整或错层的历史 task provenance");
+}
 
 console.log("protocol unit checks passed");

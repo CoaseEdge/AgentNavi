@@ -46,6 +46,9 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         file_path: str = "src/membership.py",
     ) -> None:
         now = utc_now()
+        absolute_file = self.project_root / file_path
+        absolute_file.parent.mkdir(parents=True, exist_ok=True)
+        absolute_file.write_text("VALUE = 1\n", encoding="utf-8")
         with self.database.connect() as connection:
             connection.execute(
                 """
@@ -92,6 +95,16 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                 confidence=0.85,
                 source="semantic-heuristic",
             )
+            stat = absolute_file.stat()
+            connection.execute(
+                """INSERT INTO file_state(
+                       project_id, path, mtime_ns, size, digest, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    project_id, file_path, stat.st_mtime_ns, stat.st_size,
+                    hashlib.blake2s(absolute_file.read_bytes()).hexdigest(), now,
+                ),
+            )
             connection.commit()
 
     def _add_overview_documents(self) -> None:
@@ -101,7 +114,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             encoding="utf-8",
         )
         (self.project_root / "docs" / "architecture.md").write_text(
-            """# 架构\n\n## 主流程\n\n1. 接收请求\n2. 解析项目\n3. 读取文档\n4. 汇总事实\n5. 生成概览\n6. 投影视图\n7. 返回证据\n""",
+            """# 架构\n\n## 主流程\n\n1. membership 接收请求\n2. 解析项目\n3. 读取文档\n4. 汇总事实\n5. 生成概览\n6. 投影视图\n7. 返回证据\n""",
             encoding="utf-8",
         )
         with self.database.connect() as connection:
@@ -299,6 +312,92 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertNotIn(private_message, wire)
         self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_architecture_and_flow_provenance_rejections_are_public(self) -> None:
+        from agentnavi.repository_views import (
+            repository_architecture_data,
+            repository_flow_data,
+        )
+
+        self._add_project()
+        self._add_overview_documents()
+        with self.database.connect() as connection:
+            project = connection.execute(
+                "SELECT * FROM projects WHERE id='fixture'"
+            ).fetchone()
+        assert project is not None
+        architecture = repository_architecture_data(self.database, project)
+        flow = repository_flow_data(self.database, project, query="修改会员")
+        self.assertTrue(architecture["components"])
+        self.assertTrue(flow["steps"][0]["keyFiles"])
+        private_message = f"invalid provenance at {self.database.settings.database_path}"
+
+        cases: list[tuple[str, dict[str, Any]]] = []
+        wrong_component = json.loads(json.dumps(architecture))
+        wrong_component["components"][0]["entity"]["layer"] = "L1"
+        wrong_component["components"][0]["entity"]["label"] = private_message
+        cases.append(("architecture", wrong_component))
+        wrong_connection = json.loads(json.dumps(architecture))
+        component_id = wrong_connection["components"][0]["id"]
+        wrong_connection["connections"].append({
+            "id": "invalid-layer-edge", "sourceId": component_id,
+            "targetId": component_id, "relation": "related_to", "layer": "L1",
+            "source": "semantic-heuristic", "confidence": 0.8,
+            "evidence": wrong_connection["components"][0]["evidence"],
+        })
+        cases.append(("architecture", wrong_connection))
+        wrong_entry = json.loads(json.dumps(architecture))
+        key_file = flow["steps"][0]["keyFiles"][0]
+        wrong_entry["entryPoints"].append({
+            "path": key_file["path"], "reason": "entry",
+            "entity": {**key_file["entity"], "layer": "L2"},
+            "evidence": key_file["evidence"],
+        })
+        cases.append(("architecture", wrong_entry))
+        wrong_key_entity = json.loads(json.dumps(flow))
+        wrong_key_entity["steps"][0]["keyFiles"][0]["entity"]["layer"] = "L2"
+        cases.append(("flow", wrong_key_entity))
+        wrong_key_relation = json.loads(json.dumps(flow))
+        wrong_key_relation["steps"][0]["keyFiles"][0]["relation"]["layer"] = "L1"
+        cases.append(("flow", wrong_key_relation))
+        request_with_provenance = json.loads(json.dumps(flow))
+        request_with_provenance["exampleTask"]["entity"] = flow["steps"][0]["keyFiles"][0]["entity"]
+        request_with_provenance["exampleTask"]["evidence"] = flow["steps"][0]["evidence"]
+        cases.append(("flow", request_with_provenance))
+        malformed_history = json.loads(json.dumps(flow))
+        malformed_history["exampleTask"] = {
+            "title": "history",
+            "source": "task-events",
+            "entity": {
+                "id": "task", "kind": "task", "label": private_message,
+                "layer": "L3", "source": "task-events", "confidence": 1,
+                "evidence": [],
+            },
+        }
+        cases.append(("flow", malformed_history))
+
+        for view, bad_core in cases:
+            function = (
+                "repository_architecture_data"
+                if view == "architecture"
+                else "repository_flow_data"
+            )
+            with self.subTest(view=view, function=function), patch(
+                f"agentnavi.repository_views.{function}", return_value=bad_core
+            ):
+                result = asyncio.run(
+                    self._call(
+                        {"view": view, "project_id": "fixture"},
+                        tool_name="agentnavi_visualize",
+                    )
+                )
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                wire = json.dumps(
+                    result.model_dump(by_alias=True), ensure_ascii=False, default=str
+                )
+                self.assertNotIn(private_message, wire)
+                self.assertNotIn(str(self.database.settings.database_path), wire)
+
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()
 
@@ -447,7 +546,9 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         from pydantic import ValidationError
 
         from agentnavi.mcp.runtime import (
+            ArchitectureViewOutput,
             ContextViewOutput,
+            FlowViewOutput,
             RepositoryOverviewViewOutput,
             RepositoryTourViewOutput,
             VisualizeViewOutput,
@@ -485,6 +586,86 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         invalid_tour["data"]["tiers"][0]["stops"][0]["entity"]["confidence"] = 1.1
         with self.assertRaises(ValidationError):
             RepositoryTourViewOutput.model_validate(invalid_tour)
+
+        architecture = asyncio.run(
+            self._call(
+                {"view": "architecture", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        ).structured_content
+        ArchitectureViewOutput.model_validate(architecture)
+        VisualizeViewOutput.model_validate(architecture)
+        for target_path, layer in ((("components", 0, "entity"), "L1"),):
+            invalid = json.loads(json.dumps(architecture))
+            target = invalid["data"]
+            for part in target_path:
+                target = target[part]
+            target["layer"] = layer
+            with self.assertRaises(ValidationError):
+                ArchitectureViewOutput.model_validate(invalid)
+
+        flow = asyncio.run(
+            self._call(
+                {"view": "flow", "query": "修改会员", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        ).structured_content
+        FlowViewOutput.model_validate(flow)
+        VisualizeViewOutput.model_validate(flow)
+        invalid_entry = json.loads(json.dumps(architecture))
+        key_file = flow["data"]["steps"][0]["keyFiles"][0]
+        invalid_entry["data"]["entryPoints"].append({
+            "path": key_file["path"], "reason": "entry",
+            "entity": {**key_file["entity"], "layer": "L2"},
+            "evidence": key_file["evidence"],
+        })
+        with self.assertRaises(ValidationError):
+            ArchitectureViewOutput.model_validate(invalid_entry)
+        invalid_connection = json.loads(json.dumps(architecture))
+        component_id = invalid_connection["data"]["components"][0]["id"]
+        invalid_connection["data"]["connections"].append({
+            "id": "invalid-layer-edge", "sourceId": component_id,
+            "targetId": component_id, "relation": "related_to", "layer": "L1",
+            "source": "semantic-heuristic", "confidence": 0.8,
+            "evidence": invalid_connection["data"]["components"][0]["evidence"],
+        })
+        with self.assertRaises(ValidationError):
+            ArchitectureViewOutput.model_validate(invalid_connection)
+        for field, layer in (("entity", "L2"), ("relation", "L1")):
+            invalid = json.loads(json.dumps(flow))
+            invalid["data"]["steps"][0]["keyFiles"][0][field]["layer"] = layer
+            with self.assertRaises(ValidationError):
+                FlowViewOutput.model_validate(invalid)
+        request_with_provenance = json.loads(json.dumps(flow))
+        request_with_provenance["data"]["exampleTask"]["entity"] = (
+            flow["data"]["steps"][0]["keyFiles"][0]["entity"]
+        )
+        with self.assertRaises(ValidationError):
+            FlowViewOutput.model_validate(request_with_provenance)
+        history = json.loads(json.dumps(flow))
+        task_evidence = {
+            "kind": "task-record", "summary": "task history", "layer": "L3",
+            "source": "task-events", "confidence": 1,
+        }
+        history["data"]["exampleTask"] = {
+            "title": "history", "source": "task-events",
+            "entity": {
+                "id": "task", "kind": "task", "label": "history", "layer": "L3",
+                "source": "task-events", "confidence": 1, "evidence": [task_evidence],
+            },
+            "evidence": [task_evidence],
+        }
+        FlowViewOutput.model_validate(history)
+        for mutate in (
+            lambda value: value["data"]["exampleTask"].pop("evidence"),
+            lambda value: value["data"]["exampleTask"]["entity"].update(layer="L2"),
+            lambda value: value["data"]["exampleTask"]["entity"].update(source="repository"),
+            lambda value: value["data"]["exampleTask"]["evidence"][0].update(source="repository"),
+        ):
+            invalid = json.loads(json.dumps(history))
+            mutate(invalid)
+            with self.assertRaises(ValidationError):
+                FlowViewOutput.model_validate(invalid)
 
         invalid_payloads = []
         for field, value in (

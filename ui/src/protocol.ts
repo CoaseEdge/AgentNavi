@@ -201,9 +201,12 @@ export interface FlowView {
     layout: "numbered-task-flow";
     exampleTask?: {
       title: string;
-      source: string;
-      entity?: TourStop["entity"];
-      evidence?: Evidence[];
+      source: "request" | "request-redacted";
+    } | {
+      title: string;
+      source: "task-events";
+      entity: TourStop["entity"];
+      evidence: Evidence[];
     };
     steps: FlowStep[];
     stats: ContextView["data"]["stats"] & { documentsRead: number };
@@ -711,7 +714,7 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
     const responsibility = displayText(item?.responsibility);
     if (
       !item || !nonBlank(id) || !nonBlank(name) || !nonBlank(responsibility) ||
-      !entity || !completeEntity(entity) || entity.id !== id ||
+      !entity || !completeEntity(entity) || entity.id !== id || entity.layer !== "L2" ||
       (group !== "entry" && group !== "core" && group !== "support") ||
       paths.length === 0 || paths.length > 3 || new Set(paths).size !== paths.length ||
       paths.some((path) => !isCanonicalRelativePath(path)) || rawEvidence.length > 3 ||
@@ -733,7 +736,7 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
   const included = new Set(componentIds);
   if (
     connections.length !== rawConnections.length || new Set(connectionIds).size !== connectionIds.length ||
-    connections.some((edge) => !completeRelation(edge) || !included.has(edge.sourceId) || !included.has(edge.targetId))
+    connections.some((edge) => edge.layer !== "L2" || !completeRelation(edge) || !included.has(edge.sourceId) || !included.has(edge.targetId))
   ) return undefined;
   const rawEntries = Array.isArray(common.data.entryPoints) ? common.data.entryPoints : [];
   if (rawEntries.length > 3) return undefined;
@@ -745,7 +748,8 @@ export function parseArchitectureView(value: unknown): ArchitectureView | undefi
     const reason = displayText(item?.reason);
     if (
       !item || !isCanonicalRelativePath(path) || !nonBlank(reason) || !entity ||
-      !completeEntity(entity) || entity.kind !== "file" || entity.path !== path || evidence.length === 0
+      !completeEntity(entity) || entity.kind !== "file" || entity.layer !== "L1" ||
+      entity.path !== path || evidence.length === 0
     ) return [];
     return [{ path, reason, entity, evidence }];
   });
@@ -811,7 +815,8 @@ export function parseFlowView(value: unknown): FlowView | undefined {
       if (
         !file || !isCanonicalRelativePath(path) || paths.has(path) ||
         !nonBlank(moduleId) || !nonBlank(moduleName) || !entity || !completeEntity(entity) ||
-        entity.kind !== "file" || entity.path !== path || !relation || !completeRelation(relation) ||
+        entity.kind !== "file" || entity.layer !== "L1" || entity.path !== path ||
+        !relation || relation.layer !== "L2" || !completeRelation(relation) ||
         relation.sourceId !== moduleId || relation.targetId !== entity.id ||
         relation.evidence.length === 0 || fileEvidence.length === 0
       ) {
@@ -854,10 +859,23 @@ export function parseFlowView(value: unknown): FlowView | undefined {
     const title = displayText(task?.title);
     const source = displayText(task?.source);
     if (!task || !nonBlank(title) || !nonBlank(source)) return undefined;
-    const entity = task.entity === undefined ? undefined : tourEntity(task.entity);
-    const evidence = task.evidence === undefined ? undefined : evidenceList(task.evidence);
-    if ((task.entity !== undefined && !entity) || (task.evidence !== undefined && !evidence?.length)) return undefined;
-    exampleTask = { title, source, ...(entity ? { entity } : {}), ...(evidence ? { evidence } : {}) };
+    if (source === "request" || source === "request-redacted") {
+      if ("entity" in task || "evidence" in task) return undefined;
+      exampleTask = { title, source };
+    } else if (source === "task-events") {
+      const entity = tourEntity(task.entity);
+      const rawEvidence = Array.isArray(task.evidence) ? task.evidence : [];
+      const evidence = evidenceList(rawEvidence);
+      if (
+        !entity || !completeEntity(entity) || entity.kind !== "task" || entity.layer !== "L3" ||
+        entity.source !== "task-events" ||
+        evidence.length === 0 || evidence.length !== rawEvidence.length ||
+        evidence.some((entry) => entry.layer !== "L3" || entry.source !== "task-events")
+      ) return undefined;
+      exampleTask = { title, source, entity, evidence };
+    } else {
+      return undefined;
+    }
   }
   return {
     schemaVersion: SCHEMA_VERSION,

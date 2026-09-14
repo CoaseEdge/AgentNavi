@@ -41,6 +41,8 @@ MAX_ARCHITECTURE_ENTRY_POINTS = 3
 MAX_FLOW_FILES = 18
 MAX_STRUCTURE_MAPPING_CANDIDATES = 48
 MAX_STRUCTURE_MAPPING_QUERIES = 1
+MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES = 64
+MAX_ARCHITECTURE_PHYSICAL_EDGE_QUERIES = 1
 _STRUCTURE_FILE_RELATIONS = (
     "implemented_by", "tested_by", "documented_by", "configured_by",
 )
@@ -495,10 +497,24 @@ def _execution_workflow(
             if heading:
                 if accepted_heading and len(current) >= 5:
                     groups.append((doc_index, group_start, current))
-                title = " ".join(heading.group(1).lower().split())
+                title = " ".join(
+                    re.sub(r"[^\w\u4e00-\u9fff]+", " ", heading.group(1).lower()).split()
+                )
+                compact_title = title.replace(" ", "")
+                ci_heading = (
+                    re.search(r"\bci(?: cd)?\b", title) is not None
+                    or re.search(r"\bc i(?: c d)?\b", title) is not None
+                )
                 accepted_heading = (
-                    any(term in title for term in execution_terms)
-                    and not any(term in title for term in excluded_terms)
+                    any(
+                        term in title or term.replace(" ", "") in compact_title
+                        for term in execution_terms
+                    )
+                    and not ci_heading
+                    and not any(
+                        term in title or term.replace(" ", "") in compact_title
+                        for term in excluded_terms
+                    )
                 )
                 group_start = line_number
                 current = []
@@ -1939,12 +1955,11 @@ def repository_tour_data(
 
 
 def _architecture_connection_evidence(
-    connection: sqlite3.Connection,
-    project_id: str,
     edge: sqlite3.Row,
     fresh_paths: set[str],
     component_paths: dict[str, set[str]],
-) -> list[dict[str, Any]]:
+    physical_edges: set[tuple[str, str, str]],
+) -> tuple[list[dict[str, Any]], bool]:
     if str(edge["source"]) == "human-overlay":
         return [{
             "kind": "human-decision",
@@ -1952,13 +1967,14 @@ def _architecture_connection_evidence(
             "layer": "L2",
             "source": "human-overlay",
             "confidence": float(edge["confidence"]),
-        }]
+        }], False
     data = json_loads(edge["data_json"], {})
     raw_evidence = data.get("evidence", [])
     if not isinstance(raw_evidence, list):
-        return []
+        return [], False
+    truncated = len(raw_evidence) > MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES
     evidence: list[dict[str, Any]] = []
-    for item in raw_evidence:
+    for item in raw_evidence[:MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES]:
         if not isinstance(item, dict):
             continue
         source_path = item.get("source")
@@ -1978,22 +1994,7 @@ def _architecture_connection_evidence(
             or target_path not in component_paths.get(str(edge["target_id"]), set())
         ):
             continue
-        physical = connection.execute(
-            """SELECT 1
-               FROM edges physical
-               JOIN nodes source_file
-                 ON source_file.id=physical.source_id AND source_file.layer=1
-                AND source_file.kind='file'
-               JOIN nodes target_file
-                 ON target_file.id=physical.target_id AND target_file.layer=1
-                AND target_file.kind='file'
-               WHERE physical.project_id=? AND physical.layer=1
-                 AND source_file.key=? AND target_file.key=?
-                 AND physical.relation=?
-               LIMIT 1""",
-            (project_id, source_path, target_path, relation),
-        ).fetchone()
-        if physical is None:
+        if (source_path, target_path, relation) not in physical_edges:
             continue
         evidence.append({
             "kind": "physical-relation",
@@ -2005,7 +2006,45 @@ def _architecture_connection_evidence(
         })
         if len(evidence) >= 3:
             break
-    return evidence
+    return evidence, truncated
+
+
+def _architecture_physical_edges(
+    connection: sqlite3.Connection,
+    project_id: str,
+    component_paths: dict[str, set[str]],
+) -> set[tuple[str, str, str]]:
+    paths = sorted(
+        {path for selected in component_paths.values() for path in selected},
+        key=lambda item: (item.lower(), item),
+    )
+    if not paths:
+        return set()
+    placeholders = ",".join("?" for _ in paths)
+    rows = connection.execute(
+        f"""-- repository-architecture-physical-edges
+            SELECT source_file.key AS source_path,
+                   target_file.key AS target_path,
+                   physical.relation
+            FROM edges physical
+            JOIN nodes source_file
+              ON source_file.id=physical.source_id AND source_file.layer=1
+             AND source_file.kind='file'
+            JOIN nodes target_file
+              ON target_file.id=physical.target_id AND target_file.layer=1
+             AND target_file.kind='file'
+            WHERE physical.project_id=? AND physical.layer=1
+              AND source_file.key IN ({placeholders})
+              AND target_file.key IN ({placeholders})
+            ORDER BY source_file.key COLLATE NOCASE, source_file.key,
+                     target_file.key COLLATE NOCASE, target_file.key,
+                     physical.relation, physical.id""",
+        (project_id, *paths, *paths),
+    )
+    return {
+        (str(row["source_path"]), str(row["target_path"]), str(row["relation"]))
+        for row in rows
+    }
 
 
 def _structure_snapshot(
@@ -2215,7 +2254,11 @@ def _structure_snapshot(
 
     connections: list[dict[str, Any]] = []
     dropped_connections = False
+    connection_evidence_truncated = False
     if component_ids:
+        physical_edges = _architecture_physical_edges(
+            connection, project_id, component_paths
+        )
         placeholders = ",".join("?" for _ in component_ids)
         rows = connection.execute(
             f"""SELECT edge.* FROM edges edge
@@ -2227,8 +2270,11 @@ def _structure_snapshot(
             (project_id, *component_ids, *component_ids),
         )
         for row in rows:
-            evidence = _architecture_connection_evidence(
-                connection, project_id, row, fresh_paths, component_paths
+            evidence, raw_truncated = _architecture_connection_evidence(
+                row, fresh_paths, component_paths, physical_edges
+            )
+            connection_evidence_truncated = (
+                connection_evidence_truncated or raw_truncated
             )
             if not evidence:
                 dropped_connections = True
@@ -2278,6 +2324,7 @@ def _structure_snapshot(
         "fileFacts": file_facts,
         "droppedConnections": dropped_connections,
         "mappingTruncated": mapping_truncated,
+        "connectionEvidenceTruncated": connection_evidence_truncated,
     }
 
 
@@ -2323,6 +2370,15 @@ def repository_architecture_data(
             warnings.append({
                 "code": "ARCHITECTURE_CONNECTIONS_TRUNCATED",
                 "message": "部分概念连接缺少可核验物理证据或超过上限，已剪除。",
+                "evidence": [],
+            })
+        if snapshot["connectionEvidenceTruncated"]:
+            warnings.append({
+                "code": "ARCHITECTURE_CONNECTION_EVIDENCE_TRUNCATED",
+                "message": (
+                    "自动概念关系的原始 evidence 超过每条 "
+                    f"{MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES} 项上限，已稳定截断。"
+                ),
                 "evidence": [],
             })
         if snapshot["mappingTruncated"]:
@@ -2541,6 +2597,8 @@ __all__ = [
     "MAX_TOTAL_FRESHNESS_BYTES",
     "MAX_STRUCTURE_MAPPING_CANDIDATES",
     "MAX_STRUCTURE_MAPPING_QUERIES",
+    "MAX_ARCHITECTURE_RAW_EVIDENCE_CANDIDATES",
+    "MAX_ARCHITECTURE_PHYSICAL_EDGE_QUERIES",
     "repository_architecture_data",
     "repository_flow_data",
     "repository_overview_data",

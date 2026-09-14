@@ -329,20 +329,33 @@ class ArchitectureSummaryOutput(_ExtensibleModel):
     evidence: list[TourEvidenceOutput]
 
 
+class ArchitectureComponentEntityOutput(TourEntityOutput):
+    layer: Literal["L2"]
+
+
+class ArchitectureConnectionOutput(TourRelationOutput):
+    layer: Literal["L2"]
+
+
+class ArchitectureEntryEntityOutput(TourEntityOutput):
+    kind: Literal["file"]
+    layer: Literal["L1"]
+
+
 class ArchitectureComponentOutput(_ExtensibleModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     group: Literal["entry", "core", "support"]
     responsibility: str = Field(min_length=1)
     paths: list[str] = Field(min_length=1, max_length=3)
-    entity: TourEntityOutput
+    entity: ArchitectureComponentEntityOutput
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ArchitectureEntryOutput(_ExtensibleModel):
     path: str = Field(min_length=1)
     reason: str = Field(min_length=1)
-    entity: TourEntityOutput
+    entity: ArchitectureEntryEntityOutput
     evidence: list[TourEvidenceOutput] = Field(min_length=1)
 
 
@@ -350,7 +363,7 @@ class ArchitectureDataOutput(_ExtensibleModel):
     layout: Literal["cognitive-components"]
     summary: ArchitectureSummaryOutput
     components: list[ArchitectureComponentOutput] = Field(max_length=8)
-    connections: list[TourRelationOutput] = Field(max_length=12)
+    connections: list[ArchitectureConnectionOutput] = Field(max_length=12)
     entry_points: list[ArchitectureEntryOutput] = Field(alias="entryPoints", max_length=3)
     stats: OverviewStatsOutput
 
@@ -383,19 +396,57 @@ class ArchitectureViewOutput(_ExtensibleModel):
         return value
 
 
-class FlowTaskOutput(_ExtensibleModel):
+class FlowRequestTaskOutput(_ExtensibleModel):
     title: str = Field(min_length=1)
-    source: str = Field(min_length=1)
-    entity: TourEntityOutput | None = None
-    evidence: list[TourEvidenceOutput] | None = None
+    source: Literal["request", "request-redacted"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def forbid_provenance(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and ({"entity", "evidence"} & value.keys()):
+            raise ValueError("request exampleTask 不得包含 provenance。")
+        return value
+
+
+class FlowTaskEntityOutput(TourEntityOutput):
+    kind: Literal["task"]
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+
+
+class FlowTaskEvidenceOutput(TourEvidenceOutput):
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+
+
+class FlowHistoryTaskOutput(_ExtensibleModel):
+    title: str = Field(min_length=1)
+    source: Literal["task-events"]
+    entity: FlowTaskEntityOutput
+    evidence: list[FlowTaskEvidenceOutput] = Field(min_length=1)
+
+
+FlowTaskOutput = Annotated[
+    FlowRequestTaskOutput | FlowHistoryTaskOutput,
+    Field(discriminator="source"),
+]
+
+
+class FlowKeyFileEntityOutput(TourEntityOutput):
+    kind: Literal["file"]
+    layer: Literal["L1"]
+
+
+class FlowKeyFileRelationOutput(TourRelationOutput):
+    layer: Literal["L2"]
 
 
 class FlowKeyFileOutput(_ExtensibleModel):
     path: str = Field(min_length=1)
     module_id: str = Field(alias="moduleId", min_length=1)
     module_name: str = Field(alias="moduleName", min_length=1)
-    entity: TourEntityOutput
-    relation: TourRelationOutput
+    entity: FlowKeyFileEntityOutput
+    relation: FlowKeyFileRelationOutput
     evidence: list[TourEvidenceOutput] = Field(min_length=1)
 
 
