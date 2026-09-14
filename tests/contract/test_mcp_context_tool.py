@@ -95,7 +95,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
 
     async def _call(
         self,
-        arguments: dict[str, Any],
+        arguments: Any,
         *,
         tool_name: str = "agentnavi_context",
     ):
@@ -198,6 +198,22 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             "file:///Users/alice/url-secret.py",
         )
         cases = (
+            ("agentnavi_context", None, "query"),
+            (
+                "agentnavi_visualize",
+                {"query": private_tokens[0], "project_id": private_tokens[1]},
+                "view",
+            ),
+            (
+                "agentnavi_visualize",
+                {"view": private_tokens[0], "workspace": private_tokens[2]},
+                "view",
+            ),
+            (
+                "agentnavi_context",
+                {"project_id": private_tokens[3]},
+                "query",
+            ),
             (
                 "agentnavi_visualize",
                 {"view": private_tokens[0], "query": "会员"},

@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 
-import { applyToolInput, applyToolResult } from "../.test-dist/src/bridge.js";
+import {
+  AgentNaviAppLifecycle,
+  applyToolInput,
+  applyToolResult,
+} from "../.test-dist/src/bridge.js";
 import { AgentNaviShell } from "../.test-dist/src/shell.js";
 
 const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
@@ -100,4 +104,53 @@ test("invalid and opaque error results never leave the previous map visible", ()
     assert.equal(document.querySelector("#error-panel").hidden, false);
     assert.doesNotMatch(document.querySelector("#error-message").textContent, /private|secret/);
   }
+});
+
+test("connect completion never overwrites tool activity received during handshake", () => {
+  const first = setup();
+  const renderedLifecycle = new AgentNaviAppLifecycle(first.shell);
+  renderedLifecycle.handleToolResult({ structuredContent: fixture() });
+  renderedLifecycle.handleConnected("dark");
+  assert.equal(first.document.querySelector("#connection-label").textContent, "已连接");
+  assert.equal(first.document.documentElement.dataset.theme, "dark");
+  renderedLifecycle.handleConnectionFailure();
+  assert.equal(first.document.querySelector("#context-map").hidden, false);
+
+  const second = setup();
+  const pendingLifecycle = new AgentNaviAppLifecycle(second.shell);
+  pendingLifecycle.handleToolInput({ query: "new task" });
+  pendingLifecycle.handleConnected("light");
+  assert.equal(second.document.querySelector("#connection-label").textContent, "正在查询");
+
+  const third = setup();
+  const idleLifecycle = new AgentNaviAppLifecycle(third.shell);
+  idleLifecycle.handleConnected("light");
+  assert.equal(third.document.querySelector("#connection-label").textContent, "等待结果");
+});
+
+test("every displayed non-path string hides local path tokens recursively", () => {
+  const { document, shell } = setup();
+  const malicious = fixture();
+  malicious.project.name = "repo at /private/project";
+  malicious.project.kind = String.raw`C:\Users\alice\kind`;
+  malicious.data.concepts[0].label = "file:///Users/alice/concept";
+  malicious.data.concepts[0].source = String.raw`\\server\share\source`;
+  malicious.data.concepts[0].files[0].relation = "from /private/relation";
+  malicious.data.concepts[0].files[0].language = "~/private-language";
+  malicious.data.files[0].relation = "from /private/candidate";
+  malicious.data.files[0].language = String.raw`C:\private\language`;
+  malicious.warnings[0].code = "file:///private/code";
+  malicious.warnings[0].message = String.raw`\\server\share\warning`;
+  malicious.warnings.push({
+    code: "API_DOC",
+    message: "参考 https://example.com/api/users",
+  });
+
+  applyToolResult(shell, { structuredContent: malicious });
+  const visible = document.body.textContent;
+  for (const token of ["/private", "C:\\", "\\\\server", "file://", "~/"]) {
+    assert.doesNotMatch(visible, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(visible, /\[内容含路径，已隐藏\]/);
+  assert.match(visible, /https:\/\/example\.com\/api\/users/);
 });

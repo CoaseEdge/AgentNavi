@@ -5,6 +5,8 @@
   --green: #5faf87;
   --amber: #d6a85f;
   --amber-text: #72500d;
+  --danger: #8f342c;
+  --danger-text: #8f342c;
   --muted: #4e5a53;
   --rail-muted: #abb5ae;
   --panel: #d9d5ca;
@@ -21,6 +23,8 @@
   --line: rgba(231, 226, 214, 0.18);
   --muted: #abb5ae;
   --amber-text: #d6a85f;
+  --danger: #ef8d83;
+  --danger-text: #ef8d83;
 }
 
 * {
@@ -340,14 +344,14 @@ h1 {
 .error-panel {
   margin-top: 24px;
   padding: 16px;
-  border: 1px solid #8f342c;
+  border: 1px solid var(--danger);
   border-left-width: 4px;
-  background: color-mix(in srgb, #8f342c 10%, var(--paper));
+  background: color-mix(in srgb, var(--danger) 10%, var(--paper));
   color: var(--ink);
 }
 
 .error-label {
-  color: #8f342c;
+  color: var(--danger-text);
 }
 
 .error-panel p {

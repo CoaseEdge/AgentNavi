@@ -69,6 +69,11 @@ function text(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value.slice(0, MAX_TEXT) : fallback;
 }
 
+function displayText(value: unknown, fallback = ""): string {
+  const candidate = text(value, fallback);
+  return containsPrivatePath(candidate) ? "[内容含路径，已隐藏]" : candidate;
+}
+
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(0, Math.trunc(value))
@@ -88,8 +93,8 @@ function contextFile(value: unknown): ContextFile | undefined {
   if (!isCanonicalRelativePath(path)) return undefined;
   return {
     path,
-    relation: text(item.relation, "related"),
-    language: text(item.language, "unknown"),
+    relation: displayText(item.relation, "related"),
+    language: displayText(item.language, "unknown"),
   };
 }
 
@@ -121,13 +126,17 @@ function containsPosixAbsolute(value: string): boolean {
   return false;
 }
 
-export function safeTaskQuery(value: string): string {
-  if (
+function containsPrivatePath(value: string): boolean {
+  return (
     value.toLowerCase().includes("file://") ||
     value.includes("~/") ||
     WINDOWS_ABSOLUTE.test(value) ||
     containsPosixAbsolute(value)
-  ) {
+  );
+}
+
+export function safeTaskQuery(value: string): string {
+  if (containsPrivatePath(value)) {
     return "[查询含路径，已隐藏]";
   }
   return value.slice(0, MAX_TEXT);
@@ -137,7 +146,7 @@ function contextConcept(value: unknown): ContextConcept | undefined {
   const item = record(value);
   if (!item) return undefined;
   const id = text(item.id);
-  const label = text(item.label);
+  const label = displayText(item.label);
   if (!id || !label) return undefined;
   const files = Array.isArray(item.files)
     ? item.files.slice(0, MAX_ITEMS).map(contextFile).filter((entry): entry is ContextFile => Boolean(entry))
@@ -146,7 +155,7 @@ function contextConcept(value: unknown): ContextConcept | undefined {
     id,
     label,
     confidence: confidence(item.confidence),
-    source: text(item.source, "unknown"),
+    source: displayText(item.source, "unknown"),
     files,
   };
 }
@@ -154,8 +163,8 @@ function contextConcept(value: unknown): ContextConcept | undefined {
 function contextWarning(value: unknown): ContextWarning | undefined {
   const item = record(value);
   if (!item) return undefined;
-  const code = text(item.code);
-  const message = text(item.message);
+  const code = displayText(item.code);
+  const message = displayText(item.message);
   return code && message ? { code, message } : undefined;
 }
 
@@ -178,8 +187,8 @@ export function parseContextView(value: unknown): ContextView | undefined {
     return undefined;
   }
   const projectId = text(project.id);
-  const projectName = text(project.name);
-  const projectKind = text(project.kind);
+  const projectName = displayText(project.name);
+  const projectKind = displayText(project.kind);
   if (!projectId || !projectName || !projectKind) return undefined;
 
   const concepts = Array.isArray(data.concepts)

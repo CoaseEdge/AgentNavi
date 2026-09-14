@@ -20,12 +20,15 @@ function contrast(foreground, background) {
 test("small text color tokens meet WCAG AA contrast", () => {
   assert.match(css, /--muted:\s*#4e5a53/);
   assert.match(css, /--amber-text:\s*#72500d/);
+  assert.match(css, /--danger-text:\s*#8f342c/);
   assert.ok(contrast("#4e5a53", "#e7e2d6") >= 4.5);
   assert.ok(contrast("#4e5a53", "#d9d5ca") >= 4.5);
   assert.ok(contrast("#abb5ae", "#101512") >= 4.5);
   assert.ok(contrast("#72500d", "#e7e2d6") >= 4.5);
   assert.ok(contrast("#72500d", "#d9d5ca") >= 4.5);
   assert.ok(contrast("#d6a85f", "#101512") >= 4.5);
+  assert.ok(contrast("#8f342c", "#e7e2d6") >= 4.5);
+  assert.ok(contrast("#ef8d83", "#101512") >= 4.5);
 });
 
 test("390px layout does not hide connection or error status", () => {

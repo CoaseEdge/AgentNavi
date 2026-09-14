@@ -15,7 +15,8 @@
     "check:generated": "npm run build && node scripts/check-generated.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "2.0.0"
+    "@modelcontextprotocol/ext-apps": "2.0.0",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "linkedom": "0.18.13",

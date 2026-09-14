@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -52,6 +54,24 @@ def _validated_text(value: Any, field: str, *, required: bool) -> str | None:
     if not value.strip() or len(value) > 4096:
         raise AgentNaviMCPError("INVALID_ARGUMENT", details={"field": field})
     return value
+
+
+async def _complete_required_tool_arguments(ctx: Any, call_next: Any) -> Any:
+    """在 SDK schema 校验前补 None，让公开参数边界处理缺失字段。"""
+
+    if ctx.method != "tools/call" or not isinstance(ctx.params, Mapping):
+        return await call_next(ctx)
+    params = dict(ctx.params)
+    name = params.get("name")
+    raw_arguments = params.get("arguments")
+    if name not in {"agentnavi_context", "agentnavi_visualize"}:
+        return await call_next(ctx)
+    arguments = dict(raw_arguments) if isinstance(raw_arguments, Mapping) else {}
+    arguments.setdefault("query", None)
+    if name == "agentnavi_visualize":
+        arguments.setdefault("view", None)
+    params["arguments"] = arguments
+    return await call_next(replace(ctx, params=params))
 
 
 def create_server(*, home: str | Path | None = None) -> Any:
@@ -170,7 +190,11 @@ def create_server(*, home: str | Path | None = None) -> Any:
         structured_output=True,
     )(agentnavi_visualize)
 
-    server = MCPServer("AgentNavi", extensions=[apps])
+    server = MCPServer(
+        "AgentNavi",
+        extensions=[apps],
+        middleware=[_complete_required_tool_arguments],
+    )
 
     # SDK v2 通过 Annotated[CallToolResult, ReturnType] 同时保留手工生成的
     # content，并为 structuredContent 发布和执行 outputSchema 校验。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import importlib.util
 import os
 import subprocess
@@ -61,6 +62,43 @@ import agentnavi.mcp.server
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_argument_middleware_discards_non_mapping_sensitive_payloads(self) -> None:
+        from agentnavi.mcp.server import _complete_required_tool_arguments
+
+        @dataclass(frozen=True)
+        class FakeContext:
+            method: str
+            params: dict[str, object]
+
+        private_tokens = (
+            "/private/posix.py",
+            r"C:\\Users\\alice\\windows.py",
+            r"\\server\share\unc.py",
+            "file:///Users/alice/url.py",
+        )
+
+        async def call_next(ctx: FakeContext) -> dict[str, object]:
+            return ctx.params
+
+        for tool_name in ("agentnavi_context", "agentnavi_visualize"):
+            with self.subTest(tool=tool_name):
+                result = asyncio.run(
+                    _complete_required_tool_arguments(
+                        FakeContext(
+                            method="tools/call",
+                            params={"name": tool_name, "arguments": list(private_tokens)},
+                        ),
+                        call_next,
+                    )
+                )
+                arguments = result["arguments"]
+                self.assertEqual(arguments["query"], None)
+                if tool_name == "agentnavi_visualize":
+                    self.assertEqual(arguments["view"], None)
+                wire = str(result)
+                for token in private_tokens:
+                    self.assertNotIn(token, wire)
 
     @unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
     def test_in_process_client_initializes_and_discovers_context_tool(self) -> None:
@@ -201,6 +239,31 @@ import agentnavi.mcp.server
                     invalid_token,
                     str(invalid.model_dump(by_alias=True)),
                 )
+                missing_tokens = (
+                    r"C:\\Users\\alice\\missing-query.py",
+                    r"\\server\share\missing-view.py",
+                    "file:///Users/alice/sibling.py",
+                )
+                for tool_name, arguments in (
+                    (
+                        "agentnavi_visualize",
+                        {"query": missing_tokens[0], "workspace": missing_tokens[1]},
+                    ),
+                    (
+                        "agentnavi_context",
+                        {"project_id": missing_tokens[2]},
+                    ),
+                    ("agentnavi_context", None),
+                ):
+                    result = await client.call_tool(tool_name, arguments)
+                    self.assertTrue(result.is_error)
+                    self.assertEqual(
+                        result.structured_content["code"],
+                        "INVALID_ARGUMENT",
+                    )
+                    wire = str(result.model_dump(by_alias=True))
+                    for token in missing_tokens:
+                        self.assertNotIn(token, wire)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             asyncio.run(verify(Path(temporary_directory) / "agentnavi-home"))
