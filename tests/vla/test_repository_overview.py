@@ -14,7 +14,10 @@ from agentnavi.mcp.adapters.repo_overview import (
     repo_overview_text,
     repo_overview_view,
 )
-from agentnavi.repository_views import repository_overview_data
+from agentnavi.repository_views import (
+    MAX_FRESHNESS_FILE_BYTES,
+    repository_overview_data,
+)
 
 
 README = """# Fixture
@@ -50,6 +53,26 @@ ARCHITECTURE = """# Architecture
 6. 投影公开视图
 7. 返回证据路径
 """
+
+
+class _ReaderProxy:
+    def __init__(self, handle, on_read):
+        self._handle = handle
+        self._on_read = on_read
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._handle.__exit__(exc_type, exc_value, traceback)
+
+    def read(self, size=-1):
+        payload = self._handle.read(size)
+        self._on_read(self._handle, payload)
+        return payload
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
 
 
 class RepositoryOverviewTestCase(unittest.TestCase):
@@ -421,6 +444,144 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         unverifiable = repository_overview_data(self.database, self._project())
         self.assertEqual(unverifiable["sourceState"]["status"], "stale")
         self.assertNotIn("可信概览", unverifiable["purpose"]["summary"])
+
+    def test_atomic_replacement_after_fd_read_is_not_reported_fresh(self) -> None:
+        readme = self.root / "README.md"
+        original = readme.read_bytes()
+        replacement = original.replace("帮助".encode(), "伪造".encode(), 1)
+        self.assertEqual(len(original), len(replacement))
+        indexed_stat = readme.stat()
+        real_open = Path.open
+        replaced = False
+
+        def replacing_open(path: Path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            if path.resolve() != readme.resolve() or args[0] != "rb":
+                return handle
+
+            def replace_after_last_read(inner, _payload):
+                nonlocal replaced
+                if replaced or inner.tell() != len(original):
+                    return
+                temporary = self.root / ".README.md.replacement"
+                temporary.write_bytes(replacement)
+                os.utime(
+                    temporary,
+                    ns=(indexed_stat.st_atime_ns, indexed_stat.st_mtime_ns),
+                )
+                os.replace(temporary, readme)
+                replaced = True
+
+            return _ReaderProxy(handle, replace_after_last_read)
+
+        with patch("pathlib.Path.open", new=replacing_open):
+            core = repository_overview_data(self.database, self._project())
+
+        self.assertTrue(replaced)
+        self.assertEqual(core["sourceState"]["status"], "stale")
+        self.assertEqual(core["purpose"], {"summary": "", "evidence": []})
+        self.assertIn(
+            "SOURCE_SNAPSHOT_STALE",
+            {warning["code"] for warning in core["warnings"]},
+        )
+
+    def test_modules_are_rebuilt_after_one_or_all_paths_become_stale(self) -> None:
+        cli = self.root / "src" / "fixture" / "cli.py"
+        main = self.root / "src" / "fixture" / "__main__.py"
+        cli.write_bytes(cli.read_bytes() + b"\n# changed\n")
+
+        one_stale = repository_overview_data(self.database, self._project())
+        runtime = next(item for item in one_stale["modules"] if item["name"] == "Runtime")
+        self.assertEqual(runtime["paths"], ["src/fixture/__main__.py"])
+        self.assertEqual(runtime["summary"], "关联 1 个仓库文件。")
+        self.assertEqual(len(runtime["evidence"]), 1)
+        self.assertEqual(runtime["evidence"][0]["path"], "src/fixture/__main__.py")
+        self.assertIn("关联 1 个已核对文件", runtime["evidence"][0]["summary"])
+
+        main.write_bytes(main.read_bytes() + b"\n# changed\n")
+        all_stale = repository_overview_data(self.database, self._project())
+
+        self.assertNotIn("Runtime", {item["name"] for item in all_stale["modules"]})
+        self.assertTrue(all(item["paths"] and item["evidence"] for item in all_stale["modules"]))
+
+    def test_oversized_document_and_module_are_unverifiable_without_reading_body(self) -> None:
+        cases = ("README.md", "src/fixture/cli.py")
+        real_open = Path.open
+
+        for relative in cases:
+            with self.subTest(relative=relative):
+                absolute = self.root / relative
+                original = absolute.read_bytes()
+                absolute.write_bytes(b"X" * (MAX_FRESHNESS_FILE_BYTES + 1))
+                self._sync_file_state(relative)
+                bytes_read = 0
+
+                def counting_open(path: Path, *args, **kwargs):
+                    handle = real_open(path, *args, **kwargs)
+                    if path.resolve() != absolute.resolve() or args[0] != "rb":
+                        return handle
+
+                    def count(_inner, payload):
+                        nonlocal bytes_read
+                        bytes_read += len(payload)
+
+                    return _ReaderProxy(handle, count)
+
+                with patch("pathlib.Path.open", new=counting_open):
+                    core = repository_overview_data(self.database, self._project())
+
+                self.assertEqual(bytes_read, 0)
+                self.assertEqual(core["sourceState"]["status"], "stale")
+                public_paths = {
+                    path
+                    for module in core["modules"]
+                    for path in module["paths"]
+                }
+                public_paths.update(item["path"] for item in core["readingOrder"])
+                self.assertNotIn(relative, public_paths)
+
+                absolute.write_bytes(original)
+                self._sync_file_state(relative)
+
+    def test_total_freshness_io_budget_bounds_reads_and_marks_remainder_stale(self) -> None:
+        budget = sum(
+            (self.root / path).stat().st_size
+            for path in (
+                "README.md",
+                "docs/architecture.md",
+                "pyproject.toml",
+                "src/fixture/__main__.py",
+            )
+        )
+        real_open = Path.open
+        bytes_read = 0
+
+        def counting_open(path: Path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            if not args or args[0] != "rb":
+                return handle
+
+            def count(_inner, payload):
+                nonlocal bytes_read
+                bytes_read += len(payload)
+
+            return _ReaderProxy(handle, count)
+
+        with (
+            patch("agentnavi.repository_views.MAX_TOTAL_FRESHNESS_BYTES", budget),
+            patch("pathlib.Path.open", new=counting_open),
+        ):
+            core = repository_overview_data(self.database, self._project())
+
+        self.assertLessEqual(bytes_read, budget)
+        self.assertEqual(core["sourceState"]["status"], "stale")
+        runtime = next(item for item in core["modules"] if item["name"] == "Runtime")
+        self.assertEqual(runtime["paths"], ["src/fixture/__main__.py"])
+        self.assertEqual(runtime["summary"], "关联 1 个仓库文件。")
+        self.assertNotIn(
+            "src/fixture/cli.py",
+            {item["path"] for item in core["readingOrder"]},
+        )
 
     def test_changed_final_output_paths_are_stale_and_removed(self) -> None:
         cases = (

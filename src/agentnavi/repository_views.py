@@ -28,6 +28,8 @@ MAX_TOTAL_DOCUMENT_BYTES = 128 * 1024
 MAX_MODULES = 8
 MAX_READING_ORDER = 7
 MAX_FRESHNESS_PATHS = 48
+MAX_FRESHNESS_FILE_BYTES = 256 * 1024
+MAX_TOTAL_FRESHNESS_BYTES = 1024 * 1024
 
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
@@ -50,6 +52,19 @@ class _Document:
     path: str
     lines: tuple[tuple[int, str], ...]
     truncated: bool
+
+
+@dataclass(slots=True)
+class _FreshnessBudget:
+    """限制用于核对索引快照的磁盘读取量，与展示内容预算相互独立。"""
+
+    remaining: int
+
+    def claim(self, size: int) -> bool:
+        if size < 0 or size > MAX_FRESHNESS_FILE_BYTES or size > self.remaining:
+            return False
+        self.remaining -= size
+        return True
 
 
 def _safe_prose(value: str, *, limit: int = 320) -> str | None:
@@ -127,8 +142,9 @@ def _read_snapshot_file(
     state: sqlite3.Row | None,
     *,
     cache_limit: int,
+    budget: _FreshnessBudget,
 ) -> bytes | None:
-    """一次打开完成完整 digest 校验，并仅缓存调用方需要的前缀。"""
+    """在 freshness I/O 预算内完成 digest 校验，并仅缓存所需前缀。"""
 
     if state is None or not str(state["digest"]):
         return None
@@ -136,19 +152,37 @@ def _read_snapshot_file(
     try:
         with path.open("rb") as handle:
             before = os.fstat(handle.fileno())
+            if (
+                before.st_size != state["size"]
+                or before.st_mtime_ns != state["mtime_ns"]
+            ):
+                return None
+            if not budget.claim(before.st_size):
+                return None
             cached = bytearray()
-            for chunk in iter(lambda: handle.read(64 * 1024), b""):
+            remaining_bytes = before.st_size
+            while remaining_bytes:
+                chunk = handle.read(min(64 * 1024, remaining_bytes))
+                if not chunk:
+                    return None
                 hasher.update(chunk)
                 remaining = cache_limit + 1 - len(cached)
                 if remaining > 0:
                     cached.extend(chunk[:remaining])
+                remaining_bytes -= len(chunk)
             after = os.fstat(handle.fileno())
+        current = path.stat()
     except OSError:
         return None
     if (
-        before.st_size != after.st_size
+        before.st_dev != after.st_dev
+        or before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
         or before.st_ino != after.st_ino
+        or current.st_dev != after.st_dev
+        or current.st_ino != after.st_ino
+        or current.st_size != after.st_size
+        or current.st_mtime_ns != after.st_mtime_ns
         or after.st_size != state["size"]
         or after.st_mtime_ns != state["mtime_ns"]
         or hasher.hexdigest() != str(state["digest"])
@@ -171,6 +205,7 @@ def _fresh_path(
     relative: str,
     states: dict[str, sqlite3.Row],
     freshness: dict[str, bool],
+    budget: _FreshnessBudget,
 ) -> bool:
     if relative in freshness:
         return freshness[relative]
@@ -180,6 +215,7 @@ def _fresh_path(
             resolved,
             states.get(relative),
             cache_limit=0,
+            budget=budget,
         ) is not None
     except (OSError, RuntimeError, ValueError):
         fresh = False
@@ -191,6 +227,7 @@ def _read_documents(
     root: Path,
     candidates: list[str],
     states: dict[str, sqlite3.Row],
+    budget: _FreshnessBudget,
 ) -> tuple[list[_Document], list[dict[str, Any]], bool, dict[str, bool]]:
     documents: list[_Document] = []
     warnings: list[dict[str, Any]] = []
@@ -225,6 +262,7 @@ def _read_documents(
                 resolved,
                 states.get(relative),
                 cache_limit=allowance,
+                budget=budget,
             )
             if payload is None:
                 freshness[relative] = False
@@ -513,6 +551,7 @@ def _manifest_entry(
     paths: list[str],
     states: dict[str, sqlite3.Row],
     freshness: dict[str, bool],
+    budget: _FreshnessBudget,
 ) -> tuple[str | None, tuple[str, str, dict[str, Any]] | None]:
     def read_manifest(relative: str) -> tuple[bytes, Path] | None:
         candidate = root.joinpath(*PurePosixPath(relative).parts)
@@ -526,6 +565,7 @@ def _manifest_entry(
                 resolved,
                 states.get(relative),
                 cache_limit=MAX_DOCUMENT_BYTES,
+                budget=budget,
             )
         except (OSError, RuntimeError, ValueError):
             freshness[relative] = False
@@ -608,6 +648,7 @@ def _reading_order(
     states: dict[str, sqlite3.Row],
     modules: list[dict[str, Any]],
     freshness: dict[str, bool],
+    budget: _FreshnessBudget,
 ) -> list[dict[str, Any]]:
     rows = list(
         connection.execute(
@@ -649,7 +690,7 @@ def _reading_order(
     if architecture in read_documents:
         add(architecture, "理解项目架构与主流程。")
 
-    manifest, entry = _manifest_entry(root, paths, states, freshness)
+    manifest, entry = _manifest_entry(root, paths, states, freshness, budget)
     if manifest is not None:
         add(manifest, "确认构建配置、依赖与公开命令。")
     if entry is not None:
@@ -718,6 +759,7 @@ def _filter_fresh_output_paths(
     freshness: dict[str, bool],
     modules: list[dict[str, Any]],
     reading_order: list[dict[str, Any]],
+    budget: _FreshnessBudget,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
     """只核对最终会展示的有界路径集合，并剔除失效路径证据。"""
 
@@ -745,19 +787,30 @@ def _filter_fresh_output_paths(
         if relative not in inspectable:
             freshness[relative] = False
         else:
-            _fresh_path(resolved_root, relative, states, freshness)
+            _fresh_path(resolved_root, relative, states, freshness, budget)
 
     stale_paths = [path for path in ordered_references if not freshness.get(path, False)]
     filtered_modules: list[dict[str, Any]] = []
     for module in modules:
-        item = dict(module)
-        item["paths"] = [path for path in module["paths"] if freshness.get(path, False)]
-        item["evidence"] = [
-            evidence
-            for evidence in module["evidence"]
-            if not isinstance(evidence.get("path"), str)
-            or freshness.get(evidence["path"], False)
-        ]
+        paths = [path for path in module["paths"] if freshness.get(path, False)]
+        if not paths:
+            continue
+        count = len(paths)
+        item = {
+            **module,
+            "summary": f"关联 {count} 个仓库文件。",
+            "paths": paths,
+            "evidence": [
+                {
+                    "kind": "graph",
+                    "summary": f"语义概念关联 {count} 个已核对文件。",
+                    "layer": "L2",
+                    "source": module["source"],
+                    "confidence": module["confidence"],
+                    "path": paths[0],
+                }
+            ],
+        }
         filtered_modules.append(item)
 
     filtered_reading = [
@@ -812,6 +865,7 @@ def repository_overview_data(
         warnings: list[dict[str, Any]] = []
         snapshot_stale = False
         freshness: dict[str, bool] = {}
+        freshness_budget = _FreshnessBudget(remaining=MAX_TOTAL_FRESHNESS_BYTES)
         if last_scan_at is None:
             documents: list[_Document] = []
         else:
@@ -819,6 +873,7 @@ def repository_overview_data(
                 root,
                 document_paths,
                 states,
+                freshness_budget,
             )
             warnings.extend(document_warnings)
             for fixed_path in _FIXED_DOCUMENT_PATHS:
@@ -862,6 +917,7 @@ def repository_overview_data(
             states,
             modules,
             freshness,
+            freshness_budget,
         )
         if last_scan_at is not None:
             modules, reading_order, path_warnings, paths_stale = (
@@ -871,6 +927,7 @@ def repository_overview_data(
                     freshness,
                     modules,
                     reading_order,
+                    freshness_budget,
                 )
             )
             warnings.extend(path_warnings)
@@ -977,5 +1034,7 @@ __all__ = [
     "MAX_DOCUMENT_BYTES",
     "MAX_DOCUMENT_LINES",
     "MAX_TOTAL_DOCUMENT_BYTES",
+    "MAX_FRESHNESS_FILE_BYTES",
+    "MAX_TOTAL_FRESHNESS_BYTES",
     "repository_overview_data",
 ]
