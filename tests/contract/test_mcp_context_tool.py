@@ -92,13 +92,38 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             )
             connection.commit()
 
-    async def _call(self, arguments: dict[str, str]):
+    async def _call(
+        self,
+        arguments: dict[str, str],
+        *,
+        tool_name: str = "agentnavi_context",
+    ):
         from mcp import Client
 
         from agentnavi.mcp.server import create_server
 
         async with Client(create_server(home=self.home), raise_exceptions=True) as client:
-            return await client.call_tool("agentnavi_context", arguments)
+            return await client.call_tool(tool_name, arguments)
+
+    def test_visualize_tool_returns_context_view_and_readable_fallback(self) -> None:
+        self._add_project()
+
+        result = asyncio.run(
+            self._call(
+                {"view": "context", "query": "会员", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["schemaVersion"], "agentnavi.vla.v1")
+        self.assertEqual(result.structured_content["view"], "context")
+        self.assertEqual(
+            result.structured_content["data"]["files"][0]["path"],
+            "src/membership.py",
+        )
+        self.assertIn("会员", result.content[0].text)
+        self.assertIn("src/membership.py", result.content[0].text)
 
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()

@@ -1,0 +1,25 @@
+{
+  "name": "agentnavi-mcp-app",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && node scripts/security-check.mjs",
+    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/protocol.test.js",
+    "build": "vite build",
+    "generate": "npm run build && node scripts/sync-generated.mjs",
+    "check:generated": "npm run build && node scripts/check-generated.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vite-plugin-singlefile": "2.3.3"
+  }
+}

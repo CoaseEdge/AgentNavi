@@ -74,7 +74,10 @@ import agentnavi.mcp.server
                 self.assertIsNotNone(client.server_info)
                 self.assertEqual(client.server_info.name, "AgentNavi")
                 tools = (await client.list_tools()).tools
-                self.assertEqual([tool.name for tool in tools], ["agentnavi_context"])
+                self.assertEqual(
+                    [tool.name for tool in tools],
+                    ["agentnavi_context", "agentnavi_visualize"],
+                )
                 self.assertEqual(tools[0].input_schema["required"], ["query"])
                 self.assertEqual(
                     set(tools[0].input_schema["properties"]),
@@ -95,7 +98,11 @@ import agentnavi.mcp.server
                 self.assertFalse(tools[0].annotations.destructive_hint)
                 self.assertTrue(tools[0].annotations.idempotent_hint)
                 self.assertFalse(tools[0].annotations.open_world_hint)
-                self.assertEqual((await client.list_resources()).resources, [])
+                resources = (await client.list_resources()).resources
+                self.assertEqual(
+                    [str(resource.uri) for resource in resources],
+                    ["ui://agentnavi/app.html"],
+                )
                 self.assertEqual((await client.list_prompts()).prompts, [])
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -116,7 +123,52 @@ import agentnavi.mcp.server
             async with Client(stdio_client(server)) as client:
                 self.assertEqual(client.server_info.name, "AgentNavi")
                 tools = (await client.list_tools()).tools
-                self.assertEqual([tool.name for tool in tools], ["agentnavi_context"])
+                self.assertEqual(
+                    [tool.name for tool in tools],
+                    ["agentnavi_context", "agentnavi_visualize"],
+                )
+                resources = (await client.list_resources()).resources
+                self.assertEqual(
+                    [str(resource.uri) for resource in resources],
+                    ["ui://agentnavi/app.html"],
+                )
+                self.assertEqual(
+                    resources[0].mime_type,
+                    "text/html;profile=mcp-app",
+                )
+                self.assertEqual(
+                    resources[0].meta,
+                    {
+                        "ui": {
+                            "prefersBorder": True,
+                            "csp": {
+                                "connectDomains": [],
+                                "resourceDomains": [],
+                                "frameDomains": [],
+                                "baseUriDomains": [],
+                            },
+                        }
+                    },
+                )
+                content = (await client.read_resource("ui://agentnavi/app.html")).contents[0]
+                self.assertEqual(content.mime_type, "text/html;profile=mcp-app")
+                self.assertEqual(content.meta, resources[0].meta)
+                self.assertIn("AgentNavi ContextMap", content.text)
+                self.assertFalse(tools[0].meta)
+                self.assertEqual(
+                    tools[1].meta,
+                    {"ui": {"resourceUri": "ui://agentnavi/app.html"}},
+                )
+                fallback = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "context", "query": "会员入口"},
+                )
+                self.assertTrue(fallback.is_error)
+                self.assertEqual(
+                    fallback.structured_content["code"],
+                    "PROJECT_REQUIRED",
+                )
+                self.assertIn("AgentNavi 错误", fallback.content[0].text)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             asyncio.run(verify(Path(temporary_directory) / "agentnavi-home"))

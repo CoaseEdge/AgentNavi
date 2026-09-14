@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..config import Settings
 from ..database import ensure_database
@@ -14,6 +15,22 @@ from .adapters.context import context_text, context_view
 from .errors import to_public_error
 from .project_resolver import resolve_project
 from .protocol import Error
+
+
+APP_URI = "ui://agentnavi/app.html"
+APP_MIME_TYPE = "text/html;profile=mcp-app"
+APP_RESOURCE_META = {
+    "ui": {
+        "prefersBorder": True,
+        "csp": {
+            "connectDomains": [],
+            "resourceDomains": [],
+            "frameDomains": [],
+            "baseUriDomains": [],
+        },
+    }
+}
+APP_TOOL_META = {"ui": {"resourceUri": APP_URI}}
 
 
 def _format_public_error(error: Error) -> str:
@@ -26,7 +43,7 @@ def _format_public_error(error: Error) -> str:
 
 
 def create_server(*, home: str | Path | None = None) -> Any:
-    """创建注册了只读 Context reasoning tool 的 MCP Server。"""
+    """创建注册了只读 reasoning、presentation tool 与 App 资源的 Server。"""
 
     from mcp.server import MCPServer
     from mcp.types import CallToolResult, TextContent
@@ -36,7 +53,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
     database = ensure_database(Settings.load(home))
     server = MCPServer("AgentNavi")
 
-    def agentnavi_context(
+    def call_context(
         query: str,
         project_id: str | None = None,
         workspace: str | None = None,
@@ -66,6 +83,25 @@ def create_server(*, home: str | Path | None = None) -> Any:
                 isError=True,
             )
 
+    def agentnavi_context(
+        query: str,
+        project_id: str | None = None,
+        workspace: str | None = None,
+    ) -> Any:
+        """生成只供模型推理使用的 Context 结果。"""
+
+        return call_context(query, project_id, workspace)
+
+    def agentnavi_visualize(
+        view: Literal["context"],
+        query: str,
+        project_id: str | None = None,
+        workspace: str | None = None,
+    ) -> Any:
+        """生成 MCP App 与无 UI Host 都可消费的 Context 结果。"""
+
+        return call_context(query, project_id, workspace)
+
     # SDK v2 通过 Annotated[CallToolResult, ReturnType] 同时保留手工生成的
     # content，并为 structuredContent 发布和执行 outputSchema 校验。
     agentnavi_context.__annotations__["return"] = CONTEXT_TOOL_RESULT
@@ -77,6 +113,31 @@ def create_server(*, home: str | Path | None = None) -> Any:
         structured_output=True,
     )
 
+    agentnavi_visualize.__annotations__["return"] = CONTEXT_TOOL_RESULT
+    server.add_tool(
+        agentnavi_visualize,
+        name="agentnavi_visualize",
+        description="用只读 ContextMap 展示任务、概念与候选文件。",
+        annotations=context_tool_annotations(),
+        meta=APP_TOOL_META,
+        structured_output=True,
+    )
+
+    @server.resource(
+        APP_URI,
+        name="AgentNavi ContextMap",
+        title="AgentNavi ContextMap",
+        description="任务到概念与文件的只读项目导航图。",
+        mime_type=APP_MIME_TYPE,
+        meta=APP_RESOURCE_META,
+    )
+    def agentnavi_app() -> str:
+        return (
+            files("agentnavi.mcp.resources")
+            .joinpath("agentnavi-app.html")
+            .read_text(encoding="utf-8")
+        )
+
     return server
 
 
@@ -86,4 +147,11 @@ def run_stdio(*, home: str | Path | None = None) -> None:
     create_server(home=home).run("stdio")
 
 
-__all__ = ["create_server", "run_stdio"]
+__all__ = [
+    "APP_MIME_TYPE",
+    "APP_RESOURCE_META",
+    "APP_TOOL_META",
+    "APP_URI",
+    "create_server",
+    "run_stdio",
+]
