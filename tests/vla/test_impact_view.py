@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -8,8 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentnavi.config import Settings
+from agentnavi import impact_view as impact_module
 from agentnavi.database import Database, ensure_database
-from agentnavi.impact_view import _lane_rows, _resolve_focus, _semantic_rows, _tested_by_rows, impact_view_data
+from agentnavi.impact_view import (
+    _anchor_mapping_rows, _focus_concept_rows, _history_rows, _lane_rows,
+    _resolve_focus, _semantic_rows, _tested_by_rows, impact_view_data,
+)
 from agentnavi.mcp.adapters.impact import impact_text, impact_to_view
 
 
@@ -393,8 +398,8 @@ class ImpactViewTestCase(unittest.TestCase):
                     connection.set_trace_callback(None)
         with patch.object(self.database, "connect", traced_connect):
             data = impact_view_data(self.database, self.project, "Focus")
-        self.assertEqual(sum("impact-semantic-incoming" in sql for sql in statements), 1)
-        self.assertEqual(sum("impact-semantic-outgoing" in sql for sql in statements), 1)
+        self.assertIn(sum("impact-semantic-incoming" in sql for sql in statements), {1, 2})
+        self.assertIn(sum("impact-semantic-outgoing" in sql for sql in statements), {1, 2})
         self.assertEqual(sum("impact-physical-lookup-exact" in sql for sql in statements), 1)
         self.assertEqual(data["semantic"][0]["peer"]["label"], "Dependency")
 
@@ -471,6 +476,7 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertIn("IMPACT_TESTED_BY_SCAN_TRUNCATED", {item["code"] for item in data["warnings"]})
 
     def test_raw_endpoint_windows_bound_invalid_edge_populations_before_filtering(self) -> None:
+        self.assertNotIn("MATERIALIZED", inspect.getsource(impact_module))
         now = "2026-09-15T10:00:00+00:00"
         focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
         focus_concept = Database.node_id("fixture", 2, "concept", "focus")
@@ -502,6 +508,9 @@ class ImpactViewTestCase(unittest.TestCase):
                 lambda: _lane_rows(connection, "fixture", focus_file, "incoming"),
                 lambda: _semantic_rows(connection, "fixture", focus_concept, "outgoing"),
                 lambda: _tested_by_rows(connection, "fixture", focus_concept),
+                lambda: _anchor_mapping_rows(connection, "fixture", focus_concept),
+                lambda: _focus_concept_rows(connection, "fixture", focus_file),
+                lambda: _history_rows(connection, "fixture", focus_file),
             ):
                 steps = 0
                 def count_vm() -> int:
@@ -516,18 +525,22 @@ class ImpactViewTestCase(unittest.TestCase):
             plans = [row for statement in statements if "impact-" in statement
                      for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()]
             connection.commit()
-        self.assertEqual([len(result) for result in results], [0, 0, 0])
+        self.assertEqual([len(result) for result in results], [0, 0, 0, 0, 32, 0])
         self.assertTrue(all(result.raw_truncated for result in results))
         self.assertTrue(all(steps < 2000 for steps in step_counts), step_counts)
         detail = " ".join(str(row[3]).upper() for row in plans)
         self.assertIn("IDX_EDGES_TARGET_ENDPOINT", detail)
         self.assertIn("IDX_EDGES_SOURCE_ENDPOINT", detail)
         self.assertNotIn("TEMP B-TREE", detail)
-        data = impact_view_data(self.database, self.project, "Focus")
-        codes = {item["code"] for item in data["warnings"]}
+        concept_data = impact_view_data(self.database, self.project, "Focus")
+        file_data = impact_view_data(self.database, self.project, "src/focus.py")
+        codes = {item["code"] for data in (concept_data, file_data) for item in data["warnings"]}
         self.assertIn("IMPACT_LANE_SCAN_TRUNCATED", codes)
         self.assertIn("IMPACT_SEMANTIC_SCAN_TRUNCATED", codes)
         self.assertIn("IMPACT_TESTED_BY_SCAN_TRUNCATED", codes)
+        self.assertIn("IMPACT_ANCHOR_SCAN_TRUNCATED", codes)
+        self.assertIn("IMPACT_FOCUS_CONCEPTS_TRUNCATED", codes)
+        self.assertIn("IMPACT_HISTORY_SCAN_TRUNCATED", codes)
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")

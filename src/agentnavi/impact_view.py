@@ -33,6 +33,29 @@ class _BoundedRows(list[sqlite3.Row]):
         self.raw_truncated = raw_truncated
 
 
+def _raw_edge_window(connection: sqlite3.Connection, project_id: str, *,
+                     endpoint: str, endpoint_id: str, limit: int,
+                     comment: str) -> _BoundedRows:
+    if endpoint not in {"source_id", "target_id"}:
+        raise ValueError("unsupported edge endpoint")
+    index = "idx_edges_source_endpoint" if endpoint == "source_id" else "idx_edges_target_endpoint"
+    rows = connection.execute(
+        f"""SELECT /* {comment} */ edge.id, edge.rowid AS recorded_order
+            FROM edges edge INDEXED BY {index}
+            WHERE edge.project_id=? AND edge.{endpoint}=?
+            ORDER BY edge.rowid DESC LIMIT ?""",
+        (project_id, endpoint_id, limit + 1),
+    ).fetchall()
+    return _BoundedRows(list(rows[:limit]), raw_truncated=len(rows) > limit)
+
+
+def _hydrate_in_record_order(raw: _BoundedRows, hydrated: list[sqlite3.Row]) -> _BoundedRows:
+    by_id = {str(row["hydration_edge_id"] if "hydration_edge_id" in row.keys() else row["id"]): row
+             for row in hydrated}
+    ordered = [by_id[str(row["id"])] for row in raw if str(row["id"]) in by_id]
+    return _BoundedRows(ordered, raw_truncated=raw.raw_truncated)
+
+
 def _evidence(*, kind: str, summary: str, layer: str, source: str,
               confidence: float, path: str | None = None) -> dict[str, Any]:
     return _context_evidence(kind=kind, summary=summary, layer=layer, source=source,
@@ -116,106 +139,142 @@ def _safe_history(row: sqlite3.Row) -> bool:
 
 def _lane_rows(connection: sqlite3.Connection, project_id: str,
                anchor_id: str, direction: str) -> list[sqlite3.Row]:
-    indexed = "idx_edges_target_endpoint" if direction == "incoming" else "idx_edges_source_endpoint"
     endpoint = "target_id" if direction == "incoming" else "source_id"
-    raw = connection.execute(
-        f"""WITH raw AS MATERIALIZED (
-                SELECT /* impact-physical-lane impact-lane-{direction} */ edge.*,
-                       edge.rowid AS recorded_order
-                FROM edges AS edge INDEXED BY {indexed}
-                WHERE edge.project_id=? AND edge.{endpoint}=?
-                ORDER BY edge.rowid DESC LIMIT ?
-            )
-            SELECT raw.*,
+    raw = _raw_edge_window(connection, project_id, endpoint=endpoint, endpoint_id=anchor_id,
+                           limit=IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT,
+                           comment=f"impact-physical-lane impact-lane-{direction}-raw")
+    if not raw:
+        return raw
+    marks = ",".join("?" for _ in raw)
+    hydrated = connection.execute(
+        f"""SELECT /* impact-lane-{direction}-hydrate */ edge.*,
+                   edge.rowid AS recorded_order,
                    source.key AS source_path, source.label AS source_label,
-                   source.layer AS source_layer, source.kind AS source_kind,
                    source.source AS source_node_source,
                    source.confidence AS source_node_confidence,
                    target.key AS target_path, target.label AS target_label,
-                   target.layer AS target_layer, target.kind AS target_kind,
                    target.source AS target_node_source,
                    target.confidence AS target_node_confidence
-            FROM raw
-            LEFT JOIN nodes source ON source.id=raw.source_id
-            LEFT JOIN nodes target ON target.id=raw.target_id""",
-        (project_id, anchor_id, IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT + 1),
+            FROM edges edge
+            JOIN nodes source ON source.id=edge.source_id AND source.layer=1 AND source.kind='file'
+            JOIN nodes target ON target.id=edge.target_id AND target.layer=1 AND target.kind='file'
+            WHERE edge.id IN ({marks}) AND edge.layer=1""",
+        tuple(str(row["id"]) for row in raw),
     ).fetchall()
-    valid = [row for row in raw[:IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT]
-             if int(row["layer"]) == 1 and row["source_layer"] == 1
-             and row["source_kind"] == "file" and row["target_layer"] == 1
-             and row["target_kind"] == "file"]
-    return _BoundedRows(valid, raw_truncated=len(raw) > IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT)
+    return _hydrate_in_record_order(raw, hydrated)
 
 
 def _history_rows(connection: sqlite3.Connection, project_id: str,
                   target_id: str) -> list[sqlite3.Row]:
-    return connection.execute(
-        """SELECT /* impact-history */ edge.*, edge.rowid AS recorded_order,
+    raw = _raw_edge_window(connection, project_id, endpoint="target_id", endpoint_id=target_id,
+                           limit=IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT,
+                           comment="impact-history-raw")
+    if not raw:
+        return raw
+    marks = ",".join("?" for _ in raw)
+    hydrated = connection.execute(
+        f"""SELECT /* impact-history-hydrate */ edge.*, edge.rowid AS recorded_order,
                   task_node.source AS task_source,
                   task_node.confidence AS task_confidence,
                   task.title, task.status
-           FROM edges AS edge INDEXED BY idx_edges_target
+           FROM edges AS edge
            JOIN nodes task_node ON task_node.id=edge.source_id
              AND task_node.layer=3 AND task_node.kind='task'
            JOIN tasks task ON task.id=task_node.key
-           WHERE edge.project_id=? AND edge.layer=3 AND edge.target_id=?
-             AND edge.source='task-events' AND task_node.source='task-events'
-           ORDER BY edge.rowid DESC LIMIT ?""",
-        (project_id, target_id, IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT + 1),
+           WHERE edge.id IN ({marks}) AND edge.layer=3
+             AND edge.source='task-events' AND task_node.source='task-events'""",
+        tuple(str(row["id"]) for row in raw),
     ).fetchall()
+    return _hydrate_in_record_order(raw, hydrated)
 
 
 def _semantic_rows(connection: sqlite3.Connection, project_id: str,
                    concept_id: str, direction: str) -> list[sqlite3.Row]:
-    indexed = "idx_edges_source_endpoint" if direction == "outgoing" else "idx_edges_target_endpoint"
     endpoint = "source_id" if direction == "outgoing" else "target_id"
-    raw = connection.execute(
-        f"""WITH raw AS MATERIALIZED (
-                SELECT /* impact-semantic-{direction} */ edge.*, edge.rowid AS recorded_order
-                FROM edges edge INDEXED BY {indexed}
-                WHERE edge.project_id=? AND edge.{endpoint}=?
-                ORDER BY edge.rowid DESC LIMIT ?
-            )
-            SELECT raw.*,
+    raw = _raw_edge_window(connection, project_id, endpoint=endpoint, endpoint_id=concept_id,
+                           limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
+                           comment=f"impact-semantic-{direction}-raw")
+    if not raw:
+        return raw
+    marks = ",".join("?" for _ in raw)
+    hydrated = connection.execute(
+        f"""SELECT /* impact-semantic-{direction}-hydrate */ edge.*, edge.rowid AS recorded_order,
                    source.label AS source_label, source.source AS source_node_source,
-                   source.layer AS source_layer, source.kind AS source_kind,
                    source.confidence AS source_node_confidence,
                    target.label AS target_label, target.source AS target_node_source,
-                   target.layer AS target_layer, target.kind AS target_kind,
                    target.confidence AS target_node_confidence
-            FROM raw
-            LEFT JOIN nodes source ON source.id=raw.source_id
-            LEFT JOIN nodes target ON target.id=raw.target_id""",
-        (project_id, concept_id, IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT + 1),
+            FROM edges edge
+            JOIN nodes source ON source.id=edge.source_id AND source.layer=2 AND source.kind='concept'
+            JOIN nodes target ON target.id=edge.target_id AND target.layer=2 AND target.kind='concept'
+            WHERE edge.id IN ({marks}) AND edge.layer=2""",
+        tuple(str(row["id"]) for row in raw),
     ).fetchall()
-    valid = [row for row in raw[:IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT]
-             if int(row["layer"]) == 2 and row["source_layer"] == 2
-             and row["source_kind"] == "concept" and row["target_layer"] == 2
-             and row["target_kind"] == "concept"]
-    return _BoundedRows(valid, raw_truncated=len(raw) > IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT)
+    return _hydrate_in_record_order(raw, hydrated)
 
 
 def _tested_by_rows(connection: sqlite3.Connection, project_id: str,
                     concept_id: str) -> list[sqlite3.Row]:
-    raw = connection.execute(
-        """WITH raw AS MATERIALIZED (
-                SELECT /* impact-tested-by */ edge.*, edge.rowid AS recorded_order
-                FROM edges edge INDEXED BY idx_edges_source_endpoint
-                WHERE edge.project_id=? AND edge.source_id=?
-                ORDER BY edge.rowid DESC LIMIT ?
-            )
-           SELECT raw.*,
+    raw = _raw_edge_window(connection, project_id, endpoint="source_id", endpoint_id=concept_id,
+                           limit=IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT,
+                           comment="impact-tested-by-raw")
+    if not raw:
+        return raw
+    marks = ",".join("?" for _ in raw)
+    hydrated = connection.execute(
+        f"""SELECT /* impact-tested-by-hydrate */ edge.*, edge.rowid AS recorded_order,
                   test.id AS test_id, test.key AS test_path,
-                  test.layer AS test_layer, test.kind AS test_kind,
                   test.label AS test_label, test.source AS test_source,
                   test.confidence AS test_confidence
-           FROM raw LEFT JOIN nodes test ON test.id=raw.target_id""",
-        (project_id, concept_id, IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT + 1),
+           FROM edges edge
+           JOIN nodes test ON test.id=edge.target_id AND test.layer=1 AND test.kind='file'
+           WHERE edge.id IN ({marks}) AND edge.layer=2 AND edge.relation='tested_by'""",
+        tuple(str(row["id"]) for row in raw),
     ).fetchall()
-    valid = [row for row in raw[:IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT]
-             if int(row["layer"]) == 2 and row["relation"] == "tested_by"
-             and row["test_layer"] == 1 and row["test_kind"] == "file"]
-    return _BoundedRows(valid, raw_truncated=len(raw) > IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT)
+    return _hydrate_in_record_order(raw, hydrated)
+
+
+def _anchor_mapping_rows(connection: sqlite3.Connection, project_id: str,
+                         concept_id: str) -> list[sqlite3.Row]:
+    raw = _raw_edge_window(connection, project_id, endpoint="source_id", endpoint_id=concept_id,
+                           limit=IMPACT_ANCHOR_SCAN_LIMIT, comment="impact-anchor-mappings-raw")
+    if not raw:
+        return raw
+    marks = ",".join("?" for _ in raw)
+    hydrated = connection.execute(
+        f"""SELECT /* impact-anchor-mappings-hydrate */ edge.*,
+                   file.id AS file_id, file.key AS file_key,
+                   file.label AS file_label, file.source AS file_source,
+                   file.confidence AS file_confidence
+            FROM edges edge
+            JOIN nodes file ON file.id=edge.target_id AND file.layer=1 AND file.kind='file'
+            WHERE edge.id IN ({marks}) AND edge.layer=2
+              AND edge.relation IN ('implemented_by','configured_by')""",
+        tuple(str(row["id"]) for row in raw),
+    ).fetchall()
+    return _hydrate_in_record_order(raw, hydrated)
+
+
+def _focus_concept_rows(connection: sqlite3.Connection, project_id: str,
+                        file_id: str) -> list[sqlite3.Row]:
+    raw = _raw_edge_window(connection, project_id, endpoint="target_id", endpoint_id=file_id,
+                           limit=32, comment="impact-focus-concepts-raw")
+    if not raw:
+        return raw
+    marks = ",".join("?" for _ in raw)
+    hydrated = connection.execute(
+        f"""SELECT /* impact-focus-concepts-hydrate */ concept.*,
+                   edge.id AS hydration_edge_id,
+                   edge.id AS mapping_id, edge.source_id AS mapping_source_id,
+                   edge.target_id AS mapping_target_id, edge.relation AS mapping_relation,
+                   edge.source AS mapping_source, edge.confidence AS mapping_confidence
+            FROM edges edge
+            JOIN nodes concept ON concept.id=edge.source_id
+              AND concept.layer=2 AND concept.kind='concept'
+            WHERE edge.id IN ({marks}) AND edge.layer=2
+              AND edge.relation IN ('implemented_by','configured_by','tested_by')""",
+        tuple(str(row["id"]) for row in raw),
+    ).fetchall()
+    return _hydrate_in_record_order(raw, hydrated)
 
 
 def impact_view_data(database: Database, project: sqlite3.Row, selector: str) -> dict[str, Any]:
@@ -234,26 +293,14 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
         if int(focus["layer"]) == 1:
             anchor_candidates: list[sqlite3.Row | dict[str, Any]] = [focus]
         else:
-            anchor_rows = connection.execute(
-                """SELECT /* impact-anchor-mappings */ edge.*,
-                          file.id AS file_id, file.key AS file_key,
-                          file.label AS file_label, file.source AS file_source,
-                          file.confidence AS file_confidence
-                   FROM edges edge INDEXED BY idx_edges_source
-                   JOIN nodes file ON file.id=edge.target_id
-                     AND file.layer=1 AND file.kind='file'
-                   WHERE edge.project_id=? AND edge.layer=2 AND edge.source_id=?
-                     AND edge.relation IN ('implemented_by','configured_by')
-                   ORDER BY edge.rowid DESC LIMIT ?""",
-                (project_id, focus["id"], IMPACT_ANCHOR_SCAN_LIMIT + 1),
-            ).fetchall()
+            anchor_rows = _anchor_mapping_rows(connection, project_id, str(focus["id"]))
             anchor_candidates = [
                 {"id": row["file_id"], "layer": 1, "kind": "file", "key": row["file_key"],
                  "label": row["file_label"], "source": row["file_source"],
                  "confidence": row["file_confidence"], "mapping": row}
-                for row in anchor_rows[:IMPACT_ANCHOR_SCAN_LIMIT]
+                for row in anchor_rows
             ]
-        if len(anchor_rows) > IMPACT_ANCHOR_SCAN_LIMIT:
+        if getattr(anchor_rows, "raw_truncated", False):
             warnings.append({"code": "IMPACT_ANCHOR_SCAN_TRUNCATED", "message": f"锚点扫描达到 {IMPACT_ANCHOR_SCAN_LIMIT} 项预算，当前结果不完整。", "evidence": []})
         safe_candidates = [row for row in anchor_candidates if is_canonical_relative_path(str(row["key"]))]
         if len(safe_candidates) != len(anchor_candidates):
@@ -271,26 +318,14 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
         if int(focus["layer"]) == 2:
             focus_concept_rows: list[tuple[sqlite3.Row, sqlite3.Row | None]] = [(focus, None)]
         else:
-            rows = connection.execute(
-                """SELECT /* impact-focus-concepts */ concept.*, edge.id AS mapping_id,
-                          edge.source_id AS mapping_source_id, edge.target_id AS mapping_target_id,
-                          edge.relation AS mapping_relation, edge.source AS mapping_source,
-                          edge.confidence AS mapping_confidence
-                   FROM edges edge INDEXED BY idx_edges_target
-                   JOIN nodes concept ON concept.id=edge.source_id
-                     AND concept.layer=2 AND concept.kind='concept'
-                   WHERE edge.project_id=? AND edge.layer=2 AND edge.target_id=?
-                     AND edge.relation IN ('implemented_by','configured_by','tested_by')
-                   ORDER BY edge.rowid DESC LIMIT 33""",
-                (project_id, focus["id"]),
-            ).fetchall()
+            rows = _focus_concept_rows(connection, project_id, str(focus["id"]))
             focus_concept_candidates = []
             seen_focus_concepts: set[str] = set()
-            for row in rows[:32]:
+            for row in rows:
                 if str(row["id"]) not in seen_focus_concepts:
                     seen_focus_concepts.add(str(row["id"])); focus_concept_candidates.append((row, row))
             focus_concept_rows = focus_concept_candidates[:8]
-            if len(rows) > 32 or len(focus_concept_candidates) > 8:
+            if getattr(rows, "raw_truncated", False) or len(focus_concept_candidates) > 8:
                 warnings.append({"code": "IMPACT_FOCUS_CONCEPTS_TRUNCATED", "message": "Focus 关联概念最多展示 8 项。", "evidence": []})
         focus_concept_ids = {str(row[0]["id"]) for row in focus_concept_rows}
 
@@ -582,8 +617,8 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
         history_targets = sorted(anchor_ids | {str(focus["id"])} | focus_concept_ids)
         for target_id in history_targets:
             rows = _history_rows(connection, project_id, target_id)
-            history_scan_truncated = history_scan_truncated or len(rows) > IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT
-            history_rows.extend(rows[:IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT])
+            history_scan_truncated = history_scan_truncated or getattr(rows, "raw_truncated", False)
+            history_rows.extend(rows)
         history = []
         seen_history: set[str] = set()
         history_filtered = False
