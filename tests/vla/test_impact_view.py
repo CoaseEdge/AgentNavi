@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import sqlite3
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agentnavi.config import Settings
 from agentnavi import impact_view as impact_module
@@ -1038,6 +1039,46 @@ class ImpactViewTestCase(unittest.TestCase):
                 (old_edge, new_edge),
             )}
         self.assertEqual(projected, {old_edge, new_edge})
+
+    def test_two_initializers_repeatedly_bootstrap_the_same_fresh_home(self) -> None:
+        for iteration in range(5):
+            settings = Settings.load(self.base / f"fresh-concurrent-{iteration}")
+            barrier = threading.Barrier(2)
+
+            def initialize() -> Database:
+                barrier.wait(timeout=5)
+                return ensure_database(settings)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(initialize) for _ in range(2)]
+                databases = [future.result(timeout=10) for future in futures]
+            self.assertEqual(len(databases), 2)
+            with databases[0].connect() as connection:
+                journal_mode = str(connection.execute(
+                    "PRAGMA journal_mode"
+                ).fetchone()[0]).lower()
+                values = {str(row["key"]): str(row["value"]) for row in connection.execute(
+                    "SELECT key,value FROM meta WHERE key IN "
+                    "('schema_version','l2_concept_edges_projection_version')"
+                )}
+                lookup_count = int(connection.execute(
+                    "SELECT COUNT(*) FROM l2_concept_edges"
+                ).fetchone()[0])
+            self.assertEqual(journal_mode, "wal")
+            self.assertEqual(values["schema_version"], str(SCHEMA_VERSION))
+            self.assertEqual(values["l2_concept_edges_projection_version"], "1")
+            self.assertEqual(lookup_count, 0)
+
+    def test_journal_bootstrap_does_not_retry_non_busy_errors(self) -> None:
+        error = sqlite3.OperationalError("synthetic non-busy failure")
+        error.sqlite_errorcode = sqlite3.SQLITE_ERROR
+        connection = Mock()
+        connection.execute.side_effect = error
+        with patch("agentnavi.database.time.sleep") as sleep:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "non-busy"):
+                Database._configure_journal_mode(connection)
+        self.assertEqual(connection.execute.call_count, 1)
+        sleep.assert_not_called()
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")

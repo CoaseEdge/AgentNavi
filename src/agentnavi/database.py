@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -11,6 +12,8 @@ from .utils import json_dumps, stable_id, utc_now
 
 SCHEMA_VERSION = 4
 L2_CONCEPT_EDGE_PROJECTION_VERSION = 1
+BOOTSTRAP_JOURNAL_ATTEMPTS = 5
+BOOTSTRAP_JOURNAL_BACKOFF_SECONDS = 0.01
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -280,7 +283,7 @@ class Database:
             if self._schema_is_current(objects, old_version, projection_version):
                 return
 
-            connection.execute("PRAGMA journal_mode=WAL")
+            self._configure_journal_mode(connection)
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -333,6 +336,22 @@ class Database:
             except BaseException:
                 connection.rollback()
                 raise
+
+    @staticmethod
+    def _configure_journal_mode(connection: sqlite3.Connection) -> None:
+        for attempt in range(BOOTSTRAP_JOURNAL_ATTEMPTS):
+            try:
+                row = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+                if row is None or str(row[0]).lower() != "wal":
+                    raise sqlite3.OperationalError("无法启用 SQLite WAL journal mode。")
+                return
+            except sqlite3.OperationalError as error:
+                code = getattr(error, "sqlite_errorcode", None)
+                if code is None or code & 0xFF != sqlite3.SQLITE_BUSY:
+                    raise
+                if attempt + 1 >= BOOTSTRAP_JOURNAL_ATTEMPTS:
+                    raise
+                time.sleep(BOOTSTRAP_JOURNAL_BACKOFF_SECONDS * (2 ** attempt))
 
     @staticmethod
     def _projection_objects() -> set[str]:
