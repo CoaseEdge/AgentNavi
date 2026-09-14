@@ -67,6 +67,22 @@ class MCPCLIContractTestCase(unittest.TestCase):
             "未安装 MCP 可选依赖。请运行：pip install 'agentnavi[mcp]'\n",
         )
 
+    def test_base_install_help_exposes_mcp_without_importing_the_sdk(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(self.root / "src")
+        result = subprocess.run(
+            [sys.executable, "-S", "-m", "agentnavi", "--help"],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("mcp", result.stdout)
+        self.assertEqual(result.stderr, "")
+
     def test_internal_import_errors_are_not_misreported_as_missing_extra(self) -> None:
         internal_error = ModuleNotFoundError(
             "No module named 'internal_dependency'",
