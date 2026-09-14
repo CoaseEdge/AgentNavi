@@ -15,7 +15,7 @@ import tomllib
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 from .database import Database
 from .privacy import contains_private_path, is_canonical_relative_path
@@ -1217,6 +1217,88 @@ def _tour_graph_facts(
     }
 
 
+def _iter_safe_completed_tasks(
+    connection: sqlite3.Connection,
+    project_id: str,
+    *,
+    page_size: int = 16,
+) -> Iterator[dict[str, Any]]:
+    """按稳定 cursor 分页，在安全过滤后才交付已完成任务。"""
+
+    cursor_time: str | None = None
+    cursor_id: str | None = None
+    while True:
+        rows = list(
+            connection.execute(
+                """
+                SELECT id, title, status, summary, created_at, updated_at, closed_at,
+                       COALESCE(closed_at, updated_at, created_at) AS sort_time
+                FROM tasks
+                WHERE project_id=? AND status='completed'
+                  AND (
+                    ? IS NULL
+                    OR COALESCE(closed_at, updated_at, created_at) < ?
+                    OR (
+                      COALESCE(closed_at, updated_at, created_at) = ?
+                      AND id < ?
+                    )
+                  )
+                ORDER BY sort_time DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    project_id,
+                    cursor_time,
+                    cursor_time,
+                    cursor_time,
+                    cursor_id,
+                    page_size,
+                ),
+            )
+        )
+        if not rows:
+            return
+        for row in rows:
+            title = _safe_prose(str(row["title"]), limit=240)
+            detail = _safe_prose(str(row["summary"] or row["status"]), limit=320)
+            if title and detail:
+                yield {**dict(row), "safe_title": title, "safe_detail": detail}
+        last = rows[-1]
+        cursor_time = str(last["sort_time"])
+        cursor_id = str(last["id"])
+        if len(rows) < page_size:
+            return
+
+
+def _tour_node_entity(
+    connection: sqlite3.Connection,
+    project_id: str,
+    node_id: str,
+    evidence: list[dict[str, Any]],
+    *,
+    path: str | None = None,
+) -> dict[str, Any] | None:
+    """用同一读事务中的 node 事实构造 EntityRef，不借用 Evidence 来填充 provenance。"""
+
+    row = connection.execute(
+        """SELECT id, layer, kind, label, source, confidence
+           FROM nodes WHERE project_id=? AND id=?""",
+        (project_id, node_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return _tour_entity(
+        str(row["id"]),
+        str(row["kind"]),
+        str(row["label"]),
+        evidence,
+        path=path,
+        layer=f"L{int(row['layer'])}",
+        source=str(row["source"]),
+        confidence=float(row["confidence"]),
+    )
+
+
 def repository_tour_data(
     database: Database,
     project: sqlite3.Row,
@@ -1257,71 +1339,63 @@ def repository_tour_data(
             path for module in modules for path in module["paths"]
         )
         evidence_paths.update(entry["path"] for entry in reading_order)
-        graph_facts = _tour_graph_facts(connection, str(project["id"]), evidence_paths)
-        tasks = list(
-            connection.execute(
-                """SELECT id, title, status, summary, created_at, updated_at, closed_at
-                   FROM tasks WHERE project_id=? AND status='completed'
-                   ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
-                   LIMIT 16""",
-                (str(project["id"]),),
-            )
-        )
-        task_history = []
+        project_id = str(project["id"])
+        graph_facts = _tour_graph_facts(connection, project_id, evidence_paths)
+        task_example: dict[str, Any] | None = None
+        task_history: list[dict[str, Any]] = []
         ordered_evidence_paths = sorted(evidence_paths)
         path_placeholders = ",".join("?" for _ in ordered_evidence_paths)
-        history_rows = (
-            connection.execute(
-                f"""
-            SELECT task.id AS task_id, task.title, task.summary,
-                   edge.id AS edge_id, edge.source_id, edge.target_id,
-                   edge.relation, edge.source,
-                   edge.confidence, file.key AS path
-            FROM tasks task
-            JOIN nodes task_node
-              ON task_node.project_id=task.project_id AND task_node.layer=3
-             AND task_node.kind='task' AND task_node.key=task.id
-            JOIN edges edge
-              ON edge.project_id=task.project_id AND edge.layer=3
-             AND edge.source_id=task_node.id
-             AND edge.relation IN ('read', 'modified', 'tested', 'searched')
-            JOIN nodes file
-              ON file.id=edge.target_id AND file.layer=1 AND file.kind='file'
-            WHERE task.project_id=? AND task.status='completed'
-              AND file.key IN ({path_placeholders})
-            ORDER BY COALESCE(task.closed_at, task.updated_at, task.created_at) DESC,
-                     task.id DESC, edge.relation, file.key COLLATE NOCASE, file.key,
-                     edge.id
-            LIMIT 24
-            """,
-                (str(project["id"]), *ordered_evidence_paths),
-            )
-            if ordered_evidence_paths
-            else ()
-        )
-        for row in history_rows:
-            path = str(row["path"])
-            if path not in evidence_paths:
+        for task in _iter_safe_completed_tasks(connection, project_id):
+            task_node = connection.execute(
+                """SELECT id FROM nodes
+                   WHERE project_id=? AND layer=3 AND kind='task' AND key=?""",
+                (project_id, str(task["id"])),
+            ).fetchone()
+            if task_node is None:
                 continue
-            title = _safe_prose(str(row["title"]), limit=240)
-            detail = _safe_prose(str(row["summary"] or row["relation"]), limit=320)
-            if not title or not detail:
-                continue
-            task_history.append(
-                {
-                    "task_id": str(row["task_id"]),
-                    "title": title,
-                    "summary": detail,
-                    "edge_id": str(row["edge_id"]),
-                    "source_id": str(row["source_id"]),
-                    "target_id": str(row["target_id"]),
-                    "relation": str(row["relation"]),
-                    "source": str(row["source"]),
-                    "confidence": float(row["confidence"]),
-                    "path": path,
-                }
-            )
-            if len(task_history) >= 3:
+            if task_example is None:
+                task_example = {**task, "node_id": str(task_node["id"])}
+            if ordered_evidence_paths and len(task_history) < 3:
+                history_rows = connection.execute(
+                    f"""
+                    SELECT edge.id AS edge_id, edge.source_id, edge.target_id,
+                           edge.relation, edge.source, edge.confidence,
+                           file.key AS path
+                    FROM edges edge
+                    JOIN nodes file
+                      ON file.id=edge.target_id
+                     AND file.layer=1 AND file.kind='file'
+                    WHERE edge.project_id=? AND edge.layer=3
+                      AND edge.source_id=?
+                      AND edge.relation IN ('read', 'modified', 'tested', 'searched')
+                      AND file.key IN ({path_placeholders})
+                    ORDER BY edge.relation, file.key COLLATE NOCASE, file.key, edge.id
+                    LIMIT ?
+                    """,
+                    (
+                        project_id,
+                        str(task_node["id"]),
+                        *ordered_evidence_paths,
+                        3 - len(task_history),
+                    ),
+                )
+                for row in history_rows:
+                    task_history.append(
+                        {
+                            "title": task["safe_title"],
+                            "summary": task["safe_detail"],
+                            "edge_id": str(row["edge_id"]),
+                            "source_id": str(row["source_id"]),
+                            "target_id": str(row["target_id"]),
+                            "relation": str(row["relation"]),
+                            "source": str(row["source"]),
+                            "confidence": float(row["confidence"]),
+                            "path": str(row["path"]),
+                        }
+                    )
+            if task_example is not None and (
+                not ordered_evidence_paths or len(task_history) >= 3
+            ):
                 break
 
         def document_entity(stop_id: str, kind: str, value: dict[str, Any]) -> dict[str, Any] | None:
@@ -1404,32 +1478,26 @@ def repository_tour_data(
             _tour_stop(
                 f"data-{item['id']}", "data-structure", "核心数据结构",
                 item["label"], f"{item['symbol_kind']} · {item['path']}", item["evidence"],
-                entity=_tour_entity(
-                    item["id"], "symbol", item["label"], item["evidence"],
-                    path=item["path"], layer="L1", source=item["source"], confidence=item["confidence"],
+                entity=_tour_node_entity(
+                    connection, project_id, item["id"], item["evidence"],
+                    path=item["path"],
                 ),
             )
             for item in graph_facts["data_structures"][:1]
         ]
         task_stops = []
-        for task in tasks:
-            title = _safe_prose(str(task["title"]), limit=240)
-            detail = _safe_prose(str(task["summary"] or task["status"]), limit=320)
-            if not title or not detail:
-                continue
+        if task_example is not None:
             evidence = [{
-                "kind": "task-record", "summary": f"任务记录 {task['id']}",
+                "kind": "task-record", "summary": f"任务记录 {task_example['id']}",
                 "layer": "L3", "source": "task-events", "confidence": 1.0,
             }]
             task_stops.append(_tour_stop(
-                f"task-{task['id']}", "task", "真实任务示例", title, detail, evidence,
-                entity=_tour_entity(
-                    Database.node_id(str(project["id"]), 3, "task", str(task["id"])),
-                    "task", title, evidence, layer="L3",
-                    source="task-events", confidence=1.0,
+                f"task-{task_example['id']}", "task", "真实任务示例",
+                task_example["safe_title"], task_example["safe_detail"], evidence,
+                entity=_tour_node_entity(
+                    connection, project_id, task_example["node_id"], evidence,
                 ),
             ))
-            break
         reading_by_path = {entry["path"]: entry for entry in reading_order}
         source_entries: list[dict[str, Any]] = []
 
@@ -1480,9 +1548,10 @@ def repository_tour_data(
             _tour_stop(
                 f"key-file-{entry['position']}", "file", "关键文件",
                 entry["path"], entry["reason"], entry["evidence"],
-                entity=_tour_entity(
-                    Database.node_id(str(project["id"]), 1, "file", entry["path"]),
-                    "file", entry["path"], entry["evidence"], path=entry["path"], layer="L1",
+                entity=_tour_node_entity(
+                    connection, project_id,
+                    Database.node_id(project_id, 1, "file", entry["path"]),
+                    entry["evidence"], path=entry["path"],
                 ),
             )
             for entry in source_entries[:1]
@@ -1509,9 +1578,10 @@ def repository_tour_data(
             evidence = [_evidence(document, prose_line, "设计决定文档的首段说明。")]
             history_stops.append(_tour_stop(
                 f"history-{document.path}", "history", "设计历史", title, prose, evidence,
-                entity=_tour_entity(
-                    Database.node_id(str(project["id"]), 1, "file", document.path),
-                    "document", title, evidence, path=document.path, layer="L1",
+                entity=_tour_node_entity(
+                    connection, project_id,
+                    Database.node_id(project_id, 1, "file", document.path),
+                    evidence, path=document.path,
                 ),
             ))
             break
@@ -1520,9 +1590,10 @@ def repository_tour_data(
             _tour_stop(
                 f"source-file-{entry['position']}", "file", entry["path"],
                 entry["reason"], "该路径已通过当前索引快照核对。", entry["evidence"],
-                entity=_tour_entity(
-                    Database.node_id(str(project["id"]), 1, "file", entry["path"]),
-                    "file", entry["path"], entry["evidence"], path=entry["path"], layer="L1",
+                entity=_tour_node_entity(
+                    connection, project_id,
+                    Database.node_id(project_id, 1, "file", entry["path"]),
+                    entry["evidence"], path=entry["path"],
                 ),
             )
             for entry in source_entries[:2]
@@ -1531,9 +1602,9 @@ def repository_tour_data(
             _tour_stop(
                 f"symbol-{item['id']}", "symbol", item["label"],
                 f"{item['symbol_kind']} in {item['path']}", "该符号由文件提取器识别。", item["evidence"],
-                entity=_tour_entity(
-                    item["id"], "symbol", item["label"], item["evidence"], path=item["path"],
-                    layer="L1", source=item["source"], confidence=item["confidence"],
+                entity=_tour_node_entity(
+                    connection, project_id, item["id"], item["evidence"],
+                    path=item["path"],
                 ),
             )
             for item in graph_facts["symbols"][:2]
@@ -1542,9 +1613,9 @@ def repository_tour_data(
             _tour_stop(
                 f"dependency-{item['id']}", "dependency", "文件依赖",
                 f"{item['source_path']} → {item['target_path']}", item["relation"], item["evidence"],
-                entity=_tour_entity(
-                    item["source_id"],
-                    "file", item["source_path"], item["evidence"], path=item["source_path"], layer="L1",
+                entity=_tour_node_entity(
+                    connection, project_id, item["source_id"], item["evidence"],
+                    path=item["source_path"],
                 ),
                 relations=[{
                     "id": item["id"],
@@ -1560,9 +1631,9 @@ def repository_tour_data(
             _tour_stop(
                 f"test-{item['id']}", "test", "对应测试",
                 item["source_path"], f"验证 {item['target_path']}", item["evidence"],
-                entity=_tour_entity(
-                    item["source_id"],
-                    "file", item["source_path"], item["evidence"], path=item["source_path"], layer="L1",
+                entity=_tour_node_entity(
+                    connection, project_id, item["source_id"], item["evidence"],
+                    path=item["source_path"],
                 ),
                 relations=[{
                     "id": item["id"],
@@ -1608,9 +1679,8 @@ def repository_tour_data(
             task_history_stops.append(_tour_stop(
                 f"task-history-{item['edge_id']}", "task-history", "任务历史",
                 title, f"{detail} · {item['relation']} {item['path']}", evidence,
-                entity=_tour_entity(
-                    item["source_id"], "task", title, evidence,
-                    layer="L3", source=item["source"], confidence=item["confidence"],
+                entity=_tour_node_entity(
+                    connection, project_id, item["source_id"], evidence,
                 ),
                 relations=[{
                     "id": item["edge_id"], "sourceId": item["source_id"],

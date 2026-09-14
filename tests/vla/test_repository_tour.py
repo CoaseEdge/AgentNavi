@@ -414,6 +414,110 @@ class RepositoryTourTestCase(unittest.TestCase):
         )
         self.assertEqual(task_stop["plainLanguage"], "调整模型边界")
 
+    def test_more_than_sixteen_unsafe_tasks_do_not_hide_safe_task(self) -> None:
+        with self.database.connect() as connection:
+            for index in range(17):
+                moment = f"2026-09-15T11:00:{index:02d}+00:00"
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, project_id, title, status, summary,
+                           created_at, updated_at, closed_at
+                       ) VALUES (?, 'fixture', ?, 'completed', 'unsafe', ?, ?, ?)""",
+                    (f"unsafe-window-{index:02d}", f"/private/task-{index}", moment, moment, moment),
+                )
+            connection.commit()
+
+        tour = repository_tour_data(self.database, self._project())
+        task_stop = next(
+            stop for stop in tour["tiers"][1]["stops"] if stop["kind"] == "task"
+        )
+        self.assertEqual(task_stop["plainLanguage"], "调整模型边界")
+
+    def test_more_than_twenty_four_unsafe_histories_do_not_hide_safe_history(self) -> None:
+        with self.database.connect() as connection:
+            file_id = Database.node_id("fixture", 1, "file", "src/fixture/model.py")
+            for index in range(25):
+                moment = f"2026-09-15T11:00:{index:02d}+00:00"
+                task_id = f"unsafe-history-{index:02d}"
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, project_id, title, status, summary,
+                           created_at, updated_at, closed_at
+                       ) VALUES (?, 'fixture', ?, 'completed', 'unsafe', ?, ?, ?)""",
+                    (task_id, f"/private/history-{index}", moment, moment, moment),
+                )
+                task_node = Database.upsert_node(
+                    connection,
+                    project_id="fixture",
+                    layer=3,
+                    kind="task",
+                    key=task_id,
+                    label=f"Unsafe {index}",
+                    source="task-events",
+                )
+                Database.upsert_edge(
+                    connection,
+                    project_id="fixture",
+                    layer=3,
+                    source_id=task_node,
+                    relation="modified",
+                    target_id=file_id,
+                    source="task-events",
+                )
+            connection.commit()
+
+        tour = repository_tour_data(self.database, self._project())
+        history_stop = next(
+            stop
+            for stop in tour["tiers"][2]["stops"]
+            if stop["kind"] == "task-history"
+        )
+        self.assertEqual(history_stop["plainLanguage"], "调整模型边界")
+
+    def test_real_entity_refs_match_node_rows_in_snapshot(self) -> None:
+        overrides = {
+            Database.node_id("fixture", 1, "file", "src/fixture/cli.py"):
+                ("CLI Entry Node", "scan-file", 0.61),
+            Database.node_id("fixture", 1, "file", "docs/adr/0001-model.md"):
+                ("ADR File Node", "scan-doc", 0.62),
+            Database.node_id("fixture", 3, "task", "task-tour"):
+                ("Task Event Node", "event-replay", 0.63),
+        }
+        with self.database.connect() as connection:
+            for node_id, (label, source, confidence) in overrides.items():
+                connection.execute(
+                    "UPDATE nodes SET label=?, source=?, confidence=? WHERE id=?",
+                    (label, source, confidence, node_id),
+                )
+            connection.commit()
+
+        tour = repository_tour_data(self.database, self._project())
+        with self.database.connect() as connection:
+            rows = {
+                row["id"]: row
+                for row in connection.execute("SELECT * FROM nodes WHERE project_id='fixture'")
+            }
+
+        matched_ids = set()
+        for tier in tour["tiers"]:
+            for stop in tier["stops"]:
+                entity = stop["entity"]
+                row = rows.get(entity["id"])
+                if row is None:
+                    continue
+                matched_ids.add(entity["id"])
+                self.assertEqual(entity["kind"], row["kind"])
+                self.assertEqual(entity["label"], row["label"])
+                self.assertEqual(entity["layer"], f"L{row['layer']}")
+                self.assertEqual(entity["source"], row["source"])
+                self.assertEqual(entity["confidence"], row["confidence"])
+
+        self.assertTrue(set(overrides).issubset(matched_ids))
+        adr = next(
+            stop for stop in tour["tiers"][1]["stops"] if stop["kind"] == "history"
+        )
+        self.assertEqual(adr["entity"]["kind"], "file")
+
 
 if __name__ == "__main__":
     unittest.main()
