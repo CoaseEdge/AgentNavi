@@ -1,6 +1,8 @@
 import type { AgentNaviView, ContextView } from "../protocol.js";
 import { renderRepositoryOverview } from "./repo-overview.js";
 import { renderRepositoryTour } from "./repo-tour.js";
+import { renderArchitecture } from "./architecture.js";
+import { renderFlow } from "./flow.js";
 
 export function renderRegisteredView(
   view: AgentNaviView,
@@ -15,6 +17,12 @@ export function renderRegisteredView(
     },
     "repo-tour": (value) => {
       if (value.view === "repo-tour") renderRepositoryTour(value);
+    },
+    architecture: (value) => {
+      if (value.view === "architecture") renderArchitecture(value);
+    },
+    flow: (value) => {
+      if (value.view === "flow") renderFlow(value);
     },
   };
   renderers[view.view](view);

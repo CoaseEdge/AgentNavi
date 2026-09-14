@@ -533,6 +533,189 @@ h1 {
   font: 20px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
 }
 
+.architecture-view,
+.flow-view {
+  padding-top: 30px;
+}
+
+.architecture-view {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.architecture-summary,
+.architecture-group,
+.architecture-relations,
+.flow-task {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.architecture-summary,
+.architecture-relations {
+  grid-column: 1 / -1;
+}
+
+.architecture-summary {
+  border-left: 4px solid var(--amber);
+}
+
+.architecture-view h2,
+.flow-view h2 {
+  margin: 7px 0 14px;
+  font-size: 18px;
+}
+
+.architecture-summary p,
+.flow-task p {
+  margin: 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.architecture-group > ul,
+.architecture-relations > ul,
+.architecture-paths,
+.flow-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.architecture-group > ul,
+.architecture-relations > ul {
+  display: grid;
+  gap: 8px;
+}
+
+.architecture-component,
+.architecture-relations li {
+  min-width: 0;
+  padding: 11px;
+  border-top: 3px solid var(--green);
+  background: color-mix(in srgb, var(--paper) 45%, transparent);
+}
+
+.architecture-component h3,
+.architecture-component p {
+  overflow-wrap: anywhere;
+}
+
+.architecture-component h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.architecture-component p {
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.architecture-paths code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.architecture-relations li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 12px;
+}
+
+.architecture-relations strong,
+.architecture-relations small {
+  overflow-wrap: anywhere;
+}
+
+.architecture-relations span,
+.architecture-relations small {
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.architecture-relations small {
+  grid-column: 1 / -1;
+}
+
+.flow-task {
+  border-left: 4px solid var(--amber);
+}
+
+.flow-steps {
+  display: grid;
+  gap: 0;
+  margin-top: 14px;
+}
+
+.flow-step {
+  position: relative;
+  margin-left: 16px;
+  padding: 0 0 14px 24px;
+  border-left: 1px solid var(--green);
+}
+
+.flow-step:last-child {
+  border-left-color: transparent;
+}
+
+.flow-step details {
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.flow-step summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.flow-step summary span {
+  min-width: 32px;
+  color: var(--green);
+  font: 11px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+}
+
+.flow-purpose {
+  margin: 0;
+  padding: 0 14px 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.flow-step dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.flow-step dl div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.flow-step dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.flow-step dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
 .warning-panel {
   margin-top: 26px;
   padding: 14px 16px;
@@ -619,6 +802,15 @@ h1 {
 
   .repository-view {
     grid-template-columns: 1fr;
+  }
+
+  .architecture-view {
+    grid-template-columns: 1fr;
+  }
+
+  .architecture-summary,
+  .architecture-relations {
+    grid-column: auto;
   }
 
   .overview-purpose,

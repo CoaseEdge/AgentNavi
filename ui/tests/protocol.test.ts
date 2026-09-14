@@ -1,7 +1,9 @@
 import {
   isCanonicalRelativePath,
   parseAgentNaviView,
+  parseArchitectureView,
   parseContextView,
+  parseFlowView,
   parsePublicError,
   parseRepositoryOverviewView,
   parseRepositoryTourView,
@@ -220,5 +222,87 @@ for (const invalidWorkflow of [
 const emptyWorkflow = structuredClone(overviewFixture);
 emptyWorkflow.data.workflow = [];
 assert(parseRepositoryOverviewView(emptyWorkflow)?.data.workflow.length === 0, "空 workflow 是合法的证据不足状态");
+
+const architectureEntity = (id: string, label: string, path: string) => ({
+  id, kind: "concept", label, path, layer: "L2", source: "semantic-heuristic", confidence: 0.8,
+  evidence: [tourEvidence],
+});
+const architectureFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "architecture",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    layout: "cognitive-components",
+    summary: { text: "入口连接核心", explanationSource: "derived-presentation", evidence: [tourEvidence] },
+    components: [
+      { id: "cli", name: "CLI", group: "entry", responsibility: "接收请求", paths: ["src/cli.py"], entity: architectureEntity("cli", "CLI", "src/cli.py"), evidence: [tourEvidence] },
+      { id: "core", name: "Core", group: "core", responsibility: "处理请求", paths: ["src/core.py"], entity: architectureEntity("core", "Core", "src/core.py"), evidence: [tourEvidence] },
+    ],
+    connections: [{ id: "edge:cli-core", sourceId: "cli", targetId: "core", relation: "depends_on", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [tourEvidence] }],
+    entryPoints: [{ path: "src/cli.py", reason: "命令入口", entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py"), evidence: [tourEvidence] }],
+    stats: { files: 2, concepts: 2, tasks: 0, documentsRead: 2 },
+  },
+  warnings: [],
+};
+assert(parseArchitectureView(architectureFixture)?.data.connections.length === 1, "应解析固定 Architecture 布局");
+assert(parseAgentNaviView(architectureFixture)?.view === "architecture", "通用 parser 应分派 Architecture");
+assert(parseRequestedView({ view: "architecture" }) === "architecture", "应识别 Architecture 请求");
+const missingEndpoint = structuredClone(architectureFixture);
+missingEndpoint.data.connections[0]!.targetId = "missing";
+assert(parseArchitectureView(missingEndpoint) === undefined, "应拒绝未包含的 Architecture endpoint");
+const duplicateComponent = structuredClone(architectureFixture);
+duplicateComponent.data.components[1]!.id = "cli";
+duplicateComponent.data.components[1]!.entity.id = "cli";
+assert(parseArchitectureView(duplicateComponent) === undefined, "应拒绝重复 component id");
+
+const flowFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "flow",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    layout: "numbered-task-flow",
+    exampleTask: { title: "理解项目", source: "request" },
+    steps: Array.from({ length: 5 }, (_, index) => ({
+      step: index + 1,
+      id: `step-${index + 1}`,
+      title: `步骤 ${index + 1}`,
+      purpose: `处理阶段 ${index + 1}`,
+      input: index === 0 ? "用户请求" : `步骤 ${index} 的结果`,
+      output: index === 4 ? "主流程结果" : `交给步骤 ${index + 2}`,
+      keyFiles: index === 0 ? [{
+        path: "src/cli.py", moduleId: "cli", moduleName: "CLI",
+        entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py"),
+        relation: { id: "edge:cli-file", sourceId: "cli", targetId: "file:cli", relation: "implemented_by", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [tourEvidence] },
+        evidence: [tourEvidence],
+      }] : [],
+      why: `文档列为第 ${index + 1} 步`,
+      nextStep: index === 4 ? null : `步骤 ${index + 2}`,
+      explanationSource: "derived-presentation",
+      evidence: [tourEvidence],
+    })),
+    stats: { files: 2, concepts: 2, tasks: 1, documentsRead: 2 },
+  },
+  warnings: [],
+};
+assert(parseFlowView(flowFixture)?.data.steps.length === 5, "应解析连续 5–7 步 Flow");
+assert(parseAgentNaviView(flowFixture)?.view === "flow", "通用 parser 应分派 Flow");
+assert(parseRequestedView({ view: "flow" }) === "flow", "应识别 Flow 请求");
+const discontinuousFlow = structuredClone(flowFixture);
+discontinuousFlow.data.steps[2]!.step = 4;
+assert(parseFlowView(discontinuousFlow) === undefined, "应拒绝不连续的 Flow step");
+const duplicateFlow = structuredClone(flowFixture);
+duplicateFlow.data.steps[2]!.id = "step-2";
+assert(parseFlowView(duplicateFlow) === undefined, "应拒绝重复 Flow id");
+const wrongNextFlow = structuredClone(flowFixture);
+wrongNextFlow.data.steps[0]!.nextStep = "步骤 5";
+assert(parseFlowView(wrongNextFlow) === undefined, "应拒绝未指向紧邻步骤的 nextStep");
+const shortFlow = structuredClone(flowFixture);
+shortFlow.data.steps = shortFlow.data.steps.slice(0, 4);
+assert(parseFlowView(shortFlow) === undefined, "应拒绝非空但少于 5 步的 Flow");
+const emptyFlow = structuredClone(flowFixture);
+emptyFlow.data.steps = [];
+assert(parseFlowView(emptyFlow)?.data.steps.length === 0, "证据不足时空 Flow 合法");
 
 console.log("protocol unit checks passed");

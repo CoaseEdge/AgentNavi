@@ -149,6 +149,40 @@
           </section>
         </div>
 
+        <div id="architecture-view" class="architecture-view" hidden>
+          <section class="architecture-summary" aria-labelledby="architecture-title">
+            <span class="stage-index">FIXED COGNITIVE LAYOUT</span>
+            <h2 id="architecture-title">系统由哪些部分构成</h2>
+            <p id="architecture-summary"></p>
+          </section>
+          <section class="architecture-group" aria-labelledby="architecture-entry-title">
+            <h2 id="architecture-entry-title">入口</h2>
+            <ul id="architecture-entry"></ul>
+          </section>
+          <section class="architecture-group" aria-labelledby="architecture-core-title">
+            <h2 id="architecture-core-title">核心</h2>
+            <ul id="architecture-core"></ul>
+          </section>
+          <section class="architecture-group" aria-labelledby="architecture-support-title">
+            <h2 id="architecture-support-title">支撑</h2>
+            <ul id="architecture-support"></ul>
+          </section>
+          <section class="architecture-relations" aria-labelledby="architecture-relations-title">
+            <h2 id="architecture-relations-title">真实组件关系</h2>
+            <ul id="architecture-connections"></ul>
+          </section>
+        </div>
+
+        <div id="flow-view" class="flow-view" hidden>
+          <section class="flow-task" aria-labelledby="flow-task-title">
+            <span class="stage-index">REAL TASK</span>
+            <h2 id="flow-task-title">任务示例</h2>
+            <p id="flow-task"></p>
+          </section>
+          <p id="flow-empty" class="tour-empty" hidden>项目文档中没有可验证的 5–7 步执行主流程。</p>
+          <ol id="flow-steps" class="flow-steps"></ol>
+        </div>
+
         <section id="warning-panel" class="warning-panel" hidden aria-label="数据提示">
           <span class="warning-label">WARNINGS</span>
           <ul id="warning-list"></ul>

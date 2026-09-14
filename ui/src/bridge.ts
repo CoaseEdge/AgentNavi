@@ -14,6 +14,10 @@ export function applyToolInput(shell: AgentNaviShell, toolArguments: unknown): v
         ? "项目概览"
         : requestedView === "repo-tour"
           ? "仓库导览"
+          : requestedView === "architecture"
+            ? "系统架构"
+            : requestedView === "flow"
+              ? "任务主流程"
           : undefined
     ),
     requestedView,

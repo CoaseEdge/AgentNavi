@@ -140,7 +140,83 @@ export interface RepositoryTourView {
   warnings: ContextWarning[];
 }
 
-export type AgentNaviView = ContextView | RepositoryOverviewView | RepositoryTourView;
+export interface ArchitectureComponent {
+  id: string;
+  name: string;
+  group: "entry" | "core" | "support";
+  responsibility: string;
+  paths: string[];
+  entity: TourStop["entity"];
+  evidence: Evidence[];
+}
+
+export interface ArchitectureView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "architecture";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "cognitive-components";
+    summary: { text: string; explanationSource: "derived-presentation"; evidence: Evidence[] };
+    components: ArchitectureComponent[];
+    connections: TourStop["relations"];
+    entryPoints: Array<{
+      path: string;
+      reason: string;
+      entity: TourStop["entity"];
+      evidence: Evidence[];
+    }>;
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export interface FlowStep {
+  step: number;
+  id: string;
+  title: string;
+  purpose: string;
+  input: string;
+  output: string;
+  keyFiles: Array<{
+    path: string;
+    moduleId: string;
+    moduleName: string;
+    entity: TourStop["entity"];
+    relation: TourStop["relations"][number];
+    evidence: Evidence[];
+  }>;
+  why: string;
+  nextStep: string | null;
+  explanationSource: "derived-presentation";
+  evidence: Evidence[];
+}
+
+export interface FlowView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "flow";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "numbered-task-flow";
+    exampleTask?: {
+      title: string;
+      source: string;
+      entity?: TourStop["entity"];
+      evidence?: Evidence[];
+    };
+    steps: FlowStep[];
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export type AgentNaviView =
+  | ContextView
+  | RepositoryOverviewView
+  | RepositoryTourView
+  | ArchitectureView
+  | FlowView;
 
 export interface PublicError {
   code: string;
@@ -588,8 +664,177 @@ export function parseRepositoryTourView(value: unknown): RepositoryTourView | un
   };
 }
 
+function repositoryStats(value: unknown): RepositoryOverviewView["data"]["stats"] | undefined {
+  const stats = record(value);
+  if (!stats) return undefined;
+  return {
+    files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks),
+    documentsRead: count(stats.documentsRead),
+  };
+}
+
+export function parseArchitectureView(value: unknown): ArchitectureView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "architecture" || common.data.layout !== "cognitive-components") {
+    return undefined;
+  }
+  const summary = record(common.data.summary);
+  const stats = repositoryStats(common.data.stats);
+  const rawComponents = Array.isArray(common.data.components) ? common.data.components : [];
+  if (!summary || summary.explanationSource !== "derived-presentation" || !stats || rawComponents.length > 8) {
+    return undefined;
+  }
+  const components = rawComponents.flatMap((value) => {
+    const item = record(value);
+    const id = displayText(item?.id);
+    const name = displayText(item?.name);
+    const group = item?.group;
+    const entity = tourEntity(item?.entity);
+    const rawPaths = Array.isArray(item?.paths) ? item.paths : [];
+    const paths = rawPaths.map((path) => text(path));
+    const evidence = evidenceList(item?.evidence);
+    if (
+      !item || !id || !name || !entity || entity.id !== id ||
+      (group !== "entry" && group !== "core" && group !== "support") ||
+      paths.length === 0 || paths.length > 3 || new Set(paths).size !== paths.length ||
+      paths.some((path) => !isCanonicalRelativePath(path)) || evidence.length === 0
+    ) return [];
+    return [{
+      id, name, group: group as ArchitectureComponent["group"],
+      responsibility: displayText(item.responsibility), paths, entity, evidence,
+    }];
+  });
+  const componentIds = components.map((component) => component.id);
+  if (components.length !== rawComponents.length || new Set(componentIds).size !== componentIds.length) {
+    return undefined;
+  }
+  const rawConnections = Array.isArray(common.data.connections) ? common.data.connections : [];
+  if (rawConnections.length > 12) return undefined;
+  const connections = rawConnections.map(tourRelation).filter((edge): edge is TourStop["relations"][number] => Boolean(edge));
+  const connectionIds = connections.map((edge) => edge.id);
+  const included = new Set(componentIds);
+  if (
+    connections.length !== rawConnections.length || new Set(connectionIds).size !== connectionIds.length ||
+    connections.some((edge) => !included.has(edge.sourceId) || !included.has(edge.targetId) || edge.evidence.length === 0)
+  ) return undefined;
+  const rawEntries = Array.isArray(common.data.entryPoints) ? common.data.entryPoints : [];
+  if (rawEntries.length > 3) return undefined;
+  const entryPoints = rawEntries.flatMap((value) => {
+    const item = record(value);
+    const path = text(item?.path);
+    const entity = tourEntity(item?.entity);
+    const evidence = evidenceList(item?.evidence);
+    if (!item || !isCanonicalRelativePath(path) || !entity || evidence.length === 0) return [];
+    return [{ path, reason: displayText(item.reason), entity, evidence }];
+  });
+  if (entryPoints.length !== rawEntries.length || new Set(entryPoints.map((entry) => entry.path)).size !== entryPoints.length) {
+    return undefined;
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "architecture",
+    project: common.project,
+    sourceState: common.sourceState,
+    data: {
+      layout: "cognitive-components",
+      summary: {
+        text: displayText(summary.text), explanationSource: "derived-presentation",
+        evidence: evidenceList(summary.evidence),
+      },
+      components,
+      connections,
+      entryPoints,
+      stats,
+    },
+    warnings: common.warnings,
+  };
+}
+
+export function parseFlowView(value: unknown): FlowView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "flow" || common.data.layout !== "numbered-task-flow") {
+    return undefined;
+  }
+  const stats = repositoryStats(common.data.stats);
+  const rawSteps = Array.isArray(common.data.steps) ? common.data.steps : [];
+  if (!stats || (rawSteps.length !== 0 && (rawSteps.length < 5 || rawSteps.length > 7))) return undefined;
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  const steps: FlowStep[] = [];
+  for (let index = 0; index < rawSteps.length; index += 1) {
+    const item = record(rawSteps[index]);
+    const step = item?.step;
+    const id = displayText(item?.id);
+    const title = displayText(item?.title);
+    const expectedNext = index + 1 < rawSteps.length ? record(rawSteps[index + 1])?.title : null;
+    const evidence = evidenceList(item?.evidence);
+    if (
+      !item || step !== index + 1 || !id || ids.has(id) || !title ||
+      item.explanationSource !== "derived-presentation" || item.nextStep !== expectedNext || evidence.length === 0
+    ) return undefined;
+    ids.add(id);
+    const rawFiles = Array.isArray(item.keyFiles) ? item.keyFiles : [];
+    if (rawFiles.length > 3) return undefined;
+    const keyFiles: FlowStep["keyFiles"] = [];
+    for (const rawFile of rawFiles) {
+      const file = record(rawFile);
+      const path = text(file?.path);
+      const entity = tourEntity(file?.entity);
+      const relation = tourRelation(file?.relation);
+      const fileEvidence = evidenceList(file?.evidence);
+      if (!file || !isCanonicalRelativePath(path) || paths.has(path) || !entity || !relation || fileEvidence.length === 0) {
+        return undefined;
+      }
+      paths.add(path);
+      keyFiles.push({
+        path,
+        moduleId: displayText(file.moduleId),
+        moduleName: displayText(file.moduleName),
+        entity,
+        relation,
+        evidence: fileEvidence,
+      });
+    }
+    steps.push({
+      step,
+      id,
+      title,
+      purpose: displayText(item.purpose),
+      input: displayText(item.input),
+      output: displayText(item.output),
+      keyFiles,
+      why: displayText(item.why),
+      nextStep: item.nextStep === null ? null : displayText(item.nextStep),
+      explanationSource: "derived-presentation",
+      evidence,
+    });
+  }
+  if (paths.size > 18) return undefined;
+  const rawTask = common.data.exampleTask;
+  let exampleTask: FlowView["data"]["exampleTask"];
+  if (rawTask !== undefined && rawTask !== null) {
+    const task = record(rawTask);
+    const title = displayText(task?.title);
+    const source = displayText(task?.source);
+    if (!task || !title || !source) return undefined;
+    const entity = task.entity === undefined ? undefined : tourEntity(task.entity);
+    const evidence = task.evidence === undefined ? undefined : evidenceList(task.evidence);
+    if ((task.entity !== undefined && !entity) || (task.evidence !== undefined && !evidence?.length)) return undefined;
+    exampleTask = { title, source, ...(entity ? { entity } : {}), ...(evidence ? { evidence } : {}) };
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "flow",
+    project: common.project,
+    sourceState: common.sourceState,
+    data: { layout: "numbered-task-flow", ...(exampleTask ? { exampleTask } : {}), steps, stats },
+    warnings: common.warnings,
+  };
+}
+
 export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
-  return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value);
+  return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value) ??
+    parseArchitectureView(value) ?? parseFlowView(value);
 }
 
 export function parseTaskQuery(value: unknown): string | undefined {
@@ -600,7 +845,8 @@ export function parseTaskQuery(value: unknown): string | undefined {
 
 export function parseRequestedView(value: unknown): AgentNaviView["view"] | undefined {
   const input = record(value);
-  return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour"
+  return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour" ||
+    input?.view === "architecture" || input?.view === "flow"
     ? input.view
     : undefined;
 }

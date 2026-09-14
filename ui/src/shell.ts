@@ -2,6 +2,8 @@ import type { AgentNaviView, ContextConcept, ContextFile, ContextView } from "./
 import { renderRegisteredView } from "./views/index.js";
 import { clearRepositoryOverview } from "./views/repo-overview.js";
 import { clearRepositoryTour } from "./views/repo-tour.js";
+import { clearArchitecture } from "./views/architecture.js";
+import { clearFlow } from "./views/flow.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -85,6 +87,14 @@ export class AgentNaviShell {
       replaceText(element("view-title"), "Repository Tour");
       replaceText(element("view-eyebrow"), "GUIDED REPOSITORY TOUR");
       replaceText(element("view-description"), "在讲人话、技术解释与源码证据之间逐层深入。");
+    } else if (view === "architecture") {
+      replaceText(element("view-title"), "Architecture");
+      replaceText(element("view-eyebrow"), "SYSTEM COMPONENTS");
+      replaceText(element("view-description"), "按入口、核心与支撑理解系统组成及真实关系。");
+    } else if (view === "flow") {
+      replaceText(element("view-title"), "Task Flow");
+      replaceText(element("view-eyebrow"), "EVIDENCE-BACKED FLOW");
+      replaceText(element("view-description"), "沿 5–7 个可展开步骤理解任务如何流经源码。");
     } else {
       replaceText(element("view-title"), "ContextMap");
       replaceText(element("view-eyebrow"), "READING CONTEXT");
@@ -103,6 +113,10 @@ export class AgentNaviShell {
         ? "正在读取项目概览"
         : view === "repo-tour"
           ? "正在生成仓库导览"
+          : view === "architecture"
+            ? "正在读取系统架构"
+            : view === "flow"
+              ? "正在生成任务流"
           : "正在读取 Context",
     );
     replaceText(element("empty-message"), "新请求已收到，旧视图结果已清除。");
@@ -121,6 +135,8 @@ export class AgentNaviShell {
     element("context-map").hidden = true;
     clearRepositoryOverview();
     clearRepositoryTour();
+    clearArchitecture();
+    clearFlow();
     element("concept-list").replaceChildren();
     element("file-list").replaceChildren();
     element("warning-list").replaceChildren();

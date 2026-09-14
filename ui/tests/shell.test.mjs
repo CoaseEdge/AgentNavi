@@ -95,6 +95,58 @@ function tourFixture() {
   };
 }
 
+function architectureFixture() {
+  const evidence = { kind: "physical-edge", summary: "imports", layer: "L1", source: "ast-import", confidence: 1, path: "src/cli.py" };
+  const entity = (id, label, path) => ({ id, kind: "concept", label, path, layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] });
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "architecture",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      layout: "cognitive-components",
+      summary: { text: "入口 <script>alert(1)</script> 连接核心", explanationSource: "derived-presentation", evidence: [evidence] },
+      components: [
+        { id: "cli", name: "CLI", group: "entry", responsibility: "接收请求", paths: ["src/cli.py"], entity: entity("cli", "CLI", "src/cli.py"), evidence: [evidence] },
+        { id: "core", name: "Core", group: "core", responsibility: "处理请求", paths: ["src/core.py"], entity: entity("core", "Core", "src/core.py"), evidence: [evidence] },
+      ],
+      connections: [{ id: "edge", sourceId: "cli", targetId: "core", relation: "depends_on", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] }],
+      entryPoints: [{ path: "src/cli.py", reason: "入口", entity: entity("file:cli", "src/cli.py", "src/cli.py"), evidence: [evidence] }],
+      stats: { files: 2, concepts: 2, tasks: 0, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
+function flowFixture() {
+  const evidence = { kind: "document", summary: "执行流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md" };
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "flow",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      layout: "numbered-task-flow",
+      exampleTask: { title: "理解 <script>alert(1)</script> 项目", source: "request" },
+      steps: Array.from({ length: 5 }, (_, index) => ({
+        step: index + 1,
+        id: `step-${index + 1}`,
+        title: `步骤 ${index + 1}`,
+        purpose: `阶段 ${index + 1}`,
+        input: index === 0 ? "用户请求" : `步骤 ${index} 的结果`,
+        output: index === 4 ? "主流程结果" : `交给步骤 ${index + 2}`,
+        keyFiles: [],
+        why: `项目文档列为第 ${index + 1} 步`,
+        nextStep: index === 4 ? null : `步骤 ${index + 2}`,
+        explanationSource: "derived-presentation",
+        evidence: [evidence],
+      })),
+      stats: { files: 2, concepts: 2, tasks: 1, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
 function setup() {
   const { document } = parseHTML(html);
   globalThis.document = document;
@@ -169,6 +221,40 @@ test("repository tour switches depth locally with accessible controls and safe d
   applyToolResult(shell, { structuredContent: fixture() });
   assert.equal(document.querySelector("#repository-tour").hidden, true);
   assert.equal(document.querySelector("#tour-stops").children.length, 0);
+});
+
+test("architecture uses grouped cards and only included real connections", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "architecture" });
+  applyToolResult(shell, { structuredContent: architectureFixture() });
+
+  assert.equal(document.querySelector("#architecture-view").hidden, false);
+  assert.equal(document.querySelector("#architecture-entry").children.length, 1);
+  assert.equal(document.querySelector("#architecture-core").children.length, 1);
+  assert.equal(document.querySelector("#architecture-connections strong").textContent, "cli → core");
+  assert.equal(document.querySelector("#architecture-summary script"), null);
+  assert.equal(document.querySelector("#architecture-summary").textContent, "[内容含路径，已隐藏]");
+
+  applyToolResult(shell, { structuredContent: flowFixture() });
+  assert.equal(document.querySelector("#architecture-view").hidden, true);
+  assert.equal(document.querySelector("#architecture-connections").children.length, 0);
+});
+
+test("flow renders a local five-step expandable timeline and clears across views", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "flow" });
+  applyToolResult(shell, { structuredContent: flowFixture() });
+
+  assert.equal(document.querySelector("#flow-view").hidden, false);
+  assert.equal(document.querySelectorAll("#flow-steps > li").length, 5);
+  assert.equal(document.querySelector("#flow-steps details summary strong").textContent, "步骤 1");
+  assert.equal(document.querySelector("#flow-steps details dl dt").textContent, "输入");
+  assert.equal(document.querySelector("#flow-task script"), null);
+  assert.equal(document.querySelector("#flow-task").textContent, "[内容含路径，已隐藏]");
+
+  applyToolResult(shell, { structuredContent: fixture() });
+  assert.equal(document.querySelector("#flow-view").hidden, true);
+  assert.equal(document.querySelector("#flow-steps").children.length, 0);
 });
 
 test("new input clears stale data before an error and keeps status perceivable", () => {

@@ -212,6 +212,43 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertNotIn(str(self.project_root.resolve()), wire)
         self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_visualize_tool_returns_architecture_and_flow(self) -> None:
+        self._add_project()
+        self._add_overview_documents()
+
+        architecture = asyncio.run(
+            self._call(
+                {"view": "architecture", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        )
+        flow = asyncio.run(
+            self._call(
+                {"view": "flow", "query": "修改会员", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        )
+
+        self.assertFalse(architecture.is_error)
+        self.assertEqual(architecture.structured_content["view"], "architecture")
+        self.assertEqual(
+            architecture.structured_content["data"]["layout"],
+            "cognitive-components",
+        )
+        self.assertIn("系统架构", architecture.content[0].text)
+        self.assertFalse(flow.is_error)
+        self.assertEqual(flow.structured_content["view"], "flow")
+        self.assertEqual(len(flow.structured_content["data"]["steps"]), 7)
+        self.assertEqual(flow.structured_content["data"]["exampleTask"]["title"], "修改会员")
+        self.assertIn("关键源码", flow.content[0].text)
+        wire = json.dumps(
+            [architecture.model_dump(by_alias=True), flow.model_dump(by_alias=True)],
+            ensure_ascii=False,
+            default=str,
+        )
+        self.assertNotIn(str(self.project_root.resolve()), wire)
+        self.assertNotIn(str(self.database.settings.database_path), wire)
+
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()
 

@@ -323,9 +323,133 @@ class RepositoryTourViewOutput(_ExtensibleModel):
         return value
 
 
+class ArchitectureSummaryOutput(_ExtensibleModel):
+    text: str
+    explanation_source: Literal["derived-presentation"] = Field(alias="explanationSource")
+    evidence: list[TourEvidenceOutput]
+
+
+class ArchitectureComponentOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    group: Literal["entry", "core", "support"]
+    responsibility: str = Field(min_length=1)
+    paths: list[str] = Field(min_length=1, max_length=3)
+    entity: TourEntityOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ArchitectureEntryOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    entity: TourEntityOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class ArchitectureDataOutput(_ExtensibleModel):
+    layout: Literal["cognitive-components"]
+    summary: ArchitectureSummaryOutput
+    components: list[ArchitectureComponentOutput] = Field(max_length=8)
+    connections: list[TourRelationOutput] = Field(max_length=12)
+    entry_points: list[ArchitectureEntryOutput] = Field(alias="entryPoints", max_length=3)
+    stats: OverviewStatsOutput
+
+
+class ArchitectureViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["architecture"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: ArchitectureDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "view": "architecture",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "layout": "cognitive-components",
+                    "summary": {"text": "", "explanationSource": "derived-presentation", "evidence": []},
+                    "components": [], "connections": [], "entryPoints": [],
+                    "stats": {"files": 0, "concepts": 0, "tasks": 0, "documentsRead": 0},
+                },
+                "warnings": [],
+            }
+        return value
+
+
+class FlowTaskOutput(_ExtensibleModel):
+    title: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    entity: TourEntityOutput | None = None
+    evidence: list[TourEvidenceOutput] | None = None
+
+
+class FlowKeyFileOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    module_id: str = Field(alias="moduleId", min_length=1)
+    module_name: str = Field(alias="moduleName", min_length=1)
+    entity: TourEntityOutput
+    relation: TourRelationOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class FlowStepOutput(_ExtensibleModel):
+    step: int = Field(ge=1, le=7)
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    input: str = Field(min_length=1)
+    output: str = Field(min_length=1)
+    key_files: list[FlowKeyFileOutput] = Field(alias="keyFiles", max_length=3)
+    why: str = Field(min_length=1)
+    next_step: str | None = Field(alias="nextStep")
+    explanation_source: Literal["derived-presentation"] = Field(alias="explanationSource")
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class FlowDataOutput(_ExtensibleModel):
+    layout: Literal["numbered-task-flow"]
+    example_task: FlowTaskOutput | None = Field(alias="exampleTask")
+    steps: list[FlowStepOutput] = Field(max_length=7)
+    stats: OverviewStatsOutput
+
+
+class FlowViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["flow"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: FlowDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "view": "flow",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "layout": "numbered-task-flow", "exampleTask": None, "steps": [],
+                    "stats": {"files": 0, "concepts": 0, "tasks": 0, "documentsRead": 0},
+                },
+                "warnings": [],
+            }
+        return value
+
+
 class VisualizeViewOutput(
     RootModel[
         ContextViewOutput | RepositoryOverviewViewOutput | RepositoryTourViewOutput
+        | ArchitectureViewOutput | FlowViewOutput
     ]
 ):
     """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
@@ -347,7 +471,10 @@ VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 VISUALIZE_VIEW_INPUT = Annotated[
     Any,
     WithJsonSchema(
-        {"type": "string", "enum": ["context", "repo-overview", "repo-tour"]}
+        {
+            "type": "string",
+            "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+        }
     ),
 ]
 REQUIRED_TEXT_INPUT = Annotated[
@@ -376,6 +503,8 @@ def context_tool_annotations() -> ToolAnnotations:
 
 __all__ = [
     "CONTEXT_TOOL_RESULT",
+    "ArchitectureViewOutput",
+    "FlowViewOutput",
     "VISUALIZE_TOOL_RESULT",
     "VISUALIZE_VIEW_INPUT",
     "OPTIONAL_TEXT_INPUT",

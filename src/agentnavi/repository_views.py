@@ -35,6 +35,10 @@ TOUR_HISTORY_PAGE_SIZE = 32
 MAX_TOUR_HISTORY_PAGES = 5
 MAX_TOUR_HISTORY_CANDIDATES = TOUR_HISTORY_PAGE_SIZE * MAX_TOUR_HISTORY_PAGES
 MAX_TOUR_HISTORY_SQL_QUERIES = MAX_TOUR_HISTORY_PAGES * 2
+MAX_ARCHITECTURE_COMPONENTS = 8
+MAX_ARCHITECTURE_CONNECTIONS = 12
+MAX_ARCHITECTURE_ENTRY_POINTS = 3
+MAX_FLOW_FILES = 18
 
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
@@ -452,6 +456,79 @@ def _workflow(documents: list[_Document]) -> tuple[list[dict[str, Any]], bool]:
         }
         for index, (line, line_end, title, detail) in enumerate(selected[:7], start=1)
     ], len(selected) > 7
+
+
+def _execution_workflow(
+    documents: list[_Document],
+) -> tuple[list[dict[str, Any]], bool]:
+    """只接受明示的运行主流程，避免把安装或阅读清单当成执行链。"""
+
+    heading_terms = (
+        "主流程", "执行流程", "任务流程", "workflow",
+        "request flow", "data flow",
+    )
+    groups: list[tuple[int, int, list[tuple[int, int, str, str]]]] = []
+    for doc_index, document in enumerate(documents):
+        path = document.path.lower()
+        if not (
+            PurePosixPath(path).name.startswith("readme")
+            or path in {"docs/architecture.md", "docs/architecture.mdx", "docs/architecture.rst"}
+        ):
+            continue
+        accepted_heading = False
+        group_start = 0
+        current: list[tuple[int, int, str, str]] = []
+        for line_number, raw_line in document.lines:
+            heading = _HEADING_RE.match(raw_line)
+            if heading:
+                if accepted_heading and len(current) >= 5:
+                    groups.append((doc_index, group_start, current))
+                title = " ".join(heading.group(1).lower().split())
+                accepted_heading = any(term in title for term in heading_terms)
+                group_start = line_number
+                current = []
+                continue
+            ordered = _ORDERED_RE.match(raw_line)
+            if accepted_heading and ordered:
+                prose = _safe_prose(ordered.group(1), limit=240)
+                if prose:
+                    current.append((line_number, line_number, prose, prose))
+                continue
+            if accepted_heading and current and raw_line.startswith(("  ", "\t")):
+                continuation = _safe_prose(raw_line, limit=240)
+                if continuation:
+                    line, _, title, detail = current[-1]
+                    current[-1] = (
+                        line, line_number, title, f"{detail} {continuation}"[:320],
+                    )
+                continue
+            if accepted_heading and current and raw_line.strip():
+                if len(current) >= 5:
+                    groups.append((doc_index, group_start, current))
+                current = []
+        if accepted_heading and len(current) >= 5:
+            groups.append((doc_index, group_start, current))
+
+    if not groups:
+        return [], False
+    groups.sort(key=lambda item: (item[0], item[1]))
+    document = documents[groups[0][0]]
+    selected = groups[0][2]
+    steps = [
+        {
+            "step": index,
+            "title": title,
+            "detail": detail,
+            "evidence": [
+                _evidence(
+                    document, line, "项目文档明示的执行流程步骤。",
+                    line_end=line_end,
+                )
+            ],
+        }
+        for index, (line, line_end, title, detail) in enumerate(selected[:7], start=1)
+    ]
+    return steps, len(selected) > 7
 
 
 def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, Any]]:
@@ -1843,6 +1920,487 @@ def repository_tour_data(
     }
 
 
+def _architecture_connection_evidence(
+    connection: sqlite3.Connection,
+    project_id: str,
+    edge: sqlite3.Row,
+    fresh_paths: set[str],
+) -> list[dict[str, Any]]:
+    if str(edge["source"]) == "human-overlay":
+        return [{
+            "kind": "human-decision",
+            "summary": "人工确认的概念关系。",
+            "layer": "L2",
+            "source": "human-overlay",
+            "confidence": float(edge["confidence"]),
+        }]
+    data = json_loads(edge["data_json"], {})
+    raw_evidence = data.get("evidence", [])
+    if not isinstance(raw_evidence, list):
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        source_path = item.get("source")
+        target_path = item.get("target")
+        relation = item.get("physical_relation")
+        if not all(isinstance(value, str) for value in (source_path, target_path, relation)):
+            continue
+        assert isinstance(source_path, str)
+        assert isinstance(target_path, str)
+        assert isinstance(relation, str)
+        if (
+            not is_canonical_relative_path(source_path)
+            or not is_canonical_relative_path(target_path)
+            or source_path not in fresh_paths
+            or target_path not in fresh_paths
+        ):
+            continue
+        physical = connection.execute(
+            """SELECT 1
+               FROM edges physical
+               JOIN nodes source_file
+                 ON source_file.id=physical.source_id AND source_file.layer=1
+                AND source_file.kind='file'
+               JOIN nodes target_file
+                 ON target_file.id=physical.target_id AND target_file.layer=1
+                AND target_file.kind='file'
+               WHERE physical.project_id=? AND physical.layer=1
+                 AND source_file.key=? AND target_file.key=?
+                 AND physical.relation=?
+               LIMIT 1""",
+            (project_id, source_path, target_path, relation),
+        ).fetchone()
+        if physical is None:
+            continue
+        evidence.append({
+            "kind": "physical-relation",
+            "summary": f"{source_path} {relation} {target_path}",
+            "layer": "L1",
+            "source": "repository-index",
+            "confidence": 1.0,
+            "path": source_path,
+        })
+        if len(evidence) >= 3:
+            break
+    return evidence
+
+
+def _structure_snapshot(
+    database: Database,
+    project: sqlite3.Row,
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    snapshot_context: dict[str, Any] = {}
+    overview = _repository_overview_data(
+        database,
+        project,
+        connection=connection,
+        snapshot_context=snapshot_context,
+    )
+    project_id = str(project["id"])
+    modules = overview["modules"] if overview["sourceState"]["status"] != "partial" else []
+    reading_order = (
+        overview["readingOrder"]
+        if overview["sourceState"]["status"] != "partial"
+        else []
+    )
+    fresh_paths = {
+        path for module in modules for path in module["paths"]
+    } | {entry["path"] for entry in reading_order}
+    fresh_paths.update(
+        evidence["path"]
+        for step in overview["workflow"]
+        for evidence in step["evidence"]
+        if isinstance(evidence.get("path"), str)
+    )
+    entry_paths = {
+        entry["path"]
+        for entry in reading_order
+        if any(
+            term in entry["reason"].lower()
+            for term in ("入口", "entry point", "进入调用链")
+        )
+    }
+
+    components: list[dict[str, Any]] = []
+    file_facts: list[dict[str, Any]] = []
+    component_ids: list[str] = []
+    for module in modules[:MAX_ARCHITECTURE_COMPONENTS]:
+        node = connection.execute(
+            """SELECT id, key, label, data_json, source, confidence
+               FROM nodes WHERE project_id=? AND id=? AND layer=2 AND kind='concept'""",
+            (project_id, module["id"]),
+        ).fetchone()
+        if node is None or not module["paths"] or not module["evidence"]:
+            continue
+        path_placeholders = ",".join("?" for _ in module["paths"])
+        mapping_rows = list(
+            connection.execute(
+                f"""SELECT edge.id, edge.source_id, edge.target_id, edge.relation,
+                           edge.source, edge.confidence, file.key AS path
+                    FROM edges edge
+                    JOIN nodes file
+                      ON file.id=edge.target_id AND file.layer=1 AND file.kind='file'
+                    WHERE edge.project_id=? AND edge.layer=2 AND edge.source_id=?
+                      AND file.key IN ({path_placeholders})
+                    ORDER BY edge.relation, file.key COLLATE NOCASE, file.key, edge.id""",
+                (project_id, module["id"], *module["paths"]),
+            )
+        )
+        mappings: list[dict[str, Any]] = []
+        relation_counts: dict[str, int] = {}
+        data = json_loads(node["data_json"], {})
+        keywords = data.get("keywords", [])
+        match_terms = {
+            str(node["key"]), str(node["label"]),
+            *(str(item) for item in keywords if isinstance(item, str)),
+        }
+        for row in mapping_rows:
+            path = str(row["path"])
+            if path not in fresh_paths:
+                continue
+            evidence = [_file_evidence(path, "概念与已核对仓库文件的真实映射。")]
+            entity = _tour_node_entity(
+                connection, project_id, str(row["target_id"]), evidence, path=path
+            )
+            if entity is None:
+                continue
+            relation = {
+                "id": str(row["id"]),
+                "sourceId": str(row["source_id"]),
+                "targetId": str(row["target_id"]),
+                "relation": str(row["relation"]),
+                "layer": "L2",
+                "source": str(row["source"]),
+                "confidence": float(row["confidence"]),
+                "evidence": evidence,
+            }
+            mappings.append(relation)
+            relation_counts[relation["relation"]] = relation_counts.get(relation["relation"], 0) + 1
+            match_terms.update((path, PurePosixPath(path).stem))
+            file_facts.append({
+                "path": path,
+                "moduleId": str(node["id"]),
+                "moduleName": str(node["label"]),
+                "entity": entity,
+                "relation": relation,
+                "evidence": evidence,
+                "matchTerms": sorted(match_terms),
+            })
+        if not mappings:
+            continue
+        if any(path in entry_paths for path in module["paths"]):
+            group = "entry"
+        elif any(item["relation"] == "implemented_by" for item in mappings):
+            group = "core"
+        else:
+            group = "support"
+        responsibility = "；".join(
+            f"{relation} 关联 {count} 个已核对文件"
+            for relation, count in sorted(relation_counts.items())
+        )
+        entity = _tour_node_entity(
+            connection, project_id, str(node["id"]), module["evidence"]
+        )
+        if entity is None:
+            continue
+        components.append({
+            "id": str(node["id"]),
+            "name": str(node["label"]),
+            "group": group,
+            "responsibility": responsibility,
+            "paths": sorted({item["path"] for item in file_facts if item["moduleId"] == node["id"]})[:3],
+            "entity": entity,
+            "evidence": module["evidence"][:3],
+        })
+        component_ids.append(str(node["id"]))
+
+    connections: list[dict[str, Any]] = []
+    dropped_connections = False
+    if component_ids:
+        placeholders = ",".join("?" for _ in component_ids)
+        rows = connection.execute(
+            f"""SELECT edge.* FROM edges edge
+                WHERE edge.project_id=? AND edge.layer=2
+                  AND edge.relation IN ('depends_on', 'related_to')
+                  AND edge.source_id IN ({placeholders})
+                  AND edge.target_id IN ({placeholders})
+                ORDER BY edge.relation, edge.source_id, edge.target_id, edge.id""",
+            (project_id, *component_ids, *component_ids),
+        )
+        for row in rows:
+            evidence = _architecture_connection_evidence(
+                connection, project_id, row, fresh_paths
+            )
+            if not evidence:
+                dropped_connections = True
+                continue
+            if len(connections) >= MAX_ARCHITECTURE_CONNECTIONS:
+                dropped_connections = True
+                continue
+            connections.append({
+                "id": str(row["id"]),
+                "sourceId": str(row["source_id"]),
+                "targetId": str(row["target_id"]),
+                "relation": str(row["relation"]),
+                "layer": "L2",
+                "source": str(row["source"]),
+                "confidence": float(row["confidence"]),
+                "evidence": evidence,
+            })
+
+    entry_points: list[dict[str, Any]] = []
+    for entry in reading_order:
+        if entry["path"] not in entry_paths:
+            continue
+        entity = _tour_node_entity(
+            connection,
+            project_id,
+            Database.node_id(project_id, 1, "file", entry["path"]),
+            entry["evidence"],
+            path=entry["path"],
+        )
+        if entity is None:
+            continue
+        entry_points.append({
+            "path": entry["path"],
+            "reason": entry["reason"],
+            "entity": entity,
+            "evidence": entry["evidence"],
+        })
+        if len(entry_points) >= MAX_ARCHITECTURE_ENTRY_POINTS:
+            break
+
+    return {
+        "overview": overview,
+        "documents": snapshot_context.get("documents", []),
+        "components": components,
+        "connections": connections,
+        "entryPoints": entry_points,
+        "fileFacts": file_facts,
+        "droppedConnections": dropped_connections,
+    }
+
+
+def _understanding_revision(prefix: str, base_revision: str | None, *values: Any) -> str:
+    parts = [base_revision or ""]
+    parts.extend(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for value in values
+    )
+    return stable_id(*parts, prefix=prefix)
+
+
+def repository_architecture_data(
+    database: Database,
+    project: sqlite3.Row,
+) -> dict[str, Any]:
+    with database.connect() as connection:
+        connection.execute("BEGIN")
+        snapshot = _structure_snapshot(database, project, connection)
+        overview = snapshot["overview"]
+        components = snapshot["components"]
+        summary_evidence = [
+            evidence
+            for component in components
+            for evidence in component["evidence"][:1]
+        ][:8]
+        summary = {
+            "text": (
+                "系统由 " + "、".join(component["name"] for component in components) + " 构成。"
+                if components else ""
+            ),
+            "explanationSource": "derived-presentation",
+            "evidence": summary_evidence,
+        }
+        warnings: list[dict[str, Any]] = []
+        if not components:
+            warnings.append({
+                "code": "ARCHITECTURE_EVIDENCE_INSUFFICIENT",
+                "message": "缺少有文件证据的活跃组件，未生成推测性架构。",
+                "evidence": [],
+            })
+        if snapshot["droppedConnections"]:
+            warnings.append({
+                "code": "ARCHITECTURE_CONNECTIONS_TRUNCATED",
+                "message": "部分概念连接缺少可核验物理证据或超过上限，已剪除。",
+                "evidence": [],
+            })
+        source_state = {
+            **overview["sourceState"],
+            "revision": _understanding_revision(
+                "architecture_snapshot_",
+                overview["sourceState"].get("revision"),
+                summary,
+                components,
+                snapshot["connections"],
+                snapshot["entryPoints"],
+            ),
+        }
+
+    return {
+        "project": overview["project"],
+        "sourceState": source_state,
+        "layout": "cognitive-components",
+        "summary": summary,
+        "components": components,
+        "connections": snapshot["connections"],
+        "entryPoints": snapshot["entryPoints"],
+        "stats": overview["stats"],
+        "warnings": sorted(
+            [*overview["warnings"], *warnings],
+            key=lambda item: (item["code"], item["message"]),
+        ),
+    }
+
+
+def _flow_match_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", value.lower())
+        if len(token) >= 2
+    }
+
+
+def repository_flow_data(
+    database: Database,
+    project: sqlite3.Row,
+    query: str | None = None,
+) -> dict[str, Any]:
+    with database.connect() as connection:
+        connection.execute("BEGIN")
+        snapshot = _structure_snapshot(database, project, connection)
+        overview = snapshot["overview"]
+        workflow, truncated = _execution_workflow(snapshot["documents"])
+        safe_query = _safe_prose(query, limit=320) if isinstance(query, str) else None
+        example_task: dict[str, Any] | None = None
+        if safe_query:
+            example_task = {"title": safe_query, "source": "request"}
+        else:
+            task = next(_iter_safe_completed_tasks(connection, str(project["id"])), None)
+            if task is not None:
+                evidence = [{
+                    "kind": "task-record",
+                    "summary": f"任务记录 {task['id']}",
+                    "layer": "L3",
+                    "source": "task-events",
+                    "confidence": 1.0,
+                }]
+                entity = _tour_node_entity(
+                    connection, str(project["id"]), task["node_id"], evidence
+                )
+                if entity is not None:
+                    example_task = {
+                        "title": task["safe_title"],
+                        "source": "task-events",
+                        "entity": entity,
+                        "evidence": evidence,
+                    }
+
+        steps: list[dict[str, Any]] = []
+        used_paths: set[str] = set()
+        unmatched: list[int] = []
+        for index, step in enumerate(workflow):
+            tokens = _flow_match_tokens(f"{step['title']} {step['detail']}")
+            matches: list[tuple[int, str, dict[str, Any]]] = []
+            for fact in snapshot["fileFacts"]:
+                haystack = " ".join(fact["matchTerms"]).lower()
+                score = sum(1 for token in tokens if token in haystack)
+                if score > 0:
+                    matches.append((-score, fact["path"].lower(), fact))
+            matches.sort(key=lambda item: (item[0], item[1], item[2]["path"]))
+            key_files: list[dict[str, Any]] = []
+            for _, _, fact in matches:
+                if fact["path"] in used_paths or len(used_paths) >= MAX_FLOW_FILES:
+                    continue
+                used_paths.add(fact["path"])
+                key_files.append({
+                    "path": fact["path"],
+                    "moduleId": fact["moduleId"],
+                    "moduleName": fact["moduleName"],
+                    "entity": fact["entity"],
+                    "relation": fact["relation"],
+                    "evidence": fact["evidence"],
+                })
+                if len(key_files) >= 3:
+                    break
+            if not key_files:
+                unmatched.append(int(step["step"]))
+            previous = workflow[index - 1]["title"] if index > 0 else None
+            following = workflow[index + 1]["title"] if index + 1 < len(workflow) else None
+            steps.append({
+                "step": int(step["step"]),
+                "id": stable_id(
+                    str(project["id"]), step["step"], step["title"], prefix="flow_step_"
+                ),
+                "title": step["title"],
+                "purpose": step["detail"],
+                "input": (
+                    "进入主流程的请求或数据"
+                    if previous is None else f"上一步“{previous}”的结果"
+                ),
+                "output": (
+                    "主流程结果" if following is None else f"交给下一步“{following}”"
+                ),
+                "keyFiles": key_files,
+                "why": f"项目文档将其列为第 {step['step']} 步。",
+                "nextStep": following,
+                "explanationSource": "derived-presentation",
+                "evidence": step["evidence"],
+            })
+
+        warnings: list[dict[str, Any]] = []
+        if not workflow:
+            warnings.append({
+                "code": "FLOW_EXECUTION_EVIDENCE_MISSING",
+                "message": "未在明示的主流程章节中找到 5–7 个连续执行步骤。",
+                "evidence": [],
+            })
+        if truncated:
+            warnings.append({
+                "code": "FLOW_TRUNCATED",
+                "message": "明示执行流程超过 7 步，已稳定保留前 7 步。",
+                "evidence": [],
+            })
+        if unmatched:
+            warnings.append({
+                "code": "FLOW_KEY_FILES_INSUFFICIENT",
+                "message": "以下步骤未命中可核验关键文件，已保持为空："
+                + ", ".join(str(item) for item in unmatched),
+                "evidence": [],
+            })
+        if example_task is None:
+            warnings.append({
+                "code": "FLOW_TASK_EVIDENCE_MISSING",
+                "message": "未提供当前任务，也没有可安全展示的历史任务示例。",
+                "evidence": [],
+            })
+        source_state = {
+            **overview["sourceState"],
+            "revision": _understanding_revision(
+                "flow_snapshot_",
+                overview["sourceState"].get("revision"),
+                example_task,
+                steps,
+            ),
+        }
+
+    return {
+        "project": overview["project"],
+        "sourceState": source_state,
+        "layout": "numbered-task-flow",
+        "exampleTask": example_task,
+        "steps": steps,
+        "stats": overview["stats"],
+        "warnings": sorted(
+            [*overview["warnings"], *warnings],
+            key=lambda item: (item["code"], item["message"]),
+        ),
+    }
+
+
 __all__ = [
     "MAX_DOCUMENTS",
     "MAX_DOCUMENT_BYTES",
@@ -1850,6 +2408,8 @@ __all__ = [
     "MAX_TOTAL_DOCUMENT_BYTES",
     "MAX_FRESHNESS_FILE_BYTES",
     "MAX_TOTAL_FRESHNESS_BYTES",
+    "repository_architecture_data",
+    "repository_flow_data",
     "repository_overview_data",
     "repository_tour_data",
 ]
