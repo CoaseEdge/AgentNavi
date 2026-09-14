@@ -219,12 +219,40 @@ def _history_rows(connection: sqlite3.Connection, project_id: str,
     return _hydrate_in_record_order(raw, hydrated)
 
 
+def _raw_concept_edge_window(connection: sqlite3.Connection, project_id: str, *,
+                             endpoint: str, concept_id: str, limit: int,
+                             comment: str) -> _BoundedRows:
+    if endpoint not in {"source_id", "target_id"}:
+        raise ValueError("unsupported concept edge endpoint")
+    index = ("idx_l2_concept_edges_source" if endpoint == "source_id"
+             else "idx_l2_concept_edges_target")
+    rows = connection.execute(
+        f"""SELECT /* {comment} */ lookup.edge_id AS id,
+                   lookup.recorded_order
+            FROM l2_concept_edges lookup INDEXED BY {index}
+            WHERE lookup.project_id=? AND lookup.{endpoint}=?
+            ORDER BY lookup.recorded_order DESC LIMIT ?""",
+        (project_id, concept_id, limit + 1),
+    ).fetchall()
+    return _BoundedRows(list(rows[:limit]), raw_truncated=len(rows) > limit)
+
+
 def _semantic_rows(connection: sqlite3.Connection, project_id: str,
                    concept_id: str, direction: str) -> list[sqlite3.Row]:
     endpoint = "source_id" if direction == "outgoing" else "target_id"
-    raw = _raw_edge_window(connection, project_id, endpoint=endpoint, endpoint_id=concept_id,
-                           layer=2, limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
-                           comment=f"impact-semantic-{direction}-raw", semantic=True)
+    raw = _raw_concept_edge_window(
+        connection, project_id, endpoint=endpoint, concept_id=concept_id,
+        limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
+        comment=f"impact-semantic-{direction}-raw",
+    )
+    # A second bounded probe preserves diagnostics for large malformed
+    # concept-to-file endpoint populations. It never selects semantic results.
+    probe = _raw_edge_window(
+        connection, project_id, endpoint=endpoint, endpoint_id=concept_id,
+        layer=2, limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
+        comment=f"impact-semantic-{direction}-invalid-probe", semantic=True,
+    )
+    raw.raw_truncated = raw.raw_truncated or probe.raw_truncated
     if not raw:
         return raw
     marks = ",".join("?" for _ in raw)

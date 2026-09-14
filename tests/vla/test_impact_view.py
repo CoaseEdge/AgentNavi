@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agentnavi.config import Settings
 from agentnavi import impact_view as impact_module
-from agentnavi.database import Database, ensure_database
+from agentnavi.database import SCHEMA_VERSION, Database, ensure_database
 from agentnavi.impact_view import (
     _anchor_mapping_rows, _focus_concept_rows, _history_rows, _lane_rows,
     _resolve_focus, _semantic_rows, _tested_by_rows, impact_view_data,
@@ -357,6 +357,16 @@ class ImpactViewTestCase(unittest.TestCase):
             )
             focus_concept = Database.node_id("fixture", 2, "concept", "focus")
             plans = []
+            for index_name, endpoint in (("idx_l2_concept_edges_source", "source_id"),
+                                         ("idx_l2_concept_edges_target", "target_id")):
+                plans.extend(connection.execute(
+                    f"""EXPLAIN QUERY PLAN
+                        SELECT lookup.recorded_order
+                        FROM l2_concept_edges lookup INDEXED BY {index_name}
+                        WHERE lookup.project_id=? AND lookup.{endpoint}=?
+                        ORDER BY lookup.recorded_order DESC LIMIT 25""",
+                    ("fixture", focus_concept),
+                ).fetchall())
             for index_name, endpoint in (("idx_edges_source_semantic_v2", "source_id"),
                                          ("idx_edges_target_semantic_v2", "target_id")):
                 plans.extend(connection.execute(
@@ -386,6 +396,8 @@ class ImpactViewTestCase(unittest.TestCase):
             connection.set_progress_handler(None, 0)
             connection.commit()
         details = " ".join(str(row[3]).upper() for row in plans)
+        self.assertIn("IDX_L2_CONCEPT_EDGES_SOURCE", details)
+        self.assertIn("IDX_L2_CONCEPT_EDGES_TARGET", details)
         self.assertIn("IDX_EDGES_SOURCE_SEMANTIC_V2", details)
         self.assertIn("IDX_EDGES_TARGET_SEMANTIC_V2", details)
         self.assertIn("SQLITE_AUTOINDEX_EDGES_1", details)
@@ -404,8 +416,8 @@ class ImpactViewTestCase(unittest.TestCase):
                     connection.set_trace_callback(None)
         with patch.object(self.database, "connect", traced_connect):
             data = impact_view_data(self.database, self.project, "Focus")
-        self.assertIn(sum("impact-semantic-incoming" in sql for sql in statements), {1, 2})
-        self.assertIn(sum("impact-semantic-outgoing" in sql for sql in statements), {1, 2})
+        self.assertIn(sum("impact-semantic-incoming" in sql for sql in statements), {2, 3})
+        self.assertIn(sum("impact-semantic-outgoing" in sql for sql in statements), {2, 3})
         self.assertEqual(sum("impact-physical-lookup-exact" in sql for sql in statements), 1)
         self.assertEqual(data["semantic"][0]["peer"]["label"], "Dependency")
 
@@ -511,9 +523,9 @@ class ImpactViewTestCase(unittest.TestCase):
                 [(f"raw-semantic-{index}", "fixture", 2, focus_concept, "related_to",
                   f"raw-file-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
                 [(f"raw-tested-{index}", "fixture", 2, focus_concept, "tested_by",
-                  f"raw-concept-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+                  f"raw-history-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
                 [(f"raw-anchor-{index}", "fixture", 2, focus_concept, "implemented_by",
-                  f"raw-concept-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+                  f"raw-history-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
                 [(f"raw-focus-{index}", "fixture", 2, f"raw-file-{index}", "implemented_by",
                   focus_file, "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
                 [(f"raw-history-edge-{index}", "fixture", 3, f"raw-history-{index}", "modified",
@@ -549,13 +561,14 @@ class ImpactViewTestCase(unittest.TestCase):
             plans = [row for statement in statements if "impact-" in statement
                      for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()]
             connection.commit()
-        self.assertEqual([len(result) for result in results], [0, 0, 0, 0, 0, 0])
+        self.assertEqual([len(result) for result in results], [0, 1, 0, 0, 0, 0])
         self.assertTrue(all(result.raw_truncated for result in results))
         self.assertTrue(all(steps < 2000 for steps in step_counts), step_counts)
         detail = " ".join(str(row[3]).upper() for row in plans)
         self.assertIn("IDX_EDGES_TARGET", detail)
         self.assertIn("IDX_EDGES_SOURCE", detail)
         self.assertIn("IDX_EDGES_SOURCE_SEMANTIC_V2", detail)
+        self.assertIn("IDX_L2_CONCEPT_EDGES_SOURCE", detail)
         self.assertNotIn("TEMP B-TREE", detail)
         concept_data = impact_view_data(self.database, self.project, "Focus")
         file_data = impact_view_data(self.database, self.project, "src/focus.py")
@@ -655,6 +668,25 @@ class ImpactViewTestCase(unittest.TestCase):
                 relation="depends_on", target_id=focus,
                 source="human-overlay", confidence=1.0,
             )
+            Database.upsert_edge(
+                connection, project_id="fixture", layer=2, source_id=focus,
+                relation="data_provided_by", target_id=dependency,
+                source="human-overlay", confidence=1.0,
+            )
+            focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
+            dependency_file = Database.node_id("fixture", 1, "file", "src/dependency.py")
+            Database.upsert_edge(
+                connection, project_id="fixture", layer=1, source_id=dependency_file,
+                relation="imports", target_id=focus_file, source="extractor",
+            )
+            Database.upsert_edge(
+                connection, project_id="fixture", layer=2, source_id=dependency,
+                relation="produced_by", target_id=focus,
+                source="external-semantic-provider", confidence=.7,
+                data={"evidence": [{"source": "src/dependency.py",
+                                    "target": "src/focus.py",
+                                    "physical_relation": "imports"}]},
+            )
             connection.commit()
 
         data = impact_view_data(self.database, self.project, "Focus")
@@ -662,13 +694,45 @@ class ImpactViewTestCase(unittest.TestCase):
                      for item in data["semantic"]}
         self.assertIn(("outgoing", "depends_on", "Dependency"), relations)
         self.assertIn(("incoming", "depends_on", "Dependency"), relations)
+        self.assertIn(("outgoing", "data_provided_by", "Dependency"), relations)
+        self.assertIn(("incoming", "produced_by", "Dependency"), relations)
 
         with self.database.connect() as connection:
             for direction in ("outgoing", "incoming"):
                 rows = _semantic_rows(connection, "fixture", focus, direction)
                 self.assertTrue(rows)
-                self.assertTrue(all(row["relation"] not in CONCEPT_FILE_MAPPING_RELATIONS
-                                    for row in rows))
+                endpoint_ids = {str(row[key]) for row in rows
+                                for key in ("source_id", "target_id")}
+                placeholders = ",".join("?" for _ in endpoint_ids)
+                endpoint_rows = connection.execute(
+                    f"SELECT id,layer,kind FROM nodes WHERE id IN ({placeholders})",
+                    tuple(sorted(endpoint_ids)),
+                ).fetchall()
+                self.assertTrue(all(int(row["layer"]) == 2 and row["kind"] == "concept"
+                                    for row in endpoint_rows))
+
+    def test_every_mapping_named_relation_is_valid_between_two_concepts(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        dependency = Database.node_id("fixture", 2, "concept", "dependency")
+        with self.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM edges WHERE project_id='fixture' AND layer=2 "
+                "AND source_id=? AND relation='depends_on' AND target_id=?",
+                (focus, dependency),
+            )
+            for relation in CONCEPT_FILE_MAPPING_RELATIONS:
+                Database.upsert_edge(
+                    connection, project_id="fixture", layer=2, source_id=focus,
+                    relation=relation, target_id=dependency,
+                    source="human-overlay", confidence=1.0,
+                )
+            connection.commit()
+
+        data = impact_view_data(self.database, self.project, "Focus")
+        self.assertEqual(
+            {item["relation"]["relation"] for item in data["semantic"]},
+            set(CONCEPT_FILE_MAPPING_RELATIONS),
+        )
 
     def test_new_category_indexes_are_created_for_an_existing_database(self) -> None:
         names = {"idx_edges_source_relation", "idx_edges_target_relation",
@@ -682,6 +746,44 @@ class ImpactViewTestCase(unittest.TestCase):
         with self.database.connect() as connection:
             existing = {str(row[1]) for row in connection.execute("PRAGMA index_list(edges)")}
         self.assertTrue(names <= existing)
+
+    def test_schema_v4_rebuilds_deleted_concept_edge_lookup_from_graph_facts(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        dependency = Database.node_id("fixture", 2, "concept", "dependency")
+        edge_id = Database.edge_id("fixture", 2, focus, "depends_on", dependency)
+        with self.database.connect() as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM l2_concept_edges WHERE edge_id=?", (edge_id,),
+            ).fetchone())
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_insert")
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_update")
+            connection.execute("DROP TABLE l2_concept_edges")
+            connection.execute(
+                "UPDATE meta SET value='3' WHERE key='schema_version'"
+            )
+            connection.commit()
+
+        ensure_database(self.database.settings)
+        with self.database.connect() as connection:
+            version = connection.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            rebuilt = connection.execute(
+                "SELECT * FROM l2_concept_edges WHERE edge_id=?", (edge_id,),
+            ).fetchone()
+            indexes = {str(row[1]) for row in connection.execute(
+                "PRAGMA index_list(l2_concept_edges)"
+            )}
+        self.assertEqual(int(version), SCHEMA_VERSION)
+        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertIsNotNone(rebuilt)
+        self.assertEqual(rebuilt["source_id"], focus)
+        self.assertEqual(rebuilt["target_id"], dependency)
+        self.assertTrue({"idx_l2_concept_edges_source",
+                         "idx_l2_concept_edges_target"} <= indexes)
+        self.assertTrue(impact_view_data(
+            self.database, self.project, "Focus"
+        )["semantic"])
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")

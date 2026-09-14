@@ -9,7 +9,7 @@ from .config import Settings
 from .semantic_relations import CONCEPT_FILE_MAPPING_RELATIONS_SQL
 from .utils import json_dumps, stable_id, utc_now
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -77,6 +77,53 @@ WHERE layer=2 AND relation NOT IN __CONCEPT_FILE_MAPPING_RELATIONS__;
 CREATE INDEX IF NOT EXISTS idx_edges_target_semantic_v2 ON edges(project_id, target_id)
 WHERE layer=2 AND relation NOT IN __CONCEPT_FILE_MAPPING_RELATIONS__;
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(project_id, relation);
+
+CREATE TABLE IF NOT EXISTS l2_concept_edges (
+    edge_id TEXT PRIMARY KEY REFERENCES edges(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    recorded_order INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_l2_concept_edges_source
+    ON l2_concept_edges(project_id, source_id, recorded_order DESC);
+CREATE INDEX IF NOT EXISTS idx_l2_concept_edges_target
+    ON l2_concept_edges(project_id, target_id, recorded_order DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_l2_concept_edges_insert
+AFTER INSERT ON edges
+WHEN NEW.layer=2
+BEGIN
+    INSERT OR REPLACE INTO l2_concept_edges(
+        edge_id, project_id, source_id, target_id, recorded_order
+    )
+    SELECT NEW.id, NEW.project_id, NEW.source_id, NEW.target_id, NEW.rowid
+    WHERE EXISTS (
+        SELECT 1 FROM nodes source
+        WHERE source.id=NEW.source_id AND source.layer=2 AND source.kind='concept'
+    ) AND EXISTS (
+        SELECT 1 FROM nodes target
+        WHERE target.id=NEW.target_id AND target.layer=2 AND target.kind='concept'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_l2_concept_edges_update
+AFTER UPDATE OF project_id, layer, source_id, target_id ON edges
+BEGIN
+    DELETE FROM l2_concept_edges WHERE edge_id=OLD.id;
+    INSERT OR REPLACE INTO l2_concept_edges(
+        edge_id, project_id, source_id, target_id, recorded_order
+    )
+    SELECT NEW.id, NEW.project_id, NEW.source_id, NEW.target_id, NEW.rowid
+    WHERE NEW.layer=2 AND EXISTS (
+        SELECT 1 FROM nodes source
+        WHERE source.id=NEW.source_id AND source.layer=2 AND source.kind='concept'
+    ) AND EXISTS (
+        SELECT 1 FROM nodes target
+        WHERE target.id=NEW.target_id AND target.layer=2 AND target.kind='concept'
+    );
+END;
 
 CREATE TABLE IF NOT EXISTS file_state (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -207,6 +254,22 @@ class Database:
                 raise RuntimeError(
                     f"数据库 schema 版本 {row['value']} 高于当前程序支持的 {SCHEMA_VERSION}"
                 )
+            # This lookup is derived solely from edges/nodes. Rebuilding it here
+            # repairs upgrades and deliberate deletion without touching graph facts.
+            connection.execute("DELETE FROM l2_concept_edges")
+            connection.execute(
+                """INSERT INTO l2_concept_edges(
+                       edge_id, project_id, source_id, target_id, recorded_order
+                   )
+                   SELECT edge.id, edge.project_id, edge.source_id,
+                          edge.target_id, edge.rowid
+                   FROM edges edge
+                   JOIN nodes source ON source.id=edge.source_id
+                     AND source.layer=2 AND source.kind='concept'
+                   JOIN nodes target ON target.id=edge.target_id
+                     AND target.layer=2 AND target.kind='concept'
+                   WHERE edge.layer=2"""
+            )
             connection.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
