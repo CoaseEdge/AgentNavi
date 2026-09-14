@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+class CliContractTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[2]
+
+    def _environment(self) -> dict[str, str]:
+        environment = os.environ.copy()
+        source_path = str(self.root / "src")
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            f"{source_path}{os.pathsep}{existing}" if existing else source_path
+        )
+        return environment
+
+    def test_module_entrypoint_initializes_an_external_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / "agentnavi-home"
+            result = subprocess.run(
+                [sys.executable, "-m", "agentnavi", "--home", str(home), "init"],
+                cwd=self.root,
+                env=self._environment(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("AgentNavi 已初始化", result.stdout)
+            self.assertTrue((home / "agentnavi.db").is_file())
+            self.assertTrue((home / "events.jsonl").is_file())
+            self.assertTrue((home / "semantic-overlays.jsonl").is_file())
+
+    def test_repository_governance_contract_is_materialized(self) -> None:
+        config_path = self.root / ".repo-governance.json"
+        workflow_path = self.root / ".github" / "workflows" / "repo-governance.yml"
+
+        self.assertTrue(config_path.is_file(), "缺少 Repo Governance 配置")
+        self.assertTrue(workflow_path.is_file(), "缺少 Repo Governance CI caller")
+
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(config["preset"]["name"], "python-service")
+        engine_commit = config["engineCommitSha"]
+        self.assertRegex(engine_commit, re.compile(r"^[0-9a-f]{40}$"))
+        self.assertIn(engine_commit, workflow_path.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()
