@@ -824,6 +824,8 @@ h1 {
 #impact-actions { display: grid; gap: 6px; }
 #impact-actions details { border-top: 1px solid var(--line); padding-top: 6px; }
 #impact-actions summary { cursor: pointer; font-size: 12px; }
+.impact-evidence { margin-top: 5px !important; padding-left: 16px !important; color: var(--muted); min-width: 0; }
+#impact-anchors { margin-top: 10px; text-align: left; min-width: 0; }
 
 .warning-panel {
   margin-top: 26px;

@@ -260,12 +260,14 @@ export interface ImpactView {
   data: {
     layout: "incoming-focus-outgoing";
     revision: string;
-    focus: { entity: TourStop["entity"]; anchorFile: TourStop["entity"] | null; evidence: Evidence[] };
+    focus: { entity: TourStop["entity"]; evidence: Evidence[] };
+    anchorFiles: Array<{ entity: TourStop["entity"]; mapping: TourStop["relations"][number] | null; evidence: Evidence[] }>;
+    focusConcepts: Array<{ entity: TourStop["entity"]; mapping: TourStop["relations"][number] | null; evidence: Evidence[] }>;
     incoming: ImpactLane[];
     outgoing: ImpactLane[];
-    semantic: Array<{ direction: "incoming" | "outgoing"; focusConcept: TourStop["entity"]; peer: TourStop["entity"]; relation: TourStop["relations"][number]; evidence: Evidence[] }>;
+    semantic: Array<{ direction: "incoming" | "outgoing"; focusConceptId: string; peer: TourStop["entity"]; relation: TourStop["relations"][number]; evidence: Evidence[] }>;
     history: Array<{ entity: TourStop["entity"]; status: string; relation: TourStop["relations"][number]; recordedOrder: number; evidence: Evidence[] }>;
-    testRecommendations: Array<{ path: string; reason: string; entity: TourStop["entity"]; relation: TourStop["relations"][number]; evidence: Evidence[] }>;
+    testRecommendations: Array<{ basis: "physical-tests" | "semantic-tested-by"; path: string; reason: string; sourceConcept: TourStop["entity"] | null; entity: TourStop["entity"]; relation: TourStop["relations"][number]; evidence: Evidence[] }>;
     risks: Array<{ kind: string; severity: "low" | "medium" | "high"; summary: string; evidence: Evidence[] }>;
     actions: Array<{ kind: "purpose" | "callers" | "dependencies" | "change" | "history"; label: string; summary: string; evidence: Evidence[] }>;
     stats: ContextView["data"]["stats"];
@@ -277,6 +279,7 @@ export interface ImpactLane {
   peer: TourStop["entity"];
   relation: TourStop["relations"][number];
   viaPath: string;
+  recordedOrder: number;
   evidence: Evidence[];
 }
 
@@ -1109,26 +1112,54 @@ export function parseFlowView(value: unknown): FlowView | undefined {
 export function parseImpactView(value: unknown): ImpactView | undefined {
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "impact" || common.data.layout !== "incoming-focus-outgoing") return undefined;
-  const revision = displayText(common.data.revision);
-  const stats = record(common.data.stats);
-  const rawFocus = record(common.data.focus);
-  const focus = tourEntity(rawFocus?.entity);
-  const anchor = rawFocus?.anchorFile === null ? null : tourEntity(rawFocus?.anchorFile);
-  const focusEvidence = strictEvidence(rawFocus?.evidence);
-  if (!revision || !stats || !rawFocus || !focus || !completeEntity(focus) ||
-      !["file", "concept"].includes(focus.kind) || !["L1", "L2"].includes(focus.layer) ||
-      anchor === undefined || (anchor !== null && (!completeEntity(anchor) || anchor.kind !== "file" || anchor.layer !== "L1" || !anchor.path)) || !focusEvidence) return undefined;
-  const anchorId = anchor?.id ?? focus.id;
+  const revision = displayText(common.data.revision); const stats = record(common.data.stats);
+  const entityRegistry = new Map<string, string>(); const edgeRegistry = new Map<string, string>();
+  const knownEvidence = new Set<string>(); const signature = (item: unknown): string => JSON.stringify(item);
+  const parseEntity = (raw: unknown): TourStop["entity"] | undefined => {
+    const entity = tourEntity(raw); if (!entity || !completeEntity(entity)) return undefined;
+    const sig = JSON.stringify([entity.kind, entity.label, entity.path, entity.layer, entity.source, entity.confidence]);
+    if ((entityRegistry.has(entity.id) && entityRegistry.get(entity.id) !== sig) || edgeRegistry.has(entity.id)) return undefined;
+    entityRegistry.set(entity.id, sig); entity.evidence.forEach((item) => knownEvidence.add(signature(item))); return entity;
+  };
+  const parseRelation = (raw: unknown): TourStop["relations"][number] | undefined => {
+    const item = record(raw); const evidence = strictEvidence(item?.evidence);
+    const relation = tourRelation(raw); if (!item || !evidence || !relation || !completeRelation(relation)) return undefined;
+    const sig = signature(relation); if ((edgeRegistry.has(relation.id) && edgeRegistry.get(relation.id) !== sig) || entityRegistry.has(relation.id)) return undefined;
+    edgeRegistry.set(relation.id, sig); evidence.forEach((entry) => knownEvidence.add(signature(entry))); return relation;
+  };
+  const sameEvidence = (left: Evidence[], right: Evidence[]): boolean => signature(left) === signature(right);
+  const rawFocus = record(common.data.focus); const focus = parseEntity(rawFocus?.entity); const focusEvidence = strictEvidence(rawFocus?.evidence);
+  if (!revision || !stats || !rawFocus || !focus || !focusEvidence || !sameEvidence(focusEvidence, focus.evidence) ||
+      !((focus.kind === "file" && focus.layer === "L1" && focus.path) || (focus.kind === "concept" && focus.layer === "L2"))) return undefined;
+  const rawAnchors = Array.isArray(common.data.anchorFiles) ? common.data.anchorFiles : [];
+  if (rawAnchors.length > 8) return undefined;
+  const anchorFiles: ImpactView["data"]["anchorFiles"] = []; const anchorByPath = new Map<string, TourStop["entity"]>();
+  for (const raw of rawAnchors) {
+    const item = record(raw); const entity = parseEntity(item?.entity); const mapping = item?.mapping === null ? null : parseRelation(item?.mapping); const evidence = strictEvidence(item?.evidence);
+    if (!item || !entity || entity.kind !== "file" || entity.layer !== "L1" || !entity.path || anchorByPath.has(entity.path) || mapping === undefined || !evidence) return undefined;
+    if (focus.kind === "concept" ? (!mapping || mapping.layer !== "L2" || !["implemented_by", "configured_by"].includes(mapping.relation) || mapping.sourceId !== focus.id || mapping.targetId !== entity.id || !sameEvidence(evidence, mapping.evidence)) :
+        (mapping !== null || entity.id !== focus.id || entity.path !== focus.path || !sameEvidence(evidence, entity.evidence))) return undefined;
+    anchorFiles.push({ entity, mapping, evidence }); anchorByPath.set(entity.path, entity);
+  }
+  if (focus.kind === "file" && anchorFiles.length > 1) return undefined;
+  const rawConcepts = Array.isArray(common.data.focusConcepts) ? common.data.focusConcepts : [];
+  if (rawConcepts.length > 8) return undefined;
+  const focusConcepts: ImpactView["data"]["focusConcepts"] = []; const conceptIds = new Set<string>();
+  for (const raw of rawConcepts) {
+    const item = record(raw); const entity = parseEntity(item?.entity); const mapping = item?.mapping === null ? null : parseRelation(item?.mapping); const evidence = strictEvidence(item?.evidence);
+    if (!item || !entity || entity.kind !== "concept" || entity.layer !== "L2" || conceptIds.has(entity.id) || mapping === undefined || !evidence) return undefined;
+    if (focus.kind === "concept" ? (entity.id !== focus.id || mapping !== null || !sameEvidence(evidence, entity.evidence)) :
+        (!mapping || mapping.layer !== "L2" || mapping.sourceId !== entity.id || mapping.targetId !== focus.id || !sameEvidence(evidence, mapping.evidence))) return undefined;
+    conceptIds.add(entity.id); focusConcepts.push({ entity, mapping, evidence });
+  }
   const parseLane = (value: unknown, direction: "incoming" | "outgoing"): ImpactLane | undefined => {
-    const item = record(value);
-    const peer = tourEntity(item?.peer);
-    const relation = tourRelation(item?.relation);
-    const viaPath = text(item?.viaPath);
-    const evidence = strictEvidence(item?.evidence);
+    const item = record(value); const peer = parseEntity(item?.peer); const relation = parseRelation(item?.relation);
+    const viaPath = text(item?.viaPath); const evidence = strictEvidence(item?.evidence); const anchor = anchorByPath.get(viaPath); const recordedOrder = item?.recordedOrder;
     if (!item || !peer || !completeEntity(peer) || peer.kind !== "file" || peer.layer !== "L1" || !peer.path ||
-        !relation || !completeRelation(relation) || relation.layer !== "L1" || !isCanonicalRelativePath(viaPath) || !evidence) return undefined;
-    if (direction === "incoming" ? relation.sourceId !== peer.id || relation.targetId !== anchorId : relation.sourceId !== anchorId || relation.targetId !== peer.id) return undefined;
-    return { peer, relation, viaPath, evidence };
+        !relation || relation.layer !== "L1" || !isCanonicalRelativePath(viaPath) || !anchor || !evidence || !sameEvidence(evidence, relation.evidence) ||
+        typeof recordedOrder !== "number" || !Number.isInteger(recordedOrder) || recordedOrder < 1) return undefined;
+    if (direction === "incoming" ? relation.sourceId !== peer.id || relation.targetId !== anchor.id : relation.sourceId !== anchor.id || relation.targetId !== peer.id) return undefined;
+    return { peer, relation, viaPath, recordedOrder, evidence };
   };
   const rawIncoming = Array.isArray(common.data.incoming) ? common.data.incoming : [];
   const rawOutgoing = Array.isArray(common.data.outgoing) ? common.data.outgoing : [];
@@ -1140,43 +1171,46 @@ export function parseImpactView(value: unknown): ImpactView | undefined {
   if (rawSemantic.length > 8) return undefined;
   const semantic: ImpactView["data"]["semantic"] = [];
   for (const raw of rawSemantic) {
-    const item = record(raw); const direction = item?.direction;
-    const focusConcept = tourEntity(item?.focusConcept); const peer = tourEntity(item?.peer);
-    const relation = tourRelation(item?.relation); const evidence = strictEvidence(item?.evidence);
-    if (!item || (direction !== "incoming" && direction !== "outgoing") || !focusConcept || !peer ||
-        !completeEntity(focusConcept) || !completeEntity(peer) || focusConcept.kind !== "concept" || peer.kind !== "concept" ||
-        focusConcept.layer !== "L2" || peer.layer !== "L2" || focusConcept.id === peer.id || !relation || relation.layer !== "L2" || !completeRelation(relation) || !evidence) return undefined;
-    const expected = direction === "outgoing" ? [focusConcept.id, peer.id] : [peer.id, focusConcept.id];
+    const item = record(raw); const direction = item?.direction; const focusConceptId = text(item?.focusConceptId); const peer = parseEntity(item?.peer);
+    const relation = parseRelation(item?.relation); const evidence = strictEvidence(item?.evidence);
+    if (!item || (direction !== "incoming" && direction !== "outgoing") || !conceptIds.has(focusConceptId) || !peer || peer.kind !== "concept" ||
+        peer.layer !== "L2" || focusConceptId === peer.id || !relation || relation.layer !== "L2" || !evidence || !sameEvidence(evidence, relation.evidence)) return undefined;
+    const expected = direction === "outgoing" ? [focusConceptId, peer.id] : [peer.id, focusConceptId];
     if (relation.sourceId !== expected[0] || relation.targetId !== expected[1]) return undefined;
-    semantic.push({ direction, focusConcept, peer, relation, evidence });
+    semantic.push({ direction, focusConceptId, peer, relation, evidence });
   }
   const rawHistory = Array.isArray(common.data.history) ? common.data.history : [];
   if (rawHistory.length > 5) return undefined;
   const history: ImpactView["data"]["history"] = [];
   for (const raw of rawHistory) {
-    const item = record(raw); const entity = tourEntity(item?.entity); const relation = tourRelation(item?.relation);
+    const item = record(raw); const entity = parseEntity(item?.entity); const relation = parseRelation(item?.relation);
     const status = displayText(item?.status); const recordedOrder = item?.recordedOrder; const evidence = strictEvidence(item?.evidence);
     if (!item || !entity || !completeEntity(entity) || entity.kind !== "task" || entity.layer !== "L3" || !relation || relation.layer !== "L3" ||
-        !completeRelation(relation) || !status || typeof recordedOrder !== "number" || !Number.isInteger(recordedOrder) || recordedOrder < 1 || !evidence) return undefined;
+        relation.source !== "task-events" || entity.source !== "task-events" || relation.sourceId !== entity.id ||
+        !new Set([focus.id, ...anchorFiles.map((a) => a.entity.id), ...conceptIds]).has(relation.targetId) || !status ||
+        typeof recordedOrder !== "number" || !Number.isInteger(recordedOrder) || recordedOrder < 1 || !evidence || !sameEvidence(evidence, relation.evidence)) return undefined;
     history.push({ entity, status, relation, recordedOrder, evidence });
   }
   const rawTests = Array.isArray(common.data.testRecommendations) ? common.data.testRecommendations : [];
   if (rawTests.length > 5) return undefined;
-  const laneIds = new Set([...incoming, ...outgoing].map((item) => item.relation.id));
+  const laneRelations = new Map([...incoming, ...outgoing].map((item) => [item.relation.id, signature(item.relation)]));
   const testRecommendations: ImpactView["data"]["testRecommendations"] = [];
   for (const raw of rawTests) {
-    const item = record(raw); const path = text(item?.path); const reason = displayText(item?.reason);
-    const entity = tourEntity(item?.entity); const relation = tourRelation(item?.relation); const evidence = strictEvidence(item?.evidence);
+    const item = record(raw); const basis = item?.basis; const path = text(item?.path); const reason = displayText(item?.reason);
+    const entity = parseEntity(item?.entity); const relation = parseRelation(item?.relation); const evidence = strictEvidence(item?.evidence);
+    const sourceConcept = item?.sourceConcept === null ? null : parseEntity(item?.sourceConcept);
     if (!item || !isCanonicalRelativePath(path) || !reason || !entity || !completeEntity(entity) || entity.kind !== "file" || entity.layer !== "L1" || entity.path !== path ||
-        !relation || !completeRelation(relation) || !laneIds.has(relation.id) || !evidence) return undefined;
-    testRecommendations.push({ path, reason, entity, relation, evidence });
+        !relation || !evidence || !sameEvidence(evidence, relation.evidence) || sourceConcept === undefined) return undefined;
+    if (basis === "physical-tests" ? (sourceConcept !== null || relation.layer !== "L1" || relation.relation !== "tests" || relation.sourceId !== entity.id || !new Set(anchorFiles.map((a) => a.entity.id)).has(relation.targetId) || laneRelations.get(relation.id) !== signature(relation)) :
+        basis === "semantic-tested-by" ? (!sourceConcept || !conceptIds.has(sourceConcept.id) || relation.layer !== "L2" || relation.relation !== "tested_by" || relation.sourceId !== sourceConcept.id || relation.targetId !== entity.id) : true) return undefined;
+    testRecommendations.push({ basis: basis as "physical-tests" | "semantic-tested-by", path, reason, sourceConcept, entity, relation, evidence });
   }
   const rawRisks = Array.isArray(common.data.risks) ? common.data.risks : [];
   if (rawRisks.length > 5) return undefined;
   const risks: ImpactView["data"]["risks"] = [];
   for (const raw of rawRisks) {
     const item = record(raw); const kind = displayText(item?.kind); const summary = displayText(item?.summary); const severity = item?.severity; const evidence = strictEvidence(item?.evidence);
-    if (!item || !kind || !summary || (severity !== "low" && severity !== "medium" && severity !== "high") || !evidence) return undefined;
+    if (!item || !kind || !summary || (severity !== "low" && severity !== "medium" && severity !== "high") || !evidence || evidence.some((entry) => !knownEvidence.has(signature(entry)))) return undefined;
     risks.push({ kind, summary, severity, evidence });
   }
   const expectedActions = [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]] as const;
@@ -1186,11 +1220,11 @@ export function parseImpactView(value: unknown): ImpactView | undefined {
   for (let index = 0; index < expectedActions.length; index += 1) {
     const item = record(rawActions[index]); const [kind, label] = expectedActions[index]!; const summary = displayText(item?.summary);
     const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : []; const evidence = evidenceList(rawEvidence);
-    if (!item || item.kind !== kind || item.label !== label || !summary || rawEvidence.length > 3 || evidence.length !== rawEvidence.length) return undefined;
+    if (!item || item.kind !== kind || item.label !== label || !summary || rawEvidence.length > 3 || evidence.length !== rawEvidence.length || evidence.some((entry) => !knownEvidence.has(signature(entry)))) return undefined;
     actions.push({ kind, label, summary, evidence });
   }
   return { schemaVersion: SCHEMA_VERSION, view: "impact", project: common.project, sourceState: common.sourceState,
-    data: { layout: "incoming-focus-outgoing", revision, focus: { entity: focus, anchorFile: anchor, evidence: focusEvidence }, incoming, outgoing, semantic, history, testRecommendations, risks, actions,
+    data: { layout: "incoming-focus-outgoing", revision, focus: { entity: focus, evidence: focusEvidence }, anchorFiles, focusConcepts, incoming, outgoing, semantic, history, testRecommendations, risks, actions,
       stats: { files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks) } }, warnings: common.warnings };
 }
 

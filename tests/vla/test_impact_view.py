@@ -154,6 +154,120 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertEqual(sum("impact-physical-lookup" in sql for sql in statements), 1)
         self.assertIn("IMPACT_PHYSICAL_TRUNCATED", {item["code"] for item in data["warnings"]})
 
+    def test_concept_focus_exposes_every_fresh_anchor_and_lane_via_path(self) -> None:
+        focus_concept = Database.node_id("fixture", 2, "concept", "focus")
+        with self.database.connect() as connection:
+            second = self._add_file(connection, "src/focus_worker.py")
+            caller = self._add_file(connection, "src/worker_caller.py")
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus_concept,
+                                 relation="implemented_by", target_id=second,
+                                 source="semantic-heuristic", confidence=.8)
+            Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=caller,
+                                 relation="imports", target_id=second, source="extractor")
+            connection.commit()
+        core = impact_view_data(self.database, self.project, "Focus")
+        self.assertEqual({item["entity"]["path"] for item in core["anchorFiles"]},
+                         {"src/focus.py", "src/focus_worker.py"})
+        self.assertIn("src/focus_worker.py", {item["viaPath"] for item in core["incoming"]})
+        self.assertEqual(len(impact_to_view(core).data["anchorFiles"]), 2)
+
+    def test_safe_fresh_filter_precedes_anchor_and_lane_display_caps(self) -> None:
+        focus_concept = Database.node_id("fixture", 2, "concept", "focus")
+        with self.database.connect() as connection:
+            later_anchor = self._add_file(connection, "src/later_anchor.py")
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus_concept,
+                                 relation="implemented_by", target_id=later_anchor,
+                                 source="semantic-heuristic", confidence=.8)
+            later_peer = self._add_file(connection, "src/later_peer.py")
+            Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=later_peer,
+                                 relation="imports", target_id=later_anchor, source="extractor")
+            for index in range(10):
+                stale = self._add_file(connection, f"src/stale_anchor_{index}.py")
+                Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus_concept,
+                                     relation="implemented_by", target_id=stale,
+                                     source="semantic-heuristic", confidence=.8)
+                (self.root / f"src/stale_anchor_{index}.py").write_text("CHANGED = 1\n", encoding="utf-8")
+            for index in range(9):
+                stale_peer = self._add_file(connection, f"src/stale_peer_{index}.py")
+                Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=stale_peer,
+                                     relation="imports", target_id=later_anchor, source="extractor")
+                (self.root / f"src/stale_peer_{index}.py").write_text("CHANGED = 1\n", encoding="utf-8")
+            connection.commit()
+        core = impact_view_data(self.database, self.project, "Focus")
+        self.assertIn("src/later_anchor.py", {item["entity"]["path"] for item in core["anchorFiles"]})
+        self.assertIn("src/later_peer.py", {item["peer"]["path"] for item in core["incoming"]})
+        codes = {item["code"] for item in core["warnings"]}
+        self.assertIn("IMPACT_ANCHOR_STALE_FILTERED", codes)
+        self.assertIn("IMPACT_LANE_STALE_FILTERED", codes)
+        self.assertEqual(core["sourceState"]["status"], "stale")
+
+    def test_test_recommendations_require_real_tests_or_tested_by(self) -> None:
+        focus_id = Database.node_id("fixture", 1, "file", "src/focus.py")
+        focus_concept = Database.node_id("fixture", 2, "concept", "focus")
+        with self.database.connect() as connection:
+            misleading = self._add_file(connection, "tests/test_name_only.py")
+            semantic_test = self._add_file(connection, "checks/focus_contract.py")
+            Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=misleading,
+                                 relation="imports", target_id=focus_id, source="extractor")
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus_concept,
+                                 relation="tested_by", target_id=semantic_test,
+                                 source="semantic-heuristic", confidence=.8)
+            connection.commit()
+        recommendations = impact_view_data(self.database, self.project, "Focus")["testRecommendations"]
+        paths = {item["path"] for item in recommendations}
+        self.assertIn("checks/focus_contract.py", paths)
+        self.assertNotIn("tests/test_name_only.py", paths)
+        self.assertEqual({item["basis"] for item in recommendations}, {"physical-tests", "semantic-tested-by"})
+
+    def test_selector_like_metacharacters_are_literal_and_evidence_caps_are_strict(self) -> None:
+        with self.assertRaises(LookupError):
+            impact_view_data(self.database, self.project, "%_")
+        core = impact_view_data(self.database, self.project, "src/focus.py")
+        for field in ("history", "testRecommendations", "risks"):
+            if not core[field]:
+                continue
+            broken = {**core, field: [dict(core[field][0], evidence=core[field][0]["evidence"] * 4)]}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                impact_to_view(broken)
+
+    def test_large_lane_population_uses_endpoint_index_and_constant_scan_budget(self) -> None:
+        focus_id = Database.node_id("fixture", 1, "file", "src/focus.py")
+        now = "2026-09-15T10:00:00+00:00"
+        with self.database.connect() as connection:
+            nodes = [(f"bulk-node-{index}", "fixture", 1, "file", f"bulk/{index}.py",
+                      f"{index}.py", "{}", 1.0, "repository", now, now)
+                     for index in range(5000)]
+            connection.executemany(
+                "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                nodes,
+            )
+            edges = [(f"bulk-edge-{index}", "fixture", 1, f"bulk-node-{index}", "imports",
+                      focus_id, "{}", 1.0, "extractor", now, now)
+                     for index in range(5000)]
+            connection.executemany(
+                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                edges,
+            )
+            plan = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT edge.rowid FROM edges AS edge INDEXED BY idx_edges_target WHERE edge.project_id=? AND edge.layer=1 AND edge.target_id=? ORDER BY edge.rowid DESC LIMIT 25",
+                ("fixture", focus_id),
+            ).fetchall()
+            connection.commit()
+        detail = " ".join(str(row[3]).upper() for row in plan)
+        self.assertIn("IDX_EDGES_TARGET", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+        data = impact_view_data(self.database, self.project, "src/focus.py")
+        self.assertIn("IMPACT_LANE_SCAN_TRUNCATED", {item["code"] for item in data["warnings"]})
+        self.assertLessEqual(len(data["incoming"]), 8)
+
+    def test_unindexed_warning_is_generated_once(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute("UPDATE projects SET last_scan_at=NULL WHERE id='fixture'")
+            connection.commit()
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        view = impact_to_view(impact_view_data(self.database, project, "src/focus.py")).to_dict()
+        self.assertEqual([item["code"] for item in view["warnings"]].count("SOURCE_NOT_INDEXED"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

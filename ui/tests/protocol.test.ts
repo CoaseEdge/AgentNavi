@@ -245,8 +245,9 @@ const impactRelation = { id: "edge:imports", sourceId: "file:caller", targetId: 
 const impactFixture = {
   schemaVersion: "agentnavi.vla.v1", view: "impact",
   project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" },
-  data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: impactFocus, anchorFile: impactFocus, evidence: [impactEvidence] },
-    incoming: [{ peer: impactPeer, relation: impactRelation, viaPath: "src/focus.py", evidence: [impactEvidence] }], outgoing: [], semantic: [], history: [],
+  data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: impactFocus, evidence: [impactEvidence] },
+    anchorFiles: [{ entity: impactFocus, mapping: null, evidence: [impactEvidence] }], focusConcepts: [],
+    incoming: [{ peer: impactPeer, relation: impactRelation, viaPath: "src/focus.py", recordedOrder: 1, evidence: [impactEvidence] }], outgoing: [], semantic: [], history: [],
     testRecommendations: [], risks: [{ kind: "incoming", severity: "medium", summary: "一条入向关系", evidence: [impactEvidence] }],
     actions: [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]].map(([kind, label]) => ({ kind, label, summary: `${label}说明`, evidence: [] })),
     stats: { files: 2, concepts: 0, tasks: 0 } }, warnings: [],
@@ -257,6 +258,15 @@ assert(parseRequestedView({ view: "impact" }) === "impact", "应识别 Impact �
 const wrongImpact = structuredClone(impactFixture);
 wrongImpact.data.incoming[0]!.relation.sourceId = "file:focus";
 assert(parseImpactView(wrongImpact) === undefined, "应拒绝反向或伪造的物理端点");
+const overflowImpact = structuredClone(impactFixture);
+overflowImpact.data.risks[0]!.evidence = Array.from({ length: 4 }, () => impactEvidence);
+assert(parseImpactView(overflowImpact) === undefined, "应拒绝 Impact Evidence 超过三项");
+const wrongAnchorImpact = structuredClone(impactFixture);
+wrongAnchorImpact.data.incoming[0]!.viaPath = "src/not-visible.py";
+assert(parseImpactView(wrongAnchorImpact) === undefined, "lane viaPath 必须绑定可见 anchor");
+const collidingImpact = structuredClone(impactFixture);
+collidingImpact.data.incoming[0]!.peer.id = collidingImpact.data.focus.entity.id;
+assert(parseImpactView(collidingImpact) === undefined, "可见实体 ID 不得跨路径复用");
 const unsafeTour = structuredClone(tourFixture);
 unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
 assert(parseRepositoryTourView(unsafeTour) === undefined, "无有效证据的 Tour stop 应使畸形视图被拒绝");

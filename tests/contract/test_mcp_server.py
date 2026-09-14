@@ -134,6 +134,10 @@ import agentnavi.mcp.server
                 )
                 self.assertEqual(impact_tool.input_schema["required"], ["selector"])
                 self.assertEqual(
+                    impact_tool.input_schema["properties"]["selector"]["maxLength"],
+                    4096,
+                )
+                self.assertEqual(
                     set(impact_tool.input_schema["properties"]),
                     {"selector", "project_id", "workspace"},
                 )

@@ -662,7 +662,18 @@ class FlowViewOutput(_ExtensibleModel):
 
 class ImpactFocusOutput(_ExtensibleModel):
     entity: TourEntityOutput
-    anchor_file: ArchitectureEntryEntityOutput | None = Field(alias="anchorFile")
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactAnchorOutput(_ExtensibleModel):
+    entity: ArchitectureEntryEntityOutput
+    mapping: ArchitectureConnectionOutput | None
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactFocusConceptOutput(_ExtensibleModel):
+    entity: ArchitectureComponentEntityOutput
+    mapping: ArchitectureConnectionOutput | None
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
@@ -670,23 +681,24 @@ class ImpactLaneOutput(_ExtensibleModel):
     peer: ArchitectureEntryEntityOutput
     relation: TourRelationOutput
     via_path: str = Field(alias="viaPath", min_length=1)
+    recorded_order: int = Field(alias="recordedOrder", ge=1)
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactSemanticOutput(_ExtensibleModel):
     direction: Literal["incoming", "outgoing"]
-    focus_concept: ArchitectureComponentEntityOutput = Field(alias="focusConcept")
+    focus_concept_id: str = Field(alias="focusConceptId", min_length=1)
     peer: ArchitectureComponentEntityOutput
     relation: ArchitectureConnectionOutput
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def validate_endpoints(self) -> "ImpactSemanticOutput":
-        if self.focus_concept.id == self.peer.id:
+        if self.focus_concept_id == self.peer.id:
             raise ValueError("semantic endpoints must differ")
         expected = (
-            (self.focus_concept.id, self.peer.id)
-            if self.direction == "outgoing" else (self.peer.id, self.focus_concept.id)
+            (self.focus_concept_id, self.peer.id)
+            if self.direction == "outgoing" else (self.peer.id, self.focus_concept_id)
         )
         if (self.relation.source_id, self.relation.target_id) != expected:
             raise ValueError("semantic endpoints mismatch")
@@ -702,8 +714,10 @@ class ImpactHistoryOutput(_ExtensibleModel):
 
 
 class ImpactTestOutput(_ExtensibleModel):
+    basis: Literal["physical-tests", "semantic-tested-by"]
     path: str = Field(min_length=1)
     reason: str = Field(min_length=1)
+    source_concept: ArchitectureComponentEntityOutput | None = Field(alias="sourceConcept")
     entity: ArchitectureEntryEntityOutput
     relation: TourRelationOutput
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
@@ -727,6 +741,8 @@ class ImpactDataOutput(_ExtensibleModel):
     layout: Literal["incoming-focus-outgoing"]
     revision: str = Field(min_length=1)
     focus: ImpactFocusOutput
+    anchor_files: list[ImpactAnchorOutput] = Field(alias="anchorFiles", max_length=8)
+    focus_concepts: list[ImpactFocusConceptOutput] = Field(alias="focusConcepts", max_length=8)
     incoming: list[ImpactLaneOutput] = Field(max_length=8)
     outgoing: list[ImpactLaneOutput] = Field(max_length=8)
     semantic: list[ImpactSemanticOutput] = Field(max_length=8)
@@ -743,11 +759,87 @@ class ImpactDataOutput(_ExtensibleModel):
                     ("history", "过去谁改过它"))
         if tuple((item.kind, item.label) for item in self.actions) != expected:
             raise ValueError("impact actions must use fixed semantics")
-        anchor_id = self.focus.anchor_file.id if self.focus.anchor_file else self.focus.entity.id
-        if any(item.relation.source_id != item.peer.id or item.relation.target_id != anchor_id for item in self.incoming):
+        if not ((self.focus.entity.kind == "file" and self.focus.entity.layer == "L1" and self.focus.entity.path)
+                or (self.focus.entity.kind == "concept" and self.focus.entity.layer == "L2")):
+            raise ValueError("impact focus provenance invalid")
+        anchors = {item.entity.path: item.entity.id for item in self.anchor_files}
+        concept_ids = {item.entity.id for item in self.focus_concepts}
+        if len(anchors) != len(self.anchor_files):
+            raise ValueError("anchor paths must be unique")
+        if self.focus.entity.kind == "file":
+            if len(self.anchor_files) > 1 or any(
+                item.mapping is not None or item.entity.id != self.focus.entity.id
+                or item.entity.path != self.focus.entity.path for item in self.anchor_files
+            ):
+                raise ValueError("file identity anchor invalid")
+        elif any(
+            item.mapping is None or item.mapping.layer != "L2"
+            or item.mapping.relation not in {"implemented_by", "configured_by"}
+            or item.mapping.source_id != self.focus.entity.id
+            or item.mapping.target_id != item.entity.id for item in self.anchor_files
+        ):
+            raise ValueError("concept anchor mapping invalid")
+        if self.focus.entity.kind == "concept":
+            if any(item.entity.id != self.focus.entity.id or item.mapping is not None
+                   for item in self.focus_concepts):
+                raise ValueError("concept identity mapping invalid")
+        elif any(item.mapping is None or item.mapping.layer != "L2"
+                 or item.mapping.relation not in {"implemented_by", "configured_by", "tested_by"}
+                 or item.mapping.source_id != item.entity.id
+                 or item.mapping.target_id != self.focus.entity.id for item in self.focus_concepts):
+            raise ValueError("file concept mapping invalid")
+        if any(item.via_path not in anchors or item.relation.source_id != item.peer.id
+               or item.relation.target_id != anchors[item.via_path] for item in self.incoming):
             raise ValueError("incoming endpoints mismatch")
-        if any(item.relation.source_id != anchor_id or item.relation.target_id != item.peer.id for item in self.outgoing):
+        if any(item.via_path not in anchors or item.relation.source_id != anchors[item.via_path]
+               or item.relation.target_id != item.peer.id for item in self.outgoing):
             raise ValueError("outgoing endpoints mismatch")
+        if any(item.focus_concept_id not in concept_ids for item in self.semantic):
+            raise ValueError("semantic focus concept must be visible")
+        if any(item.evidence != item.relation.evidence
+               for item in self.incoming + self.outgoing + self.semantic + self.history + self.test_recommendations):
+            raise ValueError("wrapper evidence mismatch")
+        valid_targets = {self.focus.entity.id, *anchors.values(), *concept_ids}
+        if any(item.entity.source != "task-events" or item.relation.source != "task-events"
+               or item.relation.source_id != item.entity.id
+               or item.relation.target_id not in valid_targets for item in self.history):
+            raise ValueError("history provenance invalid")
+        lane_edges = {item.relation.id: item.relation for item in self.incoming + self.outgoing}
+        for item in self.test_recommendations:
+            if item.entity.path != item.path:
+                raise ValueError("test path mismatch")
+            if item.basis == "physical-tests":
+                if item.source_concept is not None or item.relation.layer != "L1" \
+                        or item.relation.relation != "tests" or item.relation.source_id != item.entity.id \
+                        or item.relation.target_id not in anchors.values() or lane_edges.get(item.relation.id) != item.relation:
+                    raise ValueError("physical test provenance invalid")
+            elif item.source_concept is None or item.source_concept.id not in concept_ids \
+                    or item.relation.layer != "L2" or item.relation.relation != "tested_by" \
+                    or item.relation.source_id != item.source_concept.id or item.relation.target_id != item.entity.id:
+                raise ValueError("semantic test provenance invalid")
+        entity_signatures: dict[str, tuple[Any, ...]] = {}
+        edge_ids: set[str] = set()
+        visible_entities = [self.focus.entity, *(item.entity for item in self.anchor_files),
+                            *(item.entity for item in self.focus_concepts),
+                            *(item.peer for item in self.incoming + self.outgoing),
+                            *(item.peer for item in self.semantic), *(item.entity for item in self.history),
+                            *(item.entity for item in self.test_recommendations),
+                            *(item.source_concept for item in self.test_recommendations if item.source_concept)]
+        for entity in visible_entities:
+            signature = (entity.kind, entity.layer, entity.path, entity.label, entity.source, entity.confidence)
+            if entity.id in edge_ids or (entity.id in entity_signatures and entity_signatures[entity.id] != signature):
+                raise ValueError("visible entity registry conflict")
+            entity_signatures[entity.id] = signature
+        visible_edges = [*(item.mapping for item in self.anchor_files if item.mapping),
+                         *(item.mapping for item in self.focus_concepts if item.mapping),
+                         *(item.relation for item in self.incoming + self.outgoing + self.semantic + self.history + self.test_recommendations)]
+        edge_signatures: dict[str, tuple[Any, ...]] = {}
+        for edge in visible_edges:
+            signature = (edge.source_id, edge.target_id, edge.relation, edge.layer, edge.source, edge.confidence)
+            if edge.id in entity_signatures or (edge.id in edge_signatures and edge_signatures[edge.id] != signature):
+                raise ValueError("visible edge registry conflict")
+            edge_signatures[edge.id] = signature
+            edge_ids.add(edge.id)
         return self
 
 
@@ -769,7 +861,8 @@ class ImpactViewOutput(_ExtensibleModel):
                 "sourceState": {"status": "partial"},
                 "data": {
                     "layout": "incoming-focus-outgoing", "revision": "error",
-                    "focus": {"entity": {"id": "error", "kind": "concept", "label": "error", "layer": "L2", "source": "internal", "confidence": 0, "evidence": [{"kind": "error", "summary": "error", "layer": "L2", "source": "internal", "confidence": 0}]}, "anchorFile": None, "evidence": [{"kind": "error", "summary": "error", "layer": "L2", "source": "internal", "confidence": 0}]},
+                    "focus": {"entity": {"id": "error", "kind": "concept", "label": "error", "layer": "L2", "source": "internal", "confidence": 0, "evidence": [{"kind": "error", "summary": "error", "layer": "L2", "source": "internal", "confidence": 0}]}, "evidence": [{"kind": "error", "summary": "error", "layer": "L2", "source": "internal", "confidence": 0}]},
+                    "anchorFiles": [], "focusConcepts": [],
                     "incoming": [], "outgoing": [], "semantic": [], "history": [],
                     "testRecommendations": [], "risks": [],
                     "actions": [{"kind": kind, "label": label, "summary": "error", "evidence": []} for kind, label in (("purpose", "它做什么"), ("callers", "谁调用它"), ("dependencies", "它依赖谁"), ("change", "如果修改它"), ("history", "过去谁改过它"))],
@@ -813,7 +906,7 @@ VISUALIZE_VIEW_INPUT = Annotated[
 ]
 REQUIRED_TEXT_INPUT = Annotated[
     Any,
-    WithJsonSchema({"type": "string", "minLength": 1}),
+    WithJsonSchema({"type": "string", "minLength": 1, "maxLength": 4096}),
 ]
 OPTIONAL_TEXT_INPUT = Annotated[
     Any,

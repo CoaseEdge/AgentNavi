@@ -660,6 +660,33 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertNotIn(private_message, wire)
         self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_impact_evidence_overflow_is_public_for_both_tools(self) -> None:
+        from agentnavi.impact_view import impact_view_data
+
+        self._add_project()
+        with self.database.connect() as connection:
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        core = impact_view_data(self.database, project, "src/membership.py")
+        secret = str(self.database.settings.database_path)
+        cases = []
+        for field in ("risks", "actions"):
+            if core[field]:
+                item = dict(core[field][0])
+                seed = item["evidence"] or core["focus"]["evidence"]
+                item["evidence"] = seed * 4
+                cases.append({**core, field: [item, *core[field][1:]]})
+        for bad_core in cases:
+            for tool_name, arguments in (
+                ("agentnavi_impact", {"selector": "src/membership.py", "project_id": "fixture"}),
+                ("agentnavi_visualize", {"view": "impact", "query": "src/membership.py", "project_id": "fixture"}),
+            ):
+                with self.subTest(field=next(k for k in ("risks", "actions") if bad_core[k] != core[k]), tool=tool_name), \
+                     patch("agentnavi.impact_view.impact_view_data", return_value=bad_core):
+                    result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                    self.assertTrue(result.is_error)
+                    self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                    self.assertNotIn(secret, json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str))
+
     def test_runtime_schema_rejects_invalid_success_envelopes(self) -> None:
         from pydantic import ValidationError
 
