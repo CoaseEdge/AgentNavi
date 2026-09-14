@@ -1,0 +1,262 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "1.5.0",
+  "engineCommitSha": "59af60f60eec9cbc662fef983971fb20a4a98308",
+  "diffFingerprintAlgorithm": "git-raw-z-v1-sha256",
+  "defaultBranch": "main",
+  "preset": {
+    "name": "python-service",
+    "schemaVersion": 1,
+    "sha256": "cc89a84ee3bbb06a4a219583f1a776ff06d8460c02a07837f4c7783bffdc57c2"
+  },
+  "executionContractVersion": 1,
+  "governanceCompleteness": "complete",
+  "runtimes": [
+    {
+      "id": "system-git",
+      "node": {
+        "version": "22.x"
+      },
+      "systemTools": [
+        {
+          "name": "git",
+          "version": "2.x"
+        },
+        {
+          "name": "sh",
+          "version": "posix"
+        }
+      ]
+    }
+  ],
+  "executionProfiles": [
+    {
+      "id": "pr-validation",
+      "tier": "pr-blocking",
+      "runtimeId": "system-git",
+      "entry": {
+        "publicCommand": "governance-only",
+        "argv": [
+          "git",
+          "status",
+          "--porcelain=v1"
+        ]
+      },
+      "requiredStages": [
+        {
+          "id": "dependencies",
+          "commands": [
+            "dependency:none"
+          ]
+        },
+        {
+          "id": "validate",
+          "commands": [
+            "system:git-status"
+          ]
+        }
+      ],
+      "dependencyPreparation": {
+        "id": "none",
+        "semantics": "No repository dependencies are prepared for a governance-only repository.",
+        "adapter": "none",
+        "workingDirectory": ".",
+        "env": {},
+        "lifecycleScripts": {
+          "mode": "forbid",
+          "allowlist": []
+        },
+        "hookArgv": [],
+        "ciArgv": [],
+        "consumers": {
+          "contractTests": [
+            "tests/**"
+          ],
+          "docs": [
+            "README.md"
+          ],
+          "workflows": [
+            ".github/workflows/**"
+          ]
+        },
+        "definitionHash": "2ae76f3afd45d6c22c0a140466c51e13716ba1d840562e8b16c72b58294cb90f"
+      },
+      "consumers": [
+        {
+          "type": "pre-push",
+          "revisionSource": "pushed-ref-tip"
+        },
+        {
+          "type": "github-actions",
+          "workflow": ".github/workflows/repo-governance.yml",
+          "job": "validate",
+          "verificationStep": "Run governed validation",
+          "trigger": "pull_request",
+          "revisionSource": "pull-request-head",
+          "executionContext": {
+            "workingDirectory": ".",
+            "shell": null,
+            "continueOnError": false,
+            "stepIf": null,
+            "jobIf": null,
+            "defaultsRun": null,
+            "matrix": null,
+            "needs": [],
+            "env": {},
+            "runner": "ubuntu-latest",
+            "container": null,
+            "timeoutMinutes": null
+          }
+        }
+      ]
+    }
+  ],
+  "testCategories": {
+    "unit": [
+      "tests/unit/**",
+      "ui/test/**",
+      "ui/tests/**"
+    ],
+    "contract": [
+      "tests/contract/**"
+    ],
+    "integration": [
+      "tests/integration/**",
+      "tests/test_*.py"
+    ],
+    "command-contract": [
+      "tests/commands/**",
+      "integrations/deepseek-harness/test/**"
+    ],
+    "build-verification": [
+      "tests/build/**"
+    ]
+  },
+  "changeCategoryMappings": {
+    "tests": [
+      "tests/**",
+      "integrations/deepseek-harness/test/**",
+      "ui/test/**",
+      "ui/tests/**"
+    ],
+    "migrations": [
+      "migrations/**"
+    ],
+    "dependencies": [
+      "pyproject.toml",
+      "requirements*.txt",
+      "poetry.lock",
+      "uv.lock",
+      "integrations/deepseek-harness/package*.json",
+      "ui/package*.json"
+    ],
+    "ci": [
+      ".github/workflows/**"
+    ],
+    "docs": [
+      "docs/**",
+      "README*"
+    ],
+    "source": [
+      "src/**",
+      "app/**",
+      "integrations/deepseek-harness/src/**",
+      "ui/src/**"
+    ]
+  },
+  "highImpactMappings": [
+    {
+      "businessPaths": [
+        "src/**",
+        "app/**"
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "unit",
+            "contract",
+            "integration"
+          ]
+        }
+      ]
+    },
+    {
+      "businessPaths": [
+        "migrations/**"
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "integration"
+          ]
+        }
+      ]
+    },
+    {
+      "businessPaths": [
+        "integrations/deepseek-harness/src/**"
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "command-contract"
+          ]
+        }
+      ]
+    },
+    {
+      "businessPaths": [
+        "ui/src/**"
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "unit"
+          ]
+        }
+      ]
+    },
+    {
+      "businessPaths": [
+        "pyproject.toml",
+        "Dockerfile"
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "command-contract"
+          ]
+        },
+        {
+          "anyOf": [
+            "build-verification"
+          ]
+        }
+      ]
+    }
+  ],
+  "testEntries": [],
+  "testSupport": [
+    "tests/fixtures/**",
+    "tests/helpers/**",
+    "tests/conftest.py"
+  ],
+  "testTiers": {
+    "pr-blocking": [],
+    "nightly": [],
+    "manual-smoke": []
+  },
+  "commandAliases": {},
+  "publicCommands": [],
+  "prBlockingCommands": [],
+  "guards": [],
+  "policyChecks": [],
+  "workflowAllowedEntries": [
+    "uses:CoaseEdge/repo-governance/.github/workflows/governance.yml@59af60f60eec9cbc662fef983971fb20a4a98308"
+  ],
+  "waiverApprovers": [],
+  "managedFiles": [
+    ".repo-governance.json",
+    ".github/workflows/repo-governance.yml"
+  ]
+}

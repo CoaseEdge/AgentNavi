@@ -5,6 +5,8 @@ __pycache__/
 .coverage
 htmlcov/
 build/
+!tests/build/
+!tests/build/*.py
 dist/
 .venv/
 venv/
