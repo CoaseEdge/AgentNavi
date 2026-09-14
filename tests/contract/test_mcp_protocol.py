@@ -297,9 +297,10 @@ class VLAProtocolContractTests(unittest.TestCase):
             project=Project(id="agentnavi", name="AgentNavi", kind="software"),
             source_state=SourceState(status="ready"),
             data={},
-            extensions={"说明": "一", "标签": "二"},
+            extensions={"说明": "一", "标签": "二", "Straße": "三", "Strasse": "四"},
         ).to_dict()
         self.assertEqual((localized["说明"], localized["标签"]), ("一", "二"))
+        self.assertEqual((localized["Straße"], localized["Strasse"]), ("三", "四"))
         with self.assertRaisesRegex(ValueError, "保留字段"):
             AgentNaviView(
                 view="context",

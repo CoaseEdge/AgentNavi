@@ -164,7 +164,11 @@ def _normalized_key(key: str) -> str:
 def _extension_semantic_key(key: str) -> str:
     """统一 camel/snake/kebab 变体，同时保留非 ASCII 字段身份。"""
 
-    return key.casefold().replace("_", "").replace("-", "")
+    return "".join(
+        chr(ord(character) + 32) if "A" <= character <= "Z" else character
+        for character in key
+        if character not in {"_", "-"}
+    )
 
 
 def _normalize_json(value: Any, *, parent_key: str | None = None) -> JsonValue:
