@@ -406,11 +406,63 @@ class ContextNavigationTestCase(unittest.TestCase):
         history_action = next(
             item for item in upgrade_item["actions"] if item["kind"] == "history"
         )
-        self.assertIn("近期相关历史任务（最多 3 项）", history_action["summary"])
+        self.assertIn(
+            "当前索引中最近记录的任务关联（最多 3 项）",
+            history_action["summary"],
+        )
         self.assertIn(
             "CONTEXT_NAVIGATION_HISTORY_TRUNCATED",
             {warning["code"] for warning in data["warnings"]},
         )
+
+    def test_history_is_record_ordered_before_limit_not_task_time_ordered(self) -> None:
+        with self.database.connect() as connection:
+            upgrade = connection.execute(
+                "SELECT id FROM nodes WHERE project_id=? AND kind='file' AND key=?",
+                (self.project["id"], "src/membership/upgrade.py"),
+            ).fetchone()
+            self.assertIsNotNone(upgrade)
+            for index in range(42):
+                task_id = f"opposite-time-{index:02d}"
+                # 后记录的 edge 故意绑定更早的 task 时间，证明 S08 展示的是
+                # events.jsonl append/replay 对应的索引记录顺序，不是 S10 Timeline。
+                task_time = f"2020-01-01T00:00:{41 - index:02d}Z"
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, project_id, agent, title, status, summary,
+                           created_at, updated_at, closed_at
+                       ) VALUES (?, ?, 'codex', ?, 'completed', '', ?, ?, ?)""",
+                    (
+                        task_id, self.project["id"], f"记录顺序 {index}",
+                        task_time, task_time, task_time,
+                    ),
+                )
+                task_node = Database.upsert_node(
+                    connection, project_id=self.project["id"], layer=3, kind="task",
+                    key=task_id, label=f"记录顺序 {index}", source="task-events",
+                )
+                Database.upsert_edge(
+                    connection, project_id=self.project["id"], layer=3,
+                    source_id=task_node, relation="modified", target_id=upgrade["id"],
+                    source="task-events",
+                )
+            connection.commit()
+
+        data = context_data(self.database, self.project, "membership")
+        upgrade_item = next(
+            item for item in data["navigation"]["readingOrder"]
+            if item["path"] == "src/membership/upgrade.py"
+        )
+        self.assertEqual(
+            [item["title"] for item in upgrade_item["history"]],
+            ["记录顺序 41", "记录顺序 40", "记录顺序 39"],
+        )
+        history_summary = next(
+            item["summary"] for item in upgrade_item["actions"]
+            if item["kind"] == "history"
+        )
+        self.assertIn("当前索引中最近记录的任务关联", history_summary)
+        self.assertNotIn("近期", history_summary)
 
     def test_large_history_uses_indexed_per_target_constant_query_budget(self) -> None:
         baseline = context_data(self.database, self.project, "membership")
@@ -471,7 +523,7 @@ class ContextNavigationTestCase(unittest.TestCase):
                 JOIN nodes task_node ON task_node.id=edge.source_id
                 JOIN tasks task ON task.id=task_node.key
                 WHERE edge.project_id=? AND edge.layer=3 AND edge.target_id=?
-                ORDER BY edge.rowid
+                ORDER BY edge.rowid DESC
                 LIMIT 41""",
                 (self.project["id"], file_id),
             ).fetchall()

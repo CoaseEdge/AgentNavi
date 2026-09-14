@@ -7,7 +7,13 @@ from typing import Any
 
 from ...privacy import contains_private_path
 from ...query import format_context
-from ..protocol import AgentNaviView, Project, SourceState, Warning
+from ..protocol import (
+    MAX_CONTEXT_WARNINGS,
+    AgentNaviView,
+    Project,
+    SourceState,
+    Warning,
+)
 from .repo_overview import _evidence, _evidence_list
 from .repo_tour import _entity, _relation
 
@@ -318,15 +324,20 @@ def _project(core_data: Mapping[str, Any]) -> Project:
 def _source_state(core_data: Mapping[str, Any]) -> tuple[SourceState, tuple[Warning, ...]]:
     raw_project = _mapping(core_data.get("project"), "context.project")
     last_scan_at = raw_project.get("last_scan_at")
+    warnings = _core_warnings(core_data)
     if last_scan_at is None:
         source_warning = (Warning(code="SOURCE_NOT_INDEXED", message=_NOT_INDEXED_MESSAGE),)
-        return SourceState(status="partial"), (*source_warning, *_core_warnings(core_data))
+        combined = (*source_warning, *warnings)
+        if len(combined) > MAX_CONTEXT_WARNINGS:
+            raise ValueError("context warnings 超过公开合同上限。")
+        return SourceState(status="partial"), combined
     indexed_at = _text(last_scan_at, "context.project.last_scan_at", limit=64)
     if indexed_at.endswith("+00:00"):
         indexed_at = indexed_at[:-6] + "Z"
     navigation = _mapping(core_data.get("navigation", {}), "context.navigation")
     revision = _text(navigation.get("revision", ""), "navigation.revision", limit=240)
-    warnings = _core_warnings(core_data)
+    if len(warnings) > MAX_CONTEXT_WARNINGS:
+        raise ValueError("context warnings 超过公开合同上限。")
     status = (
         "stale"
         if any(

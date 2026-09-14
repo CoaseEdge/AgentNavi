@@ -1,4 +1,5 @@
 export const SCHEMA_VERSION = "agentnavi.vla.v1" as const;
+export const MAX_CONTEXT_WARNINGS = 10;
 
 export interface ContextFile {
   path: string;
@@ -607,7 +608,10 @@ function contextNavigation(
 
 export function parseContextView(value: unknown): ContextView | undefined {
   const rawEnvelope = record(value);
-  if (!Array.isArray(rawEnvelope?.warnings) || rawEnvelope.warnings.length > 10) {
+  if (
+    !Array.isArray(rawEnvelope?.warnings) ||
+    rawEnvelope.warnings.length > MAX_CONTEXT_WARNINGS
+  ) {
     return undefined;
   }
   const common = commonEnvelope(value);

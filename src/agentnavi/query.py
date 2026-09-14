@@ -726,27 +726,21 @@ def _context_file_actions(
         rows = list(connection.execute(
             """/* context-navigation-history-indexed */
             SELECT task.id, task.title, task.status, task.created_at,
-                   task.closed_at, task.updated_at,
                    edge.id AS edge_id, edge.relation, edge.source, edge.confidence
             FROM edges AS edge INDEXED BY idx_edges_target
             JOIN nodes task_node ON task_node.id=edge.source_id
               AND task_node.layer=3 AND task_node.kind='task'
             JOIN tasks task ON task.id=task_node.key
             WHERE edge.project_id=? AND edge.layer=3 AND edge.target_id=?
-            ORDER BY edge.rowid
+            -- events.jsonl 以追加顺序记录 L3 事实，replay 也按该顺序物化；
+            -- edge.rowid DESC 因此表示当前索引中的关系记录顺序，而非任务时间线。
+            ORDER BY edge.rowid DESC
             LIMIT ?""",
             (project_id, file_id, _CONTEXT_HISTORY_PER_FILE_LIMIT + 1),
         ))
         if len(rows) > _CONTEXT_HISTORY_PER_FILE_LIMIT:
             history_truncated = True
-        bounded_rows = sorted(
-            rows[:_CONTEXT_HISTORY_PER_FILE_LIMIT],
-            key=lambda row: (
-                str(row["closed_at"] or row["updated_at"] or row["created_at"]),
-                str(row["id"]), str(row["relation"]), str(row["edge_id"]),
-            ),
-            reverse=True,
-        )
+        bounded_rows = rows[:_CONTEXT_HISTORY_PER_FILE_LIMIT]
         for row in bounded_rows:
             title = str(row["title"])
             if contains_private_path(title):
@@ -801,14 +795,14 @@ def _context_file_actions(
                 ) if dependencies else "当前有界候选结果中未展示依赖它的文件。"
             ),
             "history": (
-                "近期相关历史任务（最多 3 项）：" + "、".join(
+                "当前索引中最近记录的任务关联（最多 3 项）：" + "、".join(
                     entry["title"] for entry in task_history
                 )
                 if task_history else "当前有界结果中未展示安全且可追溯的历史修改任务。"
             ),
             "impact": (
                 f"修改前先核对 {len(dependencies)} 个已选依赖方与 "
-                f"当前有界结果中的 {len(task_history)} 个近期历史任务（最多 3 项），"
+                f"当前有界结果中的 {len(task_history)} 个任务关联（最多 3 项），"
                 "再用 Impact 查询完整影响。"
             ),
         }

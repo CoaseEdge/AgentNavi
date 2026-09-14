@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from mcp.types import CallToolResult, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, RootModel, WithJsonSchema, model_validator
 
-from .protocol import SCHEMA_VERSION
+from .protocol import MAX_CONTEXT_WARNINGS, SCHEMA_VERSION
 
 
 class _ExtensibleModel(BaseModel):
@@ -344,7 +344,7 @@ class ContextViewOutput(_ExtensibleModel):
     project: ProjectOutput
     source_state: SourceStateOutput = Field(alias="sourceState")
     data: ContextDataOutput
-    warnings: list[WarningOutput] = Field(max_length=10)
+    warnings: list[WarningOutput] = Field(max_length=MAX_CONTEXT_WARNINGS)
 
     @model_validator(mode="before")
     @classmethod

@@ -275,6 +275,24 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         for warning in result.structured_content["warnings"]:
             self.assertIn(f"[{warning['code']}] {warning['message']}", result.content[0].text)
 
+        overflow = json.loads(json.dumps(core))
+        overflow["warnings"].append({
+            "code": "OVERFLOW_WARNING_SENTINEL",
+            "message": "第十一条合法提示不得越过 Adapter",
+            "evidence": [],
+        })
+        with patch("agentnavi.query.context_data", return_value=overflow):
+            rejected = asyncio.run(
+                self._call({"query": "会员", "project_id": "fixture"})
+            )
+        self.assertTrue(rejected.is_error)
+        self.assertEqual(rejected.structured_content["code"], "INTERNAL_ERROR")
+        rejected_wire = json.dumps(
+            rejected.model_dump(by_alias=True), ensure_ascii=False, default=str
+        )
+        self.assertNotIn("OVERFLOW_WARNING_SENTINEL", rejected_wire)
+        self.assertNotIn("第十一条合法提示", rejected_wire)
+
     def test_visualize_tool_returns_repository_overview_without_query(self) -> None:
         self._add_project()
         self._add_overview_documents()
