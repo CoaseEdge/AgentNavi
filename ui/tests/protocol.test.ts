@@ -14,8 +14,8 @@ import {
   parseTaskQuery,
 } from "../src/protocol.js";
 
-const historyEvidence = { kind: "task-record", summary: "任务记录", layer: "L3", source: "task-events", confidence: 1 } as const;
-const historyRelationEvidence = { kind: "task-relation", summary: "修改关系", layer: "L3", source: "task-events", confidence: 1, path: "src/a.py" } as const;
+const historyEvidence = { kind: "task-record", summary: "任务 task-1：任务记录", layer: "L3", source: "task-events", confidence: 1 } as const;
+const historyRelationEvidence = { kind: "task-relation", summary: "任务 task-1 的关系 edge:1 记录 modified", layer: "L3", source: "task-events", confidence: 1, path: "src/a.py" } as const;
 const historyTask = { id: "task:1", kind: "task", label: "修改 A", layer: "L3", source: "task-events", confidence: 1, evidence: [historyEvidence] } as const;
 const historyFile = { id: "file:a", kind: "file", label: "a.py", path: "src/a.py", layer: "L1", source: "repository", confidence: 1,
   evidence: [{ kind: "repository-file", summary: "文件", layer: "L1", source: "repository", confidence: 1, path: "src/a.py" }] } as const;

@@ -70,6 +70,11 @@ schema v4 增加的有界查询投影，只保存真实 source/target 都是 L2 
 
 原始提示、标题、Agent、状态、摘要、起止时间。
 
+Timeline 使用 `closed_at → updated_at → created_at` 作为权威时间，并通过
+`idx_tasks_project_authoritative_time` 在截断候选前按真实 UTC 时刻与稳定 task ID
+排序。该索引是可重建的查询投影；旧的健康 v4 数据库若缺失它，会在初始化锁内补建，
+不会重建或改写 L2 投影。
+
 ### `events`
 
 工具事件、文件路径、压缩数据和时间。一个带多个文件路径的日志事件会物化为多行查询事件。

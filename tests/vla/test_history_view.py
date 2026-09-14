@@ -73,6 +73,32 @@ class HistoryViewTestCase(unittest.TestCase):
         self.assertIn("Task Timeline（新到旧）", text)
         self.assertIn("不是原始工具调用的无损还原", text)
 
+    def test_authoritative_utc_sort_handles_offsets_and_fractional_seconds(self) -> None:
+        with self.database.connect() as connection:
+            self._add_task(connection, "fraction", "小数秒", "2026-09-15T10:00:00Z", "2026-09-15T10:00:00.900Z")
+            self._add_task(connection, "offset", "偏移时间", "2026-09-15T11:00:00+01:00", "2026-09-15T11:00:00.500+01:00")
+            connection.commit()
+            plan = connection.execute(
+                """EXPLAIN QUERY PLAN SELECT id FROM tasks INDEXED BY idx_tasks_project_authoritative_time
+                   WHERE project_id=? ORDER BY julianday(COALESCE(closed_at,updated_at,created_at)) DESC,id DESC LIMIT ?""",
+                ("fixture", HISTORY_TASK_SCAN_LIMIT + 1),
+            ).fetchall()
+        timeline = history_view_data(self.database, self.project)["timeline"]
+        ids = [item["taskId"] for item in timeline]
+        self.assertLess(ids.index("fraction"), ids.index("offset"))
+        self.assertEqual(next(item for item in timeline if item["taskId"] == "fraction")["sortTime"], "2026-09-15T10:00:00.900000Z")
+        self.assertNotIn("TEMP", " ".join(str(tuple(row)) for row in plan).upper())
+
+    def test_missing_history_time_index_is_repaired_on_v4_initialize(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute("DROP INDEX idx_tasks_project_authoritative_time")
+            connection.commit()
+        self.database.initialize()
+        with self.database.connect() as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_tasks_project_authoritative_time'"
+            ).fetchone())
+
     def test_task_detail_has_real_l3_relations_and_cli_history_stays_compatible(self) -> None:
         with self.database.connect() as connection:
             task_node = Database.node_id("fixture", 3, "task", "same-b")
@@ -99,6 +125,11 @@ class HistoryViewTestCase(unittest.TestCase):
         selected = history_view_data(self.database, self.project, task_id="older")
         self.assertEqual(selected["taskDetail"]["taskId"], "older")
         self.assertIn("older", {item["taskId"] for item in selected["timeline"]})
+
+        with self.database.connect() as connection:
+            connection.execute("UPDATE nodes SET confidence=2 WHERE id=?", (Database.node_id("fixture", 3, "task", "same-b"),))
+            connection.commit()
+        self.assertIsNone(task_detail_data(self.database, self.project, "same-b"))
 
     def test_story_groups_multiple_paths_without_claiming_lossless_or_causality(self) -> None:
         with self.database.connect() as connection:
@@ -200,6 +231,70 @@ class HistoryViewTestCase(unittest.TestCase):
         self.assertEqual(core["timeline"][0]["relations"][0]["entity"]["path"], "src/a.py")
         self.assertIn("HISTORY_RELATION_FILTERED", {warning["code"] for warning in core["warnings"]})
         self.assertLessEqual(sum("history-relation-" in statement for statement in statements), 8)
+
+    def test_relation_domain_and_project_binding_are_strict_and_evidence_binds_ids(self) -> None:
+        task_node = Database.node_id("fixture", 3, "task", "same-b")
+        with self.database.connect() as connection:
+            other = self._add_other_project_file(connection)
+            good = Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task_node,
+                                        relation="modified", target_id=self.file_ids["src/a.py"], source="task-events")
+            Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task_node,
+                                 relation="affects", target_id=self.file_ids["src/b.py"], source="task-events")
+            Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task_node,
+                                 relation="read", target_id=self.concept_id, source="task-events")
+            Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task_node,
+                                 relation="modified", target_id=other, source="task-events")
+            connection.commit()
+        core = history_view_data(self.database, self.project, task_id="same-b")
+        detail = core["taskDetail"]
+        self.assertEqual([item["relation"]["id"] for item in detail["relations"]], [good])
+        self.assertIn("same-b", detail["evidence"][0]["summary"])
+        self.assertIn(good, detail["relations"][0]["evidence"][0]["summary"])
+        self.assertIn("HISTORY_RELATION_FILTERED", {item["code"] for item in core["warnings"]})
+
+    def _add_other_project_file(self, connection) -> str:
+        now = "2026-09-15T10:00:00+00:00"
+        connection.execute(
+            "INSERT INTO projects(id,name,root,kind,created_at,updated_at) VALUES ('other','Other',?,'software',?,?)",
+            (str(self.base / "other"), now, now),
+        )
+        return Database.upsert_node(connection, project_id="other", layer=1, kind="file",
+                                    key="src/other.py", label="other.py", source="repository")
+
+    def test_query_filters_after_fixed_latest_window_and_revision_covers_projection(self) -> None:
+        with self.database.connect() as connection:
+            for index in range(5000):
+                self._add_task(connection, f"noise-{index:04d}", f"噪声 {index}",
+                               "2026-09-16T10:00:00Z", "2026-09-16T10:00:00Z")
+            connection.commit()
+        statements: list[str] = []
+        original = self.database.connect
+        steps = 0
+
+        @contextmanager
+        def traced_connect():
+            nonlocal steps
+            with original() as connection:
+                connection.set_trace_callback(statements.append)
+                # A closure returning zero counts VM batches without interrupting SQLite.
+                def progress() -> int:
+                    nonlocal steps
+                    steps += 1
+                    return 0
+                connection.set_progress_handler(progress, 100)
+                yield connection
+
+        with patch.object(self.database, "connect", traced_connect):
+            core = history_view_data(self.database, self.project, "不存在的查询")
+        self.assertEqual(core["timeline"], [])
+        self.assertIn("HISTORY_SCAN_TRUNCATED", {item["code"] for item in core["warnings"]})
+        self.assertNotIn("LIKE", next(statement for statement in statements if "history-task-candidates" in statement).upper())
+        self.assertLess(steps, 2000)
+
+        before = history_view_data(self.database, self.project)
+        after = history_view_data(self.database, self.project, selected_mode="story")
+        self.assertNotEqual(before["revision"], after["revision"])
+        self.assertNotEqual(before["sourceState"]["revision"], after["sourceState"]["revision"])
 
 
 if __name__ == "__main__":

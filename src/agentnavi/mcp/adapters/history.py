@@ -37,12 +37,28 @@ def _timestamp(value: Any, field: str, *, optional: bool = False) -> str | None:
     return result
 
 
-def _relation_item(value: Any, task: dict[str, Any], field: str) -> dict[str, Any]:
+def _relation_item(value: Any, task: dict[str, Any], task_id: str, field: str) -> dict[str, Any]:
     item = _mapping(value, field)
     entity = _entity(item.get("entity"), f"{field}.entity")
     relation = _relation(item.get("relation"), f"{field}.relation")
     evidence = _evidence_list(item.get("evidence", []), f"{field}.evidence")
     order = item.get("recordedOrder")
+    entity_evidence = entity["evidence"]
+    expected_entity = bool(entity_evidence) and ((
+        entity["kind"] == "file"
+        and all(
+            entry["kind"] == "repository-file" and entry["layer"] == "L1"
+            and entry["source"] == entity["source"] and entry.get("path") == entity.get("path")
+            for entry in entity_evidence
+        )
+    ) or (
+        entity["kind"] == "concept"
+        and all(
+            entry["kind"] == "semantic-node" and entry["layer"] == "L2"
+            and entry["source"] == entity["source"] and "path" not in entry
+            for entry in entity_evidence
+        )
+    ))
     if (
         relation["layer"] != "L3" or relation["source"] != "task-events"
         or relation["relation"] not in _RELATIONS or relation["sourceId"] != task["id"]
@@ -52,6 +68,8 @@ def _relation_item(value: Any, task: dict[str, Any], field: str) -> dict[str, An
         or isinstance(order, bool) or not isinstance(order, int) or order < 1
         or not evidence or len(evidence) > 3
         or any(entry["layer"] != "L3" or entry["source"] != "task-events" for entry in evidence)
+        or not expected_entity
+        or any(task_id not in entry["summary"] or relation["id"] not in entry["summary"] for entry in evidence)
     ):
         raise ValueError(f"{field} provenance 无效。")
     return {"entity": entity, "relation": relation, "recordedOrder": order, "evidence": evidence}
@@ -67,14 +85,17 @@ def _timeline_item(value: Any, field: str) -> dict[str, Any]:
         or any(entry["layer"] != "L3" or entry["source"] != "task-events" for entry in evidence)
     ):
         raise ValueError(f"{field} task provenance 无效。")
+    task_id = _required(item.get("taskId"), f"{field}.taskId", 240)
+    if any(task_id not in entry["summary"] for entry in evidence):
+        raise ValueError(f"{field} task evidence 无效。")
     raw_relations = _sequence(item.get("relations", []), f"{field}.relations")
     if len(raw_relations) > 12:
         raise ValueError(f"{field}.relations 超过上限。")
-    relations = [_relation_item(raw, task, f"{field}.relations[]") for raw in raw_relations]
+    relations = [_relation_item(raw, task, task_id, f"{field}.relations[]") for raw in raw_relations]
     if len({entry["relation"]["id"] for entry in relations}) != len(relations):
         raise ValueError(f"{field}.relations id 重复。")
-    return {
-        "entity": task, "taskId": _required(item.get("taskId"), f"{field}.taskId", 240),
+    result = {
+        "entity": task, "taskId": task_id,
         "status": _required(item.get("status"), f"{field}.status", 40),
         "summary": _required(item.get("summary"), f"{field}.summary"),
         "createdAt": _timestamp(item.get("createdAt"), f"{field}.createdAt"),
@@ -83,6 +104,9 @@ def _timeline_item(value: Any, field: str) -> dict[str, Any]:
         "sortTime": _timestamp(item.get("sortTime"), f"{field}.sortTime"),
         "relations": relations, "evidence": evidence,
     }
+    if result["sortTime"] != (result["closedAt"] or result["updatedAt"] or result["createdAt"]):
+        raise ValueError(f"{field}.sortTime 不是权威时间。")
+    return result
 
 
 def _history_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
@@ -95,11 +119,11 @@ def _history_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     if len(raw_timeline) > 20:
         raise ValueError("history.timeline 超过上限。")
     timeline = [_timeline_item(item, "history.timeline[]") for item in raw_timeline]
-    if any(
-        (timeline[index]["sortTime"], timeline[index]["taskId"])
-        < (timeline[index + 1]["sortTime"], timeline[index + 1]["taskId"])
-        for index in range(len(timeline) - 1)
-    ):
+    order = [
+        (datetime.fromisoformat(item["sortTime"][:-1] + "+00:00").timestamp(), item["taskId"])
+        for item in timeline
+    ]
+    if order != sorted(order, reverse=True):
         raise ValueError("history.timeline 排序无效。")
     task_by_id = {entry["entity"]["id"]: entry for entry in timeline}
     if len(task_by_id) != len(timeline):
@@ -170,9 +194,20 @@ def _history_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
             "task": task, "groups": groups, "explanationSource": "l3-aggregation",
             "disclaimer": disclaimer, "evidence": evidence,
         })
+    expected_story_tasks = [item["entity"]["id"] for item in timeline[:12]]
+    actual_story_tasks = [item["task"]["id"] for item in story]
+    if actual_story_tasks != expected_story_tasks or len({item["id"] for item in story}) != len(story):
+        raise ValueError("history.story 必须唯一、完整覆盖当前有界 timeline。")
+    for item, timeline_item in zip(story, timeline[:12]):
+        if (
+            item["title"] != timeline_item["entity"]["label"]
+            or item["summary"] != timeline_item["summary"]
+            or item["sortTime"] != timeline_item["sortTime"]
+        ):
+            raise ValueError("history.story 不是 timeline 的完整派生。")
     raw_detail = core_data.get("taskDetail")
     detail = _timeline_item(raw_detail, "history.taskDetail") if raw_detail is not None else None
-    if detail is not None and detail["entity"]["id"] not in task_by_id:
+    if detail is not None and detail != task_by_id.get(detail["entity"]["id"]):
         raise ValueError("history.taskDetail 不属于 timeline。")
     stats = _mapping(core_data.get("stats"), "history.stats")
     parsed_stats = {}
@@ -181,6 +216,11 @@ def _history_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"history.stats.{key} 无效。")
         parsed_stats[key] = value
+    if (
+        parsed_stats["displayedTasks"] != len(timeline)
+        or parsed_stats["displayedRelations"] != sum(len(item["relations"]) for item in timeline)
+    ):
+        raise ValueError("history.stats 与公开投影不一致。")
     return {
         "layout": "task-timeline-story", "revision": _required(core_data.get("revision"), "history.revision", 120),
         "selectedMode": mode, "disclaimer": disclaimer, "timeline": timeline,

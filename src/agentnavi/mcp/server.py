@@ -73,6 +73,12 @@ async def _complete_required_tool_arguments(ctx: Any, call_next: Any) -> Any:
     if name not in {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"}:
         return await call_next(ctx)
     arguments = dict(raw_arguments) if isinstance(raw_arguments, Mapping) else {}
+    if name == "agentnavi_history" and not set(arguments) <= {
+        "query", "task_id", "mode", "project_id", "workspace"
+    }:
+        # SDK 参数校验之前把未知字段折叠为一个公开可处理的无效 mode，
+        # 避免 ValidationError 回显原始输入。
+        arguments = {"mode": "__invalid__", "query": None}
     if name != "agentnavi_impact":
         arguments.setdefault("query", None)
     else:
@@ -94,6 +100,8 @@ def create_server(*, home: str | Path | None = None) -> Any:
         CONTEXT_TOOL_RESULT,
         IMPACT_TOOL_RESULT,
         HISTORY_MODE_INPUT,
+        HISTORY_INPUT_SCHEMA,
+        HISTORY_OPTIONAL_TEXT_INPUT,
         HISTORY_TOOL_RESULT,
         OPTIONAL_TEXT_INPUT,
         REQUIRED_TEXT_INPUT,
@@ -307,8 +315,8 @@ def create_server(*, home: str | Path | None = None) -> Any:
     agentnavi_context.__annotations__["return"] = CONTEXT_TOOL_RESULT
     agentnavi_impact.__annotations__["selector"] = REQUIRED_TEXT_INPUT
     agentnavi_impact.__annotations__["return"] = IMPACT_TOOL_RESULT
-    agentnavi_history.__annotations__["query"] = OPTIONAL_TEXT_INPUT
-    agentnavi_history.__annotations__["task_id"] = OPTIONAL_TEXT_INPUT
+    agentnavi_history.__annotations__["query"] = HISTORY_OPTIONAL_TEXT_INPUT
+    agentnavi_history.__annotations__["task_id"] = HISTORY_OPTIONAL_TEXT_INPUT
     agentnavi_history.__annotations__["mode"] = HISTORY_MODE_INPUT
     agentnavi_history.__annotations__["return"] = HISTORY_TOOL_RESULT
     agentnavi_visualize.__annotations__["query"] = OPTIONAL_TEXT_INPUT
@@ -369,6 +377,11 @@ def create_server(*, home: str | Path | None = None) -> Any:
         annotations=context_tool_annotations(),
         structured_output=True,
     )
+
+    history_tool = server._tool_manager.get_tool("agentnavi_history")
+    if history_tool is None:  # pragma: no cover - SDK 注册失败的防御分支
+        raise RuntimeError("agentnavi_history 注册失败")
+    history_tool.parameters = HISTORY_INPUT_SCHEMA
 
     # FastMCP 2.x 从单个函数参数生成扁平 schema，无法表达 query 是否必填取决于
     # view。保留 handler 的公开错误防线，同时用公开 tools/list 合同发布判别联合。

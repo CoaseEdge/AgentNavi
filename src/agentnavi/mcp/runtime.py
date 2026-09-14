@@ -1156,6 +1156,18 @@ class HistoryTargetEntityOutput(TourEntityOutput):
             raise ValueError("history file target requires path")
         if self.kind == "concept" and self.path is not None:
             raise ValueError("history concept target cannot have path")
+        if self.kind == "file" and any(
+            evidence.kind != "repository-file" or evidence.layer != "L1"
+            or evidence.source != self.source or evidence.path != self.path
+            for evidence in self.evidence
+        ):
+            raise ValueError("history file evidence provenance invalid")
+        if self.kind == "concept" and any(
+            evidence.kind != "semantic-node" or evidence.layer != "L2"
+            or evidence.source != self.source or evidence.path is not None
+            for evidence in self.evidence
+        ):
+            raise ValueError("history concept evidence provenance invalid")
         return self
 
 
@@ -1227,6 +1239,15 @@ class HistoryTimelineItemOutput(_ExtensibleModel):
             item.relation.source_id != self.entity.id for item in self.relations
         ):
             raise ValueError("history task provenance invalid")
+        if any(self.task_id not in evidence.summary for evidence in self.evidence):
+            raise ValueError("history task evidence must bind task id")
+        if any(
+            self.task_id not in evidence.summary or item.relation.id not in evidence.summary
+            for item in self.relations for evidence in item.evidence
+        ):
+            raise ValueError("history relation evidence must bind task and edge id")
+        if self.sort_time != (self.closed_at or self.updated_at or self.created_at):
+            raise ValueError("history authoritative sort time mismatch")
         return self
 
 
@@ -1299,7 +1320,11 @@ class HistoryDataOutput(_ExtensibleModel):
 
     @model_validator(mode="after")
     def validate_registry_and_order(self) -> "HistoryDataOutput":
-        keys = [(item.sort_time, item.task_id) for item in self.timeline]
+        from datetime import datetime
+        keys = [
+            (datetime.fromisoformat(item.sort_time[:-1] + "+00:00").timestamp(), item.task_id)
+            for item in self.timeline
+        ]
         if keys != sorted(keys, reverse=True):
             raise ValueError("history timeline order invalid")
         task_by_entity = {item.entity.id: item for item in self.timeline}
@@ -1348,8 +1373,23 @@ class HistoryDataOutput(_ExtensibleModel):
                 for name, values in expected.items()
             ):
                 raise ValueError("history story is not an exact L3 aggregation")
-        if self.task_detail is not None and self.task_detail.entity.id not in task_by_entity:
-            raise ValueError("history task detail must belong to timeline")
+        if [item.task.id for item in self.story] != [item.entity.id for item in self.timeline[:12]]:
+            raise ValueError("history story must uniquely cover the bounded timeline")
+        if len({item.id for item in self.story}) != len(self.story):
+            raise ValueError("history story ids must be unique")
+        for story, timeline in zip(self.story, self.timeline[:12]):
+            if (
+                story.title != timeline.entity.label or story.summary != timeline.summary
+                or story.sort_time != timeline.sort_time
+            ):
+                raise ValueError("history story fields must derive from timeline")
+        if self.task_detail is not None and self.task_detail != task_by_entity.get(self.task_detail.entity.id):
+            raise ValueError("history task detail must equal timeline item")
+        if (
+            self.stats.displayed_tasks != len(self.timeline)
+            or self.stats.displayed_relations != sum(len(item.relations) for item in self.timeline)
+        ):
+            raise ValueError("history stats mismatch")
         return self
 
 
@@ -1401,6 +1441,18 @@ CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
 IMPACT_TOOL_RESULT = Annotated[CallToolResult, ImpactViewOutput]
 HISTORY_TOOL_RESULT = Annotated[CallToolResult, HistoryViewOutput]
 VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
+
+
+class HistoryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str | None = Field(default=None, min_length=1, max_length=4096)
+    task_id: str | None = Field(default=None, min_length=1, max_length=4096)
+    mode: Literal["timeline", "story"] = "timeline"
+    project_id: str | None = Field(default=None, min_length=1, max_length=4096)
+    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
+HISTORY_INPUT_SCHEMA = HistoryInput.model_json_schema()
 
 
 class _VisualizeInputBase(BaseModel):
@@ -1458,6 +1510,18 @@ OPTIONAL_TEXT_INPUT = Annotated[
         }
     ),
 ]
+HISTORY_OPTIONAL_TEXT_INPUT = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 4096},
+                {"type": "null"},
+            ],
+            "default": None,
+        }
+    ),
+]
 HISTORY_MODE_INPUT = Annotated[
     Any,
     WithJsonSchema({"type": "string", "enum": ["timeline", "story"], "default": "timeline"}),
@@ -1479,7 +1543,9 @@ __all__ = [
     "FlowViewOutput",
     "IMPACT_TOOL_RESULT",
     "HISTORY_TOOL_RESULT",
+    "HISTORY_INPUT_SCHEMA",
     "HISTORY_MODE_INPUT",
+    "HISTORY_OPTIONAL_TEXT_INPUT",
     "HistoryViewOutput",
     "ImpactViewOutput",
     "VISUALIZE_TOOL_RESULT",

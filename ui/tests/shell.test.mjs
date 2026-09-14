@@ -185,10 +185,10 @@ function impactFixture() {
 }
 
 function historyFixture() {
-  const taskEvidence = { kind: "task-record", summary: "任务记录", layer: "L3", source: "task-events", confidence: 1 };
-  const relationEvidence = { kind: "task-relation", summary: "修改", layer: "L3", source: "task-events", confidence: 1, path: "src/a.py" };
-  const task = { id: "task:1", kind: "task", label: "修改 A", layer: "L3", source: "task-events", confidence: 1, evidence: [taskEvidence] };
-  const file = { id: "file:a", kind: "file", label: "a.py", path: "src/a.py", layer: "L1", source: "repository", confidence: 1, evidence: [{ kind: "file", summary: "文件", layer: "L1", source: "repository", confidence: 1, path: "src/a.py" }] };
+  const taskEvidence = { kind: "task-record", summary: "任务 task-1：任务记录", layer: "L3", source: "task-events", confidence: 1 };
+  const relationEvidence = { kind: "task-relation", summary: "任务 task-1 的关系 edge:1 记录 modified", layer: "L3", source: "task-events", confidence: 1, path: "src/a.py" };
+  const task = { id: "task:1", kind: "task", label: "修改 A <script>alert(1)</script>", layer: "L3", source: "task-events", confidence: 1, evidence: [taskEvidence] };
+  const file = { id: "file:a", kind: "file", label: "a.py", path: "src/a.py", layer: "L1", source: "repository", confidence: 1, evidence: [{ kind: "repository-file", summary: "文件", layer: "L1", source: "repository", confidence: 1, path: "src/a.py" }] };
   const relation = { id: "edge:1", sourceId: task.id, targetId: file.id, relation: "modified", layer: "L3", source: "task-events", confidence: 1, evidence: [relationEvidence] };
   const timeline = { entity: task, taskId: "task-1", status: "completed", summary: "完成修改", createdAt: "2026-09-15T09:00:00Z", updatedAt: "2026-09-15T10:00:00Z", closedAt: "2026-09-15T10:00:00Z", sortTime: "2026-09-15T10:00:00Z", relations: [{ entity: file, relation, recordedOrder: 1, evidence: [relationEvidence] }], evidence: [taskEvidence] };
   const disclaimer = "按 L3 任务关系聚合展示，不是原始工具调用的无损还原，也不据此推断因果。";

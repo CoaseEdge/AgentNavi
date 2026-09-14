@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project_created ON tasks(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_authoritative_time
+    ON tasks(
+        project_id,
+        julianday(COALESCE(closed_at, updated_at, created_at)) DESC,
+        id DESC
+    );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_key, status);
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -369,6 +375,7 @@ class Database:
             "idx_edges_source_relation", "idx_edges_target_relation",
             "idx_edges_target_provenance",
             "idx_edges_source_semantic_v2", "idx_edges_target_semantic_v2",
+            "idx_tasks_project_authoritative_time",
             *cls._projection_objects(),
         }
 
