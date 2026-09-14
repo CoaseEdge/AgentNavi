@@ -27,29 +27,31 @@ export function applyToolResult(shell: AgentNaviShell, result: ToolResultLike): 
 }
 
 export class AgentNaviAppLifecycle {
-  private receivedToolActivity = false;
+  private toolState: "idle" | "pending" | "completed" = "idle";
 
   constructor(private readonly shell: AgentNaviShell) {}
 
   handleToolInput(toolArguments: unknown): void {
-    this.receivedToolActivity = true;
+    this.toolState = "pending";
     applyToolInput(this.shell, toolArguments);
   }
 
   handleToolResult(result: ToolResultLike): void {
-    this.receivedToolActivity = true;
+    this.toolState = "completed";
     applyToolResult(this.shell, result);
   }
 
   handleConnected(theme: unknown): void {
     this.shell.setTheme(theme);
-    if (!this.receivedToolActivity) {
+    if (this.toolState === "idle") {
       this.shell.setConnection("等待结果", true);
     }
   }
 
   handleConnectionFailure(): void {
-    if (!this.receivedToolActivity) {
+    if (this.toolState === "completed") {
+      this.shell.setConnection("Host 已断开", false);
+    } else {
       this.shell.showError("无法连接 MCP Apps Host。");
     }
   }

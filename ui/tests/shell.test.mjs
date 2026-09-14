@@ -115,12 +115,18 @@ test("connect completion never overwrites tool activity received during handshak
   assert.equal(first.document.documentElement.dataset.theme, "dark");
   renderedLifecycle.handleConnectionFailure();
   assert.equal(first.document.querySelector("#context-map").hidden, false);
+  assert.equal(first.document.querySelector("#connection-label").textContent, "Host 已断开");
+  assert.equal(first.document.querySelector("#connection-state").classList.contains("is-connected"), false);
 
   const second = setup();
   const pendingLifecycle = new AgentNaviAppLifecycle(second.shell);
   pendingLifecycle.handleToolInput({ query: "new task" });
   pendingLifecycle.handleConnected("light");
   assert.equal(second.document.querySelector("#connection-label").textContent, "正在查询");
+  pendingLifecycle.handleConnectionFailure();
+  assert.equal(second.document.querySelector("#context-map").hidden, true);
+  assert.equal(second.document.querySelector("#error-panel").hidden, false);
+  assert.equal(second.document.querySelector("#connection-label").textContent, "查询失败");
 
   const third = setup();
   const idleLifecycle = new AgentNaviAppLifecycle(third.shell);
