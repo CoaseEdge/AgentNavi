@@ -480,7 +480,6 @@ class ImpactViewTestCase(unittest.TestCase):
         now = "2026-09-15T10:00:00+00:00"
         focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
         focus_concept = Database.node_id("fixture", 2, "concept", "focus")
-        dependency_file = Database.node_id("fixture", 1, "file", "src/dependency.py")
         with self.database.connect() as connection:
             connection.executemany(
                 "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -489,17 +488,36 @@ class ImpactViewTestCase(unittest.TestCase):
                  for index in range(5000)],
             )
             connection.executemany(
-                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                [(f"raw-lane-{index}", "fixture", 2, f"raw-concept-{index}", "implemented_by",
-                  focus_file, "{}", .8, "semantic-heuristic", now, now)
+                "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"raw-file-{index}", "fixture", 1, "file", f"raw/{index}.py",
+                  f"{index}.py", "{}", 1.0, "repository", now, now)
                  for index in range(5000)],
             )
             connection.executemany(
-                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                [(f"raw-semantic-{index}", "fixture", 1, focus_concept, f"contains-{index}",
-                  dependency_file, "{}", 1.0, "extractor", now, now)
+                "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"raw-history-{index}", "fixture", 3, "file", f"raw-history-{index}",
+                  f"History {index}", "{}", 1.0, "task-events", now, now)
                  for index in range(5000)],
             )
+            edge_sets = (
+                [(f"raw-lane-{index}", "fixture", 1, f"raw-concept-{index}", "imports",
+                  focus_file, "{}", 1.0, "extractor", now, now) for index in range(5000)],
+                [(f"raw-semantic-{index}", "fixture", 2, focus_concept, "related_to",
+                  f"raw-file-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+                [(f"raw-tested-{index}", "fixture", 2, focus_concept, "tested_by",
+                  f"raw-concept-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+                [(f"raw-anchor-{index}", "fixture", 2, focus_concept, "implemented_by",
+                  f"raw-concept-{index}", "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+                [(f"raw-focus-{index}", "fixture", 2, f"raw-file-{index}", "implemented_by",
+                  focus_file, "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+                [(f"raw-history-edge-{index}", "fixture", 3, f"raw-history-{index}", "modified",
+                  focus_file, "{}", 1.0, "task-events", now, now) for index in range(5000)],
+            )
+            for edges in edge_sets:
+                connection.executemany(
+                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    edges,
+                )
             step_counts = []
             results = []
             statements: list[str] = []
@@ -525,12 +543,12 @@ class ImpactViewTestCase(unittest.TestCase):
             plans = [row for statement in statements if "impact-" in statement
                      for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()]
             connection.commit()
-        self.assertEqual([len(result) for result in results], [0, 0, 0, 0, 32, 0])
+        self.assertEqual([len(result) for result in results], [0, 24, 0, 0, 0, 0])
         self.assertTrue(all(result.raw_truncated for result in results))
         self.assertTrue(all(steps < 2000 for steps in step_counts), step_counts)
         detail = " ".join(str(row[3]).upper() for row in plans)
-        self.assertIn("IDX_EDGES_TARGET_ENDPOINT", detail)
-        self.assertIn("IDX_EDGES_SOURCE_ENDPOINT", detail)
+        self.assertIn("IDX_EDGES_TARGET", detail)
+        self.assertIn("IDX_EDGES_SOURCE", detail)
         self.assertNotIn("TEMP B-TREE", detail)
         concept_data = impact_view_data(self.database, self.project, "Focus")
         file_data = impact_view_data(self.database, self.project, "src/focus.py")
@@ -541,6 +559,65 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertIn("IMPACT_ANCHOR_SCAN_TRUNCATED", codes)
         self.assertIn("IMPACT_FOCUS_CONCEPTS_TRUNCATED", codes)
         self.assertIn("IMPACT_HISTORY_SCAN_TRUNCATED", codes)
+
+    def test_l1_edges_do_not_starve_focus_concepts_or_l3_history(self) -> None:
+        focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
+        with self.database.connect() as connection:
+            for index in range(40):
+                caller = self._add_file(connection, f"src/starvation_caller_{index:02d}.py")
+                Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=caller,
+                                     relation="imports", target_id=focus_file, source="extractor")
+            connection.commit()
+        data = impact_view_data(self.database, self.project, "src/focus.py")
+        self.assertIn("Focus", {item["entity"]["label"] for item in data["focusConcepts"]})
+        self.assertEqual(data["history"][0]["entity"]["label"], "修改 Focus")
+
+    def test_l3_edges_do_not_starve_l1_incoming_and_tests(self) -> None:
+        focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
+        now = "2026-09-15T10:00:00+00:00"
+        with self.database.connect() as connection:
+            for index in range(45):
+                task_id = f"starvation-task-{index}"
+                connection.execute(
+                    "INSERT INTO tasks(id,project_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                    (task_id, "fixture", f"Task {index}", "completed", now, now),
+                )
+                task = Database.upsert_node(connection, project_id="fixture", layer=3, kind="task",
+                                            key=task_id, label=f"Task {index}", source="task-events")
+                Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task,
+                                     relation="modified", target_id=focus_file, source="task-events")
+            connection.commit()
+        data = impact_view_data(self.database, self.project, "src/focus.py")
+        incoming = {item["peer"]["path"] for item in data["incoming"]}
+        self.assertIn("src/caller.py", incoming)
+        self.assertIn("tests/test_focus.py", incoming)
+        self.assertIn("tests/test_focus.py", {item["path"] for item in data["testRecommendations"]})
+
+    def test_l2_semantic_edges_do_not_starve_anchor_mappings(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        with self.database.connect() as connection:
+            for index in range(40):
+                peer = Database.upsert_node(connection, project_id="fixture", layer=2, kind="concept",
+                                            key=f"starvation-peer-{index}", label=f"Peer {index}",
+                                            source="semantic-heuristic", confidence=.8)
+                Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus,
+                                     relation="related_to", target_id=peer,
+                                     source="semantic-heuristic", confidence=.7)
+            connection.commit()
+        data = impact_view_data(self.database, self.project, "Focus")
+        self.assertIn("src/focus.py", {item["entity"]["path"] for item in data["anchorFiles"]})
+
+    def test_new_category_indexes_are_created_for_an_existing_database(self) -> None:
+        names = {"idx_edges_source_relation", "idx_edges_target_relation",
+                 "idx_edges_target_provenance"}
+        with self.database.connect() as connection:
+            for name in names:
+                connection.execute(f"DROP INDEX {name}")
+            connection.commit()
+        ensure_database(self.database.settings)
+        with self.database.connect() as connection:
+            existing = {str(row[1]) for row in connection.execute("PRAGMA index_list(edges)")}
+        self.assertTrue(names <= existing)
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")

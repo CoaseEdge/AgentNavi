@@ -34,19 +34,38 @@ class _BoundedRows(list[sqlite3.Row]):
 
 
 def _raw_edge_window(connection: sqlite3.Connection, project_id: str, *,
-                     endpoint: str, endpoint_id: str, limit: int,
-                     comment: str) -> _BoundedRows:
+                     endpoint: str, endpoint_id: str, layer: int, limit: int,
+                     comment: str, relation: str | None = None,
+                     source: str | None = None) -> _BoundedRows:
     if endpoint not in {"source_id", "target_id"}:
         raise ValueError("unsupported edge endpoint")
-    index = "idx_edges_source_endpoint" if endpoint == "source_id" else "idx_edges_target_endpoint"
+    if relation is not None and source is not None:
+        raise ValueError("raw edge window supports one category discriminator")
+    if relation is not None:
+        index = "idx_edges_source_relation" if endpoint == "source_id" else "idx_edges_target_relation"
+        category_sql, category_values = " AND edge.relation=?", (relation,)
+    elif source is not None:
+        if endpoint != "target_id":
+            raise ValueError("provenance window only supports target endpoint")
+        index = "idx_edges_target_provenance"
+        category_sql, category_values = " AND edge.source=?", (source,)
+    else:
+        index = "idx_edges_source" if endpoint == "source_id" else "idx_edges_target"
+        category_sql, category_values = "", ()
     rows = connection.execute(
         f"""SELECT /* {comment} */ edge.id, edge.rowid AS recorded_order
             FROM edges edge INDEXED BY {index}
-            WHERE edge.project_id=? AND edge.{endpoint}=?
+            WHERE edge.project_id=? AND edge.layer=? AND edge.{endpoint}=?{category_sql}
             ORDER BY edge.rowid DESC LIMIT ?""",
-        (project_id, endpoint_id, limit + 1),
+        (project_id, layer, endpoint_id, *category_values, limit + 1),
     ).fetchall()
     return _BoundedRows(list(rows[:limit]), raw_truncated=len(rows) > limit)
+
+
+def _merge_raw_windows(windows: list[_BoundedRows]) -> _BoundedRows:
+    by_id = {str(row["id"]): row for window in windows for row in window}
+    rows = sorted(by_id.values(), key=lambda row: (-int(row["recorded_order"]), str(row["id"])))
+    return _BoundedRows(rows, raw_truncated=any(window.raw_truncated for window in windows))
 
 
 def _hydrate_in_record_order(raw: _BoundedRows, hydrated: list[sqlite3.Row]) -> _BoundedRows:
@@ -141,7 +160,7 @@ def _lane_rows(connection: sqlite3.Connection, project_id: str,
                anchor_id: str, direction: str) -> list[sqlite3.Row]:
     endpoint = "target_id" if direction == "incoming" else "source_id"
     raw = _raw_edge_window(connection, project_id, endpoint=endpoint, endpoint_id=anchor_id,
-                           limit=IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT,
+                           layer=1, limit=IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT,
                            comment=f"impact-physical-lane impact-lane-{direction}-raw")
     if not raw:
         return raw
@@ -167,8 +186,8 @@ def _lane_rows(connection: sqlite3.Connection, project_id: str,
 def _history_rows(connection: sqlite3.Connection, project_id: str,
                   target_id: str) -> list[sqlite3.Row]:
     raw = _raw_edge_window(connection, project_id, endpoint="target_id", endpoint_id=target_id,
-                           limit=IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT,
-                           comment="impact-history-raw")
+                           layer=3, limit=IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT,
+                           comment="impact-history-raw", source="task-events")
     if not raw:
         return raw
     marks = ",".join("?" for _ in raw)
@@ -192,7 +211,7 @@ def _semantic_rows(connection: sqlite3.Connection, project_id: str,
                    concept_id: str, direction: str) -> list[sqlite3.Row]:
     endpoint = "source_id" if direction == "outgoing" else "target_id"
     raw = _raw_edge_window(connection, project_id, endpoint=endpoint, endpoint_id=concept_id,
-                           limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
+                           layer=2, limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
                            comment=f"impact-semantic-{direction}-raw")
     if not raw:
         return raw
@@ -215,8 +234,8 @@ def _semantic_rows(connection: sqlite3.Connection, project_id: str,
 def _tested_by_rows(connection: sqlite3.Connection, project_id: str,
                     concept_id: str) -> list[sqlite3.Row]:
     raw = _raw_edge_window(connection, project_id, endpoint="source_id", endpoint_id=concept_id,
-                           limit=IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT,
-                           comment="impact-tested-by-raw")
+                           layer=2, limit=IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT,
+                           comment="impact-tested-by-raw", relation="tested_by")
     if not raw:
         return raw
     marks = ",".join("?" for _ in raw)
@@ -235,8 +254,12 @@ def _tested_by_rows(connection: sqlite3.Connection, project_id: str,
 
 def _anchor_mapping_rows(connection: sqlite3.Connection, project_id: str,
                          concept_id: str) -> list[sqlite3.Row]:
-    raw = _raw_edge_window(connection, project_id, endpoint="source_id", endpoint_id=concept_id,
-                           limit=IMPACT_ANCHOR_SCAN_LIMIT, comment="impact-anchor-mappings-raw")
+    raw = _merge_raw_windows([
+        _raw_edge_window(connection, project_id, endpoint="source_id", endpoint_id=concept_id,
+                         layer=2, limit=IMPACT_ANCHOR_SCAN_LIMIT,
+                         comment=f"impact-anchor-{relation}-raw", relation=relation)
+        for relation in ("implemented_by", "configured_by")
+    ])
     if not raw:
         return raw
     marks = ",".join("?" for _ in raw)
@@ -256,8 +279,12 @@ def _anchor_mapping_rows(connection: sqlite3.Connection, project_id: str,
 
 def _focus_concept_rows(connection: sqlite3.Connection, project_id: str,
                         file_id: str) -> list[sqlite3.Row]:
-    raw = _raw_edge_window(connection, project_id, endpoint="target_id", endpoint_id=file_id,
-                           limit=32, comment="impact-focus-concepts-raw")
+    raw = _merge_raw_windows([
+        _raw_edge_window(connection, project_id, endpoint="target_id", endpoint_id=file_id,
+                         layer=2, limit=32, comment=f"impact-focus-{relation}-raw",
+                         relation=relation)
+        for relation in ("implemented_by", "configured_by", "tested_by")
+    ])
     if not raw:
         return raw
     marks = ",".join("?" for _ in raw)
