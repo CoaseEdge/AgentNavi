@@ -54,6 +54,46 @@ class CliContractTestCase(unittest.TestCase):
         self.assertRegex(engine_commit, re.compile(r"^[0-9a-f]{40}$"))
         self.assertIn(engine_commit, workflow_path.read_text(encoding="utf-8"))
 
+    def test_repository_governance_covers_all_product_source_and_test_trees(self) -> None:
+        config = json.loads(
+            (self.root / ".repo-governance.json").read_text(encoding="utf-8")
+        )
+        categories = config["testCategories"]
+        mappings = config["changeCategoryMappings"]
+
+        self.assertIn("tests/test_*.py", categories["integration"])
+        self.assertIn(
+            "integrations/deepseek-harness/test/**",
+            categories["command-contract"],
+        )
+        for path in ("ui/test/**", "ui/tests/**"):
+            self.assertIn(path, categories["unit"])
+
+        product_sources = {
+            "src/**",
+            "integrations/deepseek-harness/src/**",
+            "ui/src/**",
+        }
+        self.assertTrue(product_sources.issubset(mappings["source"]))
+        high_impact_sources = {
+            path
+            for mapping in config["highImpactMappings"]
+            for path in mapping["businessPaths"]
+        }
+        self.assertTrue(product_sources.issubset(high_impact_sources))
+
+        non_python_tests = {
+            "integrations/deepseek-harness/test/**",
+            "ui/test/**",
+            "ui/tests/**",
+        }
+        self.assertTrue(non_python_tests.issubset(mappings["tests"]))
+        package_manifests = {
+            "integrations/deepseek-harness/package*.json",
+            "ui/package*.json",
+        }
+        self.assertTrue(package_manifests.issubset(mappings["dependencies"]))
+
 
 if __name__ == "__main__":
     unittest.main()
