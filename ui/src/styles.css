@@ -521,6 +521,81 @@ h1 {
   letter-spacing: 0.04em;
 }
 
+.file-explain-trigger {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: 7px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: 11px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+  cursor: pointer;
+}
+
+.file-explain-trigger[aria-expanded="true"] {
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 14%, var(--panel));
+}
+
+.file-explanation {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.file-explanation p,
+.context-evidence,
+.context-chains {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.file-why {
+  margin: 0;
+  font-weight: 600;
+}
+
+.context-evidence,
+.context-chains {
+  margin: 8px 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.context-actions button {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.context-actions button[aria-pressed="true"] {
+  border-color: var(--green);
+  background: var(--green);
+  color: #08110c;
+}
+
+.context-action-summary,
+.context-next-step {
+  margin: 8px 0 0;
+}
+
+.context-next-step {
+  color: var(--muted);
+}
+
 .concept-file-links code {
   font-size: 11px;
 }

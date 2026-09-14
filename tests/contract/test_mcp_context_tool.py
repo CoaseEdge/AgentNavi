@@ -175,8 +175,43 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             result.structured_content["data"]["files"][0]["path"],
             "src/membership.py",
         )
+        reading = result.structured_content["data"]["navigation"]["readingOrder"]
+        self.assertEqual(reading[0]["path"], "src/membership.py")
+        self.assertTrue(reading[0]["why"])
+        self.assertTrue(reading[0]["evidence"])
+        self.assertEqual(reading[0]["nextStep"], None)
+        self.assertEqual(
+            [action["label"] for action in reading[0]["actions"]],
+            ["它做什么", "为什么相关", "谁依赖它", "过去谁改过", "如果改它"],
+        )
         self.assertIn("会员", result.content[0].text)
         self.assertIn("src/membership.py", result.content[0].text)
+        self.assertIn("Why：", result.content[0].text)
+        self.assertIn("Evidence：", result.content[0].text)
+        self.assertIn("Next Step：", result.content[0].text)
+
+    def test_context_navigation_adapter_failure_is_public_and_sanitized(self) -> None:
+        from agentnavi.query import context_data
+
+        self._add_project()
+        with self.database.connect() as connection:
+            project = connection.execute(
+                "SELECT * FROM projects WHERE id='fixture'"
+            ).fetchone()
+        assert project is not None
+        bad_core = context_data(self.database, project, "会员")
+        private_message = f"bad endpoint at {self.database.settings.database_path}"
+        chain = bad_core["navigation"]["readingOrder"][0]["chains"][0]
+        chain["fileRelation"]["targetId"] = private_message
+        with patch("agentnavi.query.context_data", return_value=bad_core):
+            result = asyncio.run(
+                self._call({"query": "会员", "project_id": "fixture"})
+            )
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+        wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+        self.assertNotIn(private_message, wire)
+        self.assertNotIn(str(self.database.settings.database_path), wire)
 
     def test_visualize_tool_returns_repository_overview_without_query(self) -> None:
         self._add_project()
@@ -561,6 +596,12 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         payload = result.structured_content
         ContextViewOutput.model_validate(payload)
         VisualizeViewOutput.model_validate(payload)
+        invalid_context = json.loads(json.dumps(payload))
+        invalid_context["data"]["navigation"]["readingOrder"][0]["chains"][0][
+            "fileRelation"
+        ]["targetId"] = "wrong-file"
+        with self.assertRaises(ValidationError):
+            ContextViewOutput.model_validate(invalid_context)
 
         overview = asyncio.run(
             self._call(

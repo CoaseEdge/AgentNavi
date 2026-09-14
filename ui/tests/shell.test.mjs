@@ -12,6 +12,30 @@ import { AgentNaviShell } from "../.test-dist/src/shell.js";
 
 const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 
+function contextNavigationFixture() {
+  const evidence = { kind: "mapping", summary: "真实映射 <script>alert(1)</script>", layer: "L2", source: "semantic-heuristic", confidence: 0.8, path: "src/membership.py" };
+  const sourceConcept = { id: "concept:membership", kind: "concept", label: "会员 <img onerror=alert(1)>", layer: "L2", source: "semantic-heuristic", confidence: 0.9, evidence: [evidence] };
+  const file = { id: "file:membership", kind: "file", label: "membership.py", path: "src/membership.py", layer: "L1", source: "repository", confidence: 1, evidence: [{ ...evidence, layer: "L1", source: "repository-index" }] };
+  const fileRelation = { id: "edge:mapping", sourceId: sourceConcept.id, targetId: file.id, relation: "implemented_by", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] };
+  const labels = ["它做什么", "为什么相关", "谁依赖它", "过去谁改过", "如果改它"];
+  const kinds = ["purpose", "relevance", "dependents", "history", "impact"];
+  return {
+    revision: "context-navigation-fixture",
+    readingOrder: [{
+      position: 1,
+      path: "src/membership.py",
+      language: "python",
+      why: "会员概念通过 implemented_by 关联此文件。",
+      evidence: [evidence],
+      nextStep: null,
+      chains: [{ sourceConcept, conceptRelation: null, relatedConcept: null, fileRelation, file, evidence: [evidence] }],
+      actions: kinds.map((kind, index) => ({ kind, label: labels[index], summary: `${labels[index]} 说明 <script>alert(1)</script>`, evidence: [evidence] })),
+      dependents: [],
+      history: [],
+    }],
+  };
+}
+
 function fixture() {
   return {
     schemaVersion: "agentnavi.vla.v1",
@@ -32,6 +56,7 @@ function fixture() {
         },
       ],
       files: [{ path: "src/membership.py", relation: "matched", language: "python" }],
+      navigation: contextNavigationFixture(),
     },
     warnings: [{ code: "SOURCE_PARTIAL", message: "索引不完整" }],
   };
@@ -168,6 +193,20 @@ test("bridge renders a successful result as text and preserves concept-file evid
   assert.equal(document.querySelector(".concept-file-links .relation-label").textContent, "implemented_by");
   assert.equal(document.querySelector(".concept-file-links code").textContent, "src/membership.py");
   assert.match(document.querySelector(".file-node .node-meta").textContent, /^候选 · matched/);
+  const explain = document.querySelector(".file-explain-trigger");
+  assert.equal(explain.getAttribute("aria-expanded"), "false");
+  explain.click();
+  assert.equal(explain.getAttribute("aria-expanded"), "true");
+  assert.match(document.querySelector(".file-why").textContent, /Why/);
+  assert.match(document.querySelector(".context-chains").textContent, /implemented_by/);
+  assert.equal(document.querySelector(".file-explanation script"), null);
+  const impact = [...document.querySelectorAll(".context-actions button")].find(
+    (button) => button.textContent === "如果改它",
+  );
+  impact.click();
+  assert.equal(impact.getAttribute("aria-pressed"), "true");
+  assert.equal(document.querySelector(".context-action-summary").textContent, "[内容含路径，已隐藏]");
+  assert.match(document.querySelector(".context-next-step").textContent, /Next Step/);
   assert.equal(document.querySelector("#connection-label").textContent, "已连接");
 });
 

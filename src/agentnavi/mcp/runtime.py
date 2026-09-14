@@ -67,11 +67,126 @@ class ContextTaskOutput(_ExtensibleModel):
     created_at: str
 
 
+class ContextEvidenceOutput(_ExtensibleModel):
+    kind: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    layer: Literal["L1", "L2", "L3"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    path: str | None = None
+    line_start: int | None = Field(default=None, alias="lineStart", ge=1)
+    line_end: int | None = Field(default=None, alias="lineEnd", ge=1)
+
+
+class ContextConceptEntityOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    kind: Literal["concept"]
+    label: str = Field(min_length=1)
+    layer: Literal["L2"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1)
+
+
+class ContextFileEntityOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    kind: Literal["file"]
+    label: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    layer: Literal["L1"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1)
+
+
+class ContextRelationOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    source_id: str = Field(alias="sourceId", min_length=1)
+    target_id: str = Field(alias="targetId", min_length=1)
+    relation: str = Field(min_length=1)
+    layer: Literal["L2"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1)
+
+
+class ContextChainOutput(_ExtensibleModel):
+    source_concept: ContextConceptEntityOutput = Field(alias="sourceConcept")
+    concept_relation: ContextRelationOutput | None = Field(alias="conceptRelation")
+    related_concept: ContextConceptEntityOutput | None = Field(alias="relatedConcept")
+    file_relation: ContextRelationOutput = Field(alias="fileRelation")
+    file: ContextFileEntityOutput
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_chain(self) -> "ContextChainOutput":
+        if (self.related_concept is None) != (self.concept_relation is None):
+            raise ValueError("concept relation and entity must be paired")
+        if self.file_relation.target_id != self.file.id:
+            raise ValueError("file relation target mismatch")
+        if self.related_concept is None:
+            if self.file_relation.source_id != self.source_concept.id:
+                raise ValueError("direct file relation source mismatch")
+        else:
+            assert self.concept_relation is not None
+            if {
+                self.concept_relation.source_id, self.concept_relation.target_id
+            } != {self.source_concept.id, self.related_concept.id}:
+                raise ValueError("concept relation endpoint mismatch")
+            if self.file_relation.source_id != self.related_concept.id:
+                raise ValueError("one-hop file relation source mismatch")
+        return self
+
+
+class ContextActionOutput(_ExtensibleModel):
+    kind: Literal["purpose", "relevance", "dependents", "history", "impact"]
+    label: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    evidence: list[ContextEvidenceOutput] = Field(max_length=3)
+
+
+class ContextDependentOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    relation: str = Field(min_length=1)
+
+
+class ContextHistoryOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    created_at: str = Field(alias="createdAt", min_length=1)
+    relation: str = Field(min_length=1)
+
+
+class ContextNextStepOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class ContextReadingOutput(_ExtensibleModel):
+    position: int = Field(ge=1, le=12)
+    path: str = Field(min_length=1)
+    language: str = Field(min_length=1)
+    why: str = Field(min_length=1)
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1, max_length=3)
+    next_step: ContextNextStepOutput | None = Field(alias="nextStep")
+    chains: list[ContextChainOutput] = Field(min_length=1, max_length=3)
+    actions: list[ContextActionOutput] = Field(min_length=5, max_length=5)
+    dependents: list[ContextDependentOutput] = Field(max_length=4)
+    history: list[ContextHistoryOutput] = Field(max_length=3)
+
+
+class ContextNavigationOutput(_ExtensibleModel):
+    revision: str = Field(min_length=1)
+    reading_order: list[ContextReadingOutput] = Field(alias="readingOrder", max_length=12)
+
+
 class ContextDataOutput(_ExtensibleModel):
     stats: ContextStatsOutput
     concepts: list[ContextConceptOutput]
     files: list[ContextFileOutput]
     tasks: list[ContextTaskOutput]
+    navigation: ContextNavigationOutput
 
 
 class WarningOutput(_ExtensibleModel):
@@ -162,6 +277,7 @@ def _context_error_placeholder() -> dict[str, Any]:
             "concepts": [],
             "files": [],
             "tasks": [],
+            "navigation": {"revision": "error", "readingOrder": []},
         },
         "warnings": [],
     }

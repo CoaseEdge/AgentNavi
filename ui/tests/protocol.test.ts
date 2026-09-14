@@ -15,6 +15,30 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+function contextNavigationFixture() {
+  const evidence = { kind: "mapping", summary: "真实概念映射", layer: "L2", source: "semantic-heuristic", confidence: 0.8, path: "src/membership.py" };
+  const sourceConcept = { id: "concept:membership", kind: "concept", label: "会员", layer: "L2", source: "semantic-heuristic", confidence: 0.9, evidence: [evidence] };
+  const file = { id: "file:membership", kind: "file", label: "membership.py", path: "src/membership.py", layer: "L1", source: "repository", confidence: 1, evidence: [{ ...evidence, layer: "L1", source: "repository-index" }] };
+  const fileRelation = { id: "edge:mapping", sourceId: sourceConcept.id, targetId: file.id, relation: "implemented_by", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] };
+  const labels = ["它做什么", "为什么相关", "谁依赖它", "过去谁改过", "如果改它"];
+  const kinds = ["purpose", "relevance", "dependents", "history", "impact"];
+  return {
+    revision: "context-navigation-fixture",
+    readingOrder: [{
+      position: 1,
+      path: "src/membership.py",
+      language: "python",
+      why: "会员概念通过 implemented_by 关联此文件。",
+      evidence: [evidence],
+      nextStep: null,
+      chains: [{ sourceConcept, conceptRelation: null, relatedConcept: null, fileRelation, file, evidence: [evidence] }],
+      actions: kinds.map((kind, index) => ({ kind, label: labels[index], summary: `${labels[index]} 的可追溯说明`, evidence: [evidence] })),
+      dependents: [],
+      history: [],
+    }],
+  };
+}
+
 const fixture = {
   schemaVersion: "agentnavi.vla.v1",
   view: "context",
@@ -32,6 +56,7 @@ const fixture = {
       },
     ],
     files: [{ path: "src/membership.py", relation: "implemented_by", language: "python" }],
+    navigation: contextNavigationFixture(),
   },
   warnings: [{ code: "SOURCE_PARTIAL", message: "索引不完整" }],
 };
@@ -46,7 +71,13 @@ assert(parseContextView({ ...fixture, schemaVersion: "future" }) === undefined, 
 assert(parseContextView({ ...fixture, view: "repo-overview" }) === undefined, "Context parser 应拒绝其他视图");
 const unsafe = structuredClone(fixture);
 unsafe.data.files[0]!.path = "/private/project.py";
-assert(parseContextView(unsafe)?.data.files.length === 0, "应丢弃绝对路径");
+assert(parseContextView(unsafe) === undefined, "应拒绝候选与导航不一致的绝对路径");
+const wrongNavigationEndpoint = structuredClone(fixture);
+wrongNavigationEndpoint.data.navigation.readingOrder[0]!.chains[0]!.fileRelation.targetId = "other-file";
+assert(parseContextView(wrongNavigationEndpoint) === undefined, "应拒绝虚构的 Context chain endpoint");
+const expandedDependent = structuredClone(fixture) as any;
+expandedDependent.data.navigation.readingOrder[0]!.dependents = [{ path: "src/not-a-candidate.py", relation: "imports" }];
+assert(parseContextView(expandedDependent) === undefined, "dependent 不得扩大 Context 候选集");
 
 const rejectedPaths = [
   "/private/file.py",
