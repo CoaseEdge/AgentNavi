@@ -86,6 +86,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         CONTEXT_TOOL_RESULT,
         OPTIONAL_TEXT_INPUT,
         REQUIRED_TEXT_INPUT,
+        VISUALIZE_TOOL_RESULT,
         VISUALIZE_VIEW_INPUT,
         context_tool_annotations,
     )
@@ -185,10 +186,11 @@ def create_server(*, home: str | Path | None = None) -> Any:
     for tool in (agentnavi_context, agentnavi_visualize):
         tool.__annotations__["project_id"] = OPTIONAL_TEXT_INPUT
         tool.__annotations__["workspace"] = OPTIONAL_TEXT_INPUT
-        tool.__annotations__["return"] = CONTEXT_TOOL_RESULT
     agentnavi_context.__annotations__["query"] = REQUIRED_TEXT_INPUT
+    agentnavi_context.__annotations__["return"] = CONTEXT_TOOL_RESULT
     agentnavi_visualize.__annotations__["query"] = OPTIONAL_TEXT_INPUT
     agentnavi_visualize.__annotations__["view"] = VISUALIZE_VIEW_INPUT
+    agentnavi_visualize.__annotations__["return"] = VISUALIZE_TOOL_RESULT
 
     apps = Apps()
     apps.add_html_resource(

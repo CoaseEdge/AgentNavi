@@ -77,6 +77,9 @@ for (const query of [
   String.raw`fix C:\Users\alice\file.py`,
   String.raw`fix \\server\share\file.py`,
   "inspect file:///private/file.py",
+  "inspect file:/private/file.py",
+  "inspect vscode://file/private/file.py",
+  "inspect vscode-insiders://file/private/file.py",
 ]) {
   assert(parseTaskQuery({ query }) === "[查询含路径，已隐藏]", "路径型 query 不应回显");
 }
@@ -101,13 +104,13 @@ const overviewFixture = {
       evidence: [{ kind: "document", summary: "项目说明", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 }],
     },
     need: {
-      problem: { summary: "重复搜索", evidence: [] },
-      solution: { summary: "证据导航", evidence: [] },
+      problem: { summary: "重复搜索", evidence: [{ kind: "document", summary: "问题", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 8 }] },
+      solution: { summary: "证据导航", evidence: [{ kind: "document", summary: "方案", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 12 }] },
     },
     workflow: Array.from({ length: 7 }, (_, index) => ({
       step: index + 1,
-      title: `步骤 ${index + 1}`,
-      detail: `步骤 ${index + 1}`,
+      title: `动作 ${index + 1}`,
+      detail: `动作 ${index + 1} 的说明`,
       evidence: [{ kind: "document", summary: "流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md", lineStart: index + 3 }],
     })),
     modules: [{ id: "concept:core", name: "Core", summary: "核心模块", paths: ["src/core.py"], layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [] }],
@@ -126,10 +129,36 @@ assert(parseRequestedView({ view: "repo-overview" }) === "repo-overview", "应�
 const unsafeOverview = structuredClone(overviewFixture);
 unsafeOverview.data.purpose.summary = "secret at /private/project";
 unsafeOverview.data.purpose.evidence[0]!.path = "../outside.md";
+unsafeOverview.data.need.problem.evidence[0]!.path = "vscode://file/private/problem.md";
+unsafeOverview.data.need.solution.evidence[0]!.path = "file:/private/solution.md";
 unsafeOverview.data.modules[0]!.paths = ["file:///private/source.py"];
 const sanitizedOverview = parseRepositoryOverviewView(unsafeOverview);
 assert(sanitizedOverview?.data.purpose.summary === "[内容含路径，已隐藏]", "应隐藏递归文本路径");
 assert(sanitizedOverview?.data.purpose.evidence.length === 0, "应丢弃不规范 Evidence 路径");
+assert(sanitizedOverview?.data.need.problem.evidence.length === 0, "应过滤问题中的本地 URI Evidence");
+assert(sanitizedOverview?.data.need.solution.evidence.length === 0, "应过滤方案中的本地 URI Evidence");
 assert(sanitizedOverview?.data.modules[0]?.paths.length === 0, "应丢弃模块中的不规范路径");
+
+const eightSteps = structuredClone(overviewFixture.data.workflow);
+eightSteps.push({ ...eightSteps[0]!, step: 8 });
+const duplicateSteps = overviewFixture.data.workflow.map((step, index) => ({
+  ...step,
+  step: index === 4 ? 4 : step.step,
+}));
+for (const invalidWorkflow of [
+  overviewFixture.data.workflow.slice(0, 4),
+  eightSteps,
+  duplicateSteps,
+]) {
+  const candidate = structuredClone(overviewFixture);
+  candidate.data.workflow = structuredClone(invalidWorkflow);
+  const parsed = parseRepositoryOverviewView(candidate);
+  assert(parsed?.data.workflow.length === 0, "非法 workflow 不应展示成 5–7 步主流程");
+  assert(parsed?.warnings.some((warning) => warning.code === "WORKFLOW_SHAPE_INVALID"), "非法 workflow 应返回明确提示");
+}
+
+const emptyWorkflow = structuredClone(overviewFixture);
+emptyWorkflow.data.workflow = [];
+assert(parseRepositoryOverviewView(emptyWorkflow)?.data.workflow.length === 0, "空 workflow 是合法的证据不足状态");
 
 console.log("protocol unit checks passed");

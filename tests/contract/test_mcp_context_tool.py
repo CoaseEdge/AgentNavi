@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import tempfile
@@ -114,6 +115,20 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                     label=Path(path).name,
                     data={"language": "markdown"},
                     source="repository",
+                )
+                absolute = self.project_root / path
+                stat = absolute.stat()
+                connection.execute(
+                    """INSERT INTO file_state(
+                           project_id, path, mtime_ns, size, digest, updated_at
+                       ) VALUES ('fixture', ?, ?, ?, ?, ?)""",
+                    (
+                        path,
+                        stat.st_mtime_ns,
+                        stat.st_size,
+                        hashlib.blake2s(absolute.read_bytes()).hexdigest(),
+                        utc_now(),
+                    ),
                 )
             connection.commit()
 
@@ -243,6 +258,9 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             r"C:\\Users\\alice\\windows-secret.py",
             r"\\server\share\unc-secret.py",
             "file:///Users/alice/url-secret.py",
+            "file:/Users/alice/short-url-secret.py",
+            "vscode://file/Users/alice/editor-secret.py",
+            "vscode-insiders://file/Users/alice/insiders-secret.py",
         )
         cases = (
             ("agentnavi_context", None, "query"),
@@ -258,7 +276,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             ),
             (
                 "agentnavi_context",
-                {"project_id": private_tokens[3]},
+                {"project_id": private_tokens[4]},
                 "query",
             ),
             (
@@ -315,7 +333,11 @@ class MCPContextToolContractTestCase(unittest.TestCase):
     def test_runtime_schema_rejects_invalid_success_envelopes(self) -> None:
         from pydantic import ValidationError
 
-        from agentnavi.mcp.runtime import ContextViewOutput
+        from agentnavi.mcp.runtime import (
+            ContextViewOutput,
+            RepositoryOverviewViewOutput,
+            VisualizeViewOutput,
+        )
 
         self._add_project()
         result = asyncio.run(
@@ -323,6 +345,18 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         )
         payload = result.structured_content
         ContextViewOutput.model_validate(payload)
+        VisualizeViewOutput.model_validate(payload)
+
+        overview = asyncio.run(
+            self._call(
+                {"view": "repo-overview", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        ).structured_content
+        RepositoryOverviewViewOutput.model_validate(overview)
+        VisualizeViewOutput.model_validate(overview)
+        with self.assertRaises(ValidationError):
+            ContextViewOutput.model_validate(overview)
 
         invalid_payloads = []
         for field, value in (
@@ -370,6 +404,9 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             f"fix {self.project_root}/secret.py now",
             r"fix C:\\Users\\alice\\secret.py now",
             "inspect file:///Users/alice/secret.py",
+            "inspect file:/Users/alice/secret.py",
+            "inspect vscode://file/Users/alice/secret.py",
+            "inspect vscode-insiders://file/Users/alice/secret.py",
         )
         for query in cases:
             with self.subTest(query=query):

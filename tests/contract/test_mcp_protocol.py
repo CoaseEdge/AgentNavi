@@ -137,6 +137,9 @@ class VLAProtocolContractTests(unittest.TestCase):
             "C:/project/README.md",
             "//server/share/README.md",
             "file:///private/project/README.md",
+            "file:/private/project/README.md",
+            "vscode://file/private/project/README.md",
+            "vscode-insiders://file/private/project/README.md",
             "../README.md",
             "docs\\README.md",
             "./docs/README.md",
@@ -232,6 +235,15 @@ class VLAProtocolContractTests(unittest.TestCase):
                 message="内部错误",
                 details={"note": "位置 file:///private/repo"},
             ),
+            lambda: Warning(
+                code="PATH_LEAK",
+                message="编辑器位置 vscode://file/private/repo",
+            ),
+            lambda: Warning(
+                code="PATH_LEAK",
+                message="编辑器位置 vscode-insiders://file/private/repo",
+            ),
+            lambda: Warning(code="PATH_LEAK", message="位置 file:/private/repo"),
             lambda: Project(
                 id="agentnavi",
                 name="AgentNavi",
@@ -248,6 +260,8 @@ class VLAProtocolContractTests(unittest.TestCase):
         private_keys = (
             "/private/project/file.py",
             "file:///private/project/file.py",
+            "file:/private/project/file.py",
+            "vscode://file/private/project/file.py",
             "C:\\private\\project\\file.py",
             "\\\\server\\private\\file.py",
         )

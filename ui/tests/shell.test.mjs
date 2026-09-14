@@ -49,13 +49,13 @@ function overviewFixture() {
         evidence: [{ kind: "document", summary: "说明", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 4 }],
       },
       need: {
-        problem: { summary: "重复搜索", evidence: [] },
-        solution: { summary: "证据导航", evidence: [] },
+        problem: { summary: "重复搜索", evidence: [{ kind: "document", summary: "问题", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 8 }] },
+        solution: { summary: "证据导航", evidence: [{ kind: "document", summary: "方案", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 12 }] },
       },
       workflow: Array.from({ length: 7 }, (_, index) => ({
         step: index + 1,
-        title: `步骤 ${index + 1}`,
-        detail: `步骤 ${index + 1}`,
+        title: `动作 ${index + 1}`,
+        detail: `动作 ${index + 1} 的说明`,
         evidence: [{ kind: "document", summary: "流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md", lineStart: index + 3 }],
       })),
       modules: [{ id: "core", name: "Core", summary: "核心模块", paths: ["src/core.py"], layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [] }],
@@ -104,12 +104,18 @@ test("renderer registry shows repository overview with safe DOM and evidence", (
   assert.equal(document.querySelector("#overview-purpose script"), null);
   assert.equal(document.querySelector("#overview-purpose").textContent, "[内容含路径，已隐藏]");
   assert.equal(document.querySelector("#purpose-evidence").textContent, "证据 · README.md:4");
+  assert.equal(document.querySelector("#problem-evidence").textContent, "证据 · README.md:8");
+  assert.equal(document.querySelector("#solution-evidence").textContent, "证据 · README.md:12");
+  assert.match(document.querySelector("#overview-workflow li strong").textContent, /01 · 动作 1/);
+  assert.equal(document.querySelector("#overview-workflow li p").textContent, "动作 1 的说明");
   assert.match(document.querySelector("#overview-reading-order").textContent, /README\.md/);
   assert.equal(document.querySelector("#connection-label").textContent, "已连接");
 
   applyToolResult(shell, { structuredContent: fixture() });
   assert.equal(document.querySelector("#repository-view").hidden, true);
   assert.equal(document.querySelector("#overview-workflow").children.length, 0);
+  assert.equal(document.querySelector("#problem-evidence").textContent, "");
+  assert.equal(document.querySelector("#solution-evidence").textContent, "");
   assert.equal(document.querySelector("#context-map").hidden, false);
 });
 
@@ -211,4 +217,19 @@ test("every displayed non-path string hides local path tokens recursively", () =
   }
   assert.match(visible, /\[内容含路径，已隐藏\]/);
   assert.match(visible, /https:\/\/example\.com\/api\/users/);
+});
+
+test("overview hides invalid why evidence and reports malformed workflow", () => {
+  const { document, shell } = setup();
+  const malicious = overviewFixture();
+  malicious.data.need.problem.evidence[0].path = "vscode://file/private/problem.md";
+  malicious.data.need.solution.evidence[0].path = "file:/private/solution.md";
+  malicious.data.workflow[4].step = 4;
+
+  applyToolResult(shell, { structuredContent: malicious });
+
+  assert.equal(document.querySelector("#problem-evidence").textContent, "");
+  assert.equal(document.querySelector("#solution-evidence").textContent, "");
+  assert.equal(document.querySelector("#overview-workflow").children.length, 0);
+  assert.match(document.querySelector("#warning-list").textContent, /WORKFLOW_SHAPE_INVALID/);
 });

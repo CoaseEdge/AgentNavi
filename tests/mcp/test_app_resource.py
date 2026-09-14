@@ -85,8 +85,15 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
                 ["context", "repo-overview"],
             )
             self.assertEqual(
-                tools["agentnavi_visualize"].output_schema,
-                tools["agentnavi_context"].output_schema,
+                tools["agentnavi_context"].output_schema["properties"]["view"]["const"],
+                "context",
+            )
+            self.assertEqual(
+                tools["agentnavi_visualize"].output_schema["anyOf"],
+                [
+                    {"$ref": "#/$defs/ContextViewOutput"},
+                    {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                ],
             )
 
             fallback = await client.call_tool(

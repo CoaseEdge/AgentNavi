@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from mcp.types import CallToolResult, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, WithJsonSchema, model_validator
 
 from .protocol import SCHEMA_VERSION
 
@@ -131,8 +131,44 @@ class RepositoryOverviewDataOutput(_ExtensibleModel):
     stats: OverviewStatsOutput
 
 
-class AgentNaviViewOutput(_ExtensibleModel):
-    """用于 SDK tool discovery 的成功 VLA envelope schema。
+_PUBLIC_ERROR_CODES = {
+    "PROJECT_REQUIRED",
+    "PROJECT_NOT_FOUND",
+    "INVALID_ARGUMENT",
+    "INTERNAL_ERROR",
+}
+
+
+def _is_public_error(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and "schemaVersion" not in value
+        and set(value) == {"code", "message", "retryable", "details"}
+        and value.get("code") in _PUBLIC_ERROR_CODES
+        and isinstance(value.get("message"), str)
+        and isinstance(value.get("retryable"), bool)
+        and isinstance(value.get("details"), Mapping)
+    )
+
+
+def _context_error_placeholder() -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "view": "context",
+        "project": {"id": "error", "name": "error", "kind": "internal"},
+        "sourceState": {"status": "partial"},
+        "data": {
+            "stats": {"files": 0, "concepts": 0, "tasks": 0},
+            "concepts": [],
+            "files": [],
+            "tasks": [],
+        },
+        "warnings": [],
+    }
+
+
+class ContextViewOutput(_ExtensibleModel):
+    """reasoning tool 专用的 Context 成功 schema。
 
     S01 的标准库 DTO 仍是 wire 真相与严格隐私边界；此模型只把同一顶层合同
     暴露给 MCP SDK。SDK 2.0 会错误地对 ``isError`` 结果也执行成功 schema
@@ -141,61 +177,73 @@ class AgentNaviViewOutput(_ExtensibleModel):
     """
 
     schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
-    view: Literal["context", "repo-overview"]
+    view: Literal["context"]
     project: ProjectOutput
     source_state: SourceStateOutput = Field(alias="sourceState")
-    data: ContextDataOutput | RepositoryOverviewDataOutput
+    data: ContextDataOutput
     warnings: list[WarningOutput]
 
     @model_validator(mode="before")
     @classmethod
     def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
-        if (
-            isinstance(value, Mapping)
-            and "schemaVersion" not in value
-            and set(value) == {"code", "message", "retryable", "details"}
-            and value.get("code")
-            in {
-                "PROJECT_REQUIRED",
-                "PROJECT_NOT_FOUND",
-                "INVALID_ARGUMENT",
-                "INTERNAL_ERROR",
-            }
-            and isinstance(value.get("message"), str)
-            and isinstance(value.get("retryable"), bool)
-            and isinstance(value.get("details"), Mapping)
-        ):
+        if _is_public_error(value):
+            return _context_error_placeholder()
+        return value
+
+
+class RepositoryOverviewViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["repo-overview"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: RepositoryOverviewDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
             return {
                 "schemaVersion": SCHEMA_VERSION,
-                "view": "context",
+                "view": "repo-overview",
                 "project": {"id": "error", "name": "error", "kind": "internal"},
                 "sourceState": {"status": "partial"},
                 "data": {
-                    "stats": {"files": 0, "concepts": 0, "tasks": 0},
-                    "concepts": [],
-                    "files": [],
-                    "tasks": [],
+                    "purpose": {"summary": "", "evidence": []},
+                    "need": {
+                        "problem": {"summary": "", "evidence": []},
+                        "solution": {"summary": "", "evidence": []},
+                    },
+                    "workflow": [],
+                    "modules": [],
+                    "readingOrder": [],
+                    "stats": {
+                        "files": 0,
+                        "concepts": 0,
+                        "tasks": 0,
+                        "documentsRead": 0,
+                    },
                 },
                 "warnings": [],
             }
         return value
 
-    @model_validator(mode="after")
-    def require_matching_view_data(self) -> "AgentNaviViewOutput":
-        if self.view == "context" and not isinstance(self.data, ContextDataOutput):
-            raise ValueError("context view 必须使用 Context data。")
-        if self.view == "repo-overview" and not isinstance(
-            self.data, RepositoryOverviewDataOutput
-        ):
-            raise ValueError("repo-overview view 必须使用 Repository Overview data。")
-        return self
+
+class VisualizeViewOutput(
+    RootModel[ContextViewOutput | RepositoryOverviewViewOutput]
+):
+    """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return _context_error_placeholder()
+        return value
 
 
-# 保留 S02/S03 引入的公开运行时类型名，避免破坏已有调用方。
-ContextViewOutput = AgentNaviViewOutput
-
-
-CONTEXT_TOOL_RESULT = Annotated[CallToolResult, AgentNaviViewOutput]
+CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
+VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 
 # MCPServer 会在调用函数之前按类型注解验证输入。这里用 Any 接住原始值，
 # 保证所有错误都能进入 AgentNavi 的公开错误边界；WithJsonSchema 只负责让
@@ -230,11 +278,13 @@ def context_tool_annotations() -> ToolAnnotations:
 
 __all__ = [
     "CONTEXT_TOOL_RESULT",
+    "VISUALIZE_TOOL_RESULT",
     "VISUALIZE_VIEW_INPUT",
     "OPTIONAL_TEXT_INPUT",
     "REQUIRED_TEXT_INPUT",
     "ContextViewOutput",
-    "AgentNaviViewOutput",
+    "RepositoryOverviewViewOutput",
     "RepositoryOverviewDataOutput",
+    "VisualizeViewOutput",
     "context_tool_annotations",
 ]

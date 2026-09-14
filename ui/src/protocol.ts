@@ -114,6 +114,7 @@ const PUBLIC_ERROR_MESSAGES: Record<string, string> = {
 };
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const WINDOWS_ABSOLUTE = /(?:^|[^A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/;
+const LOCAL_FILE_URI = /(?:file:|vscode(?:-insiders)?:\/\/file\/)/i;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -185,7 +186,7 @@ function containsPosixAbsolute(value: string): boolean {
 
 function containsPrivatePath(value: string): boolean {
   return (
-    value.toLowerCase().includes("file://") ||
+    LOCAL_FILE_URI.test(value) ||
     value.includes("~/") ||
     WINDOWS_ABSOLUTE.test(value) ||
     containsPosixAbsolute(value)
@@ -324,7 +325,8 @@ export function parseContextView(value: unknown): ContextView | undefined {
 export function parseRepositoryOverviewView(value: unknown): RepositoryOverviewView | undefined {
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "repo-overview") return undefined;
-  const { project, sourceState, data, warnings } = common;
+  const { project, sourceState, data } = common;
+  const warnings = [...common.warnings];
   const purpose = overviewStatement(data.purpose);
   const need = record(data.need);
   const problem = overviewStatement(need?.problem);
@@ -332,15 +334,28 @@ export function parseRepositoryOverviewView(value: unknown): RepositoryOverviewV
   const stats = record(data.stats);
   if (!purpose || !need || !problem || !solution || !stats) return undefined;
 
-  const workflow = Array.isArray(data.workflow)
-    ? data.workflow.slice(0, 7).flatMap((value) => {
+  const rawWorkflow = Array.isArray(data.workflow) ? data.workflow : [];
+  const parsedWorkflow = rawWorkflow.flatMap((value) => {
       const item = record(value);
       const step = count(item?.step);
       const title = displayText(item?.title);
       if (!item || step < 1 || !title) return [];
       return [{ step, title, detail: displayText(item.detail), evidence: evidenceList(item.evidence) }];
-    })
-    : [];
+    });
+  const workflowIsValid = rawWorkflow.length === 0 || (
+    rawWorkflow.length >= 5 &&
+    rawWorkflow.length <= 7 &&
+    parsedWorkflow.length === rawWorkflow.length &&
+    parsedWorkflow.every((item, index) => item.step === index + 1)
+  );
+  const workflow = workflowIsValid ? parsedWorkflow : [];
+  if (!workflowIsValid) {
+    warnings.push({
+      code: "WORKFLOW_SHAPE_INVALID",
+      message: "主流程必须为空或包含连续编号的 5–7 步，当前结果已隐藏。",
+      evidence: [],
+    });
+  }
   const modules = Array.isArray(data.modules)
     ? data.modules.slice(0, 8).flatMap((value) => {
       const item = record(value);

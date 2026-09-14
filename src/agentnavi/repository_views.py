@@ -6,14 +6,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sqlite3
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .database import Database
-from .utils import json_loads
+from .privacy import contains_private_path, is_canonical_relative_path
+from .utils import json_loads, stable_id
 
 
 MAX_DOCUMENTS = 6
@@ -28,8 +32,14 @@ _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _ORDERED_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+?)\s*$")
 _HTML_RE = re.compile(r"<[^>]*>")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
-_WINDOWS_ABSOLUTE_RE = re.compile(
-    r"(?i)(?:^|[^A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\[^\\/]+[\\/])"
+_FIXED_DOCUMENT_PATHS = (
+    "README.md",
+    "README.mdx",
+    "README.rst",
+    "README.txt",
+    "docs/architecture.md",
+    "docs/architecture.mdx",
+    "docs/architecture.rst",
 )
 
 
@@ -38,39 +48,6 @@ class _Document:
     path: str
     lines: tuple[tuple[int, str], ...]
     truncated: bool
-
-
-def _canonical_relative_path(value: str) -> bool:
-    if (
-        not value
-        or value != value.strip()
-        or "\\" in value
-        or value.startswith(("/", "~"))
-        or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value)
-    ):
-        return False
-    path = PurePosixPath(value)
-    return (
-        str(path) == value
-        and str(path) not in {"", "."}
-        and ".." not in path.parts
-        and all(part not in {"", "."} for part in path.parts)
-    )
-
-
-def _contains_posix_absolute(value: str) -> bool:
-    for index, character in enumerate(value):
-        if character != "/":
-            continue
-        if index == 0:
-            return True
-        previous = value[index - 1]
-        if previous == ":" and index + 1 < len(value) and value[index + 1] == "/":
-            continue
-        if previous.isalnum() or previous in "._~-/":
-            continue
-        return True
-    return False
 
 
 def _safe_prose(value: str, *, limit: int = 320) -> str | None:
@@ -83,13 +60,7 @@ def _safe_prose(value: str, *, limit: int = 320) -> str | None:
     text = " ".join(text.split()).strip(" -—:：")
     if not text or text in {"---", "***"}:
         return None
-    lowered = text.lower()
-    if (
-        "file://" in lowered
-        or "~/" in text
-        or _WINDOWS_ABSOLUTE_RE.search(text)
-        or _contains_posix_absolute(text)
-    ):
+    if contains_private_path(text):
         return None
     return text[:limit]
 
@@ -97,20 +68,8 @@ def _safe_prose(value: str, *, limit: int = 320) -> str | None:
 def _document_candidates(
     connection: sqlite3.Connection,
     project_id: str,
-    root: Path,
 ) -> list[str]:
     candidates: set[str] = set()
-    for fixed_path in (
-        "README.md",
-        "README.mdx",
-        "README.rst",
-        "README.txt",
-        "docs/architecture.md",
-        "docs/architecture.mdx",
-        "docs/architecture.rst",
-    ):
-        if root.joinpath(*PurePosixPath(fixed_path).parts).exists():
-            candidates.add(fixed_path)
     for row in connection.execute(
         """
         SELECT key FROM nodes
@@ -131,7 +90,7 @@ def _document_candidates(
             }
             or lowered.startswith("docs/adr/")
             or lowered.startswith("docs/decisions/")
-        ) and _canonical_relative_path(path):
+        ) and is_canonical_relative_path(path):
             candidates.add(path)
 
     def priority(path: str) -> tuple[int, str, str]:
@@ -147,10 +106,52 @@ def _document_candidates(
     return sorted(candidates, key=priority)[:MAX_DOCUMENTS]
 
 
+def _snapshot_revision(
+    project_id: str,
+    last_scan_at: str | None,
+    states: dict[str, sqlite3.Row],
+) -> str | None:
+    if last_scan_at is None:
+        return None
+    parts = [
+        f"{path}:{row['size']}:{row['mtime_ns']}:{row['digest']}"
+        for path, row in sorted(states.items())
+    ]
+    return stable_id(project_id, last_scan_at, *parts, prefix="snapshot_")
+
+
+def _digest_matches(path: Path, expected: str, size: int) -> bool:
+    if not expected or size > MAX_DOCUMENT_BYTES:
+        return True
+    hasher = hashlib.blake2s()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                hasher.update(chunk)
+    except OSError:
+        return False
+    return hasher.hexdigest() == expected
+
+
+def _matches_snapshot(path: Path, state: sqlite3.Row | None) -> bool:
+    if state is None:
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return bool(
+        stat.st_size == state["size"]
+        and stat.st_mtime_ns == state["mtime_ns"]
+        and _digest_matches(path, str(state["digest"]), stat.st_size)
+    )
+
+
 def _read_documents(
     root: Path,
     candidates: list[str],
-) -> tuple[list[_Document], list[dict[str, Any]]]:
+    states: dict[str, sqlite3.Row],
+) -> tuple[list[_Document], list[dict[str, Any]], bool]:
     documents: list[_Document] = []
     warnings: list[dict[str, Any]] = []
     total_bytes = 0
@@ -163,7 +164,7 @@ def _read_documents(
                 "message": "项目目录当前不可读取，概览仅使用索引事实。",
                 "evidence": [],
             }
-        ]
+        ], True
 
     for relative in candidates:
         if total_bytes >= MAX_TOTAL_DOCUMENT_BYTES:
@@ -180,15 +181,33 @@ def _read_documents(
             resolved = candidate.resolve(strict=True)
             resolved.relative_to(resolved_root)
             if not resolved.is_file():
+                raise OSError
+            if not _matches_snapshot(resolved, states.get(relative)):
+                warnings.append(
+                    {
+                        "code": "SOURCE_SNAPSHOT_STALE",
+                        "message": f"索引后文档已变化，已跳过：{relative}",
+                        "evidence": [],
+                    }
+                )
                 continue
             allowance = min(MAX_DOCUMENT_BYTES, MAX_TOTAL_DOCUMENT_BYTES - total_bytes)
             with resolved.open("rb") as handle:
                 payload = handle.read(allowance + 1)
-        except (OSError, RuntimeError, ValueError):
+        except (RuntimeError, ValueError):
             warnings.append(
                 {
                     "code": "DOCUMENT_OUTSIDE_PROJECT",
                     "message": f"已跳过不在项目边界内或不可读取的文档：{relative}",
+                    "evidence": [],
+                }
+            )
+            continue
+        except OSError:
+            warnings.append(
+                {
+                    "code": "SOURCE_SNAPSHOT_STALE",
+                    "message": f"索引中的文档已删除或不可读取，已跳过：{relative}",
                     "evidence": [],
                 }
             )
@@ -230,7 +249,10 @@ def _read_documents(
                     ],
                 }
             )
-    return documents, warnings
+    return documents, warnings, any(
+        warning["code"] in {"SOURCE_SNAPSHOT_STALE", "DOCUMENT_OUTSIDE_PROJECT"}
+        for warning in warnings
+    )
 
 
 def _evidence(document: _Document, line: int, summary: str) -> dict[str, Any]:
@@ -271,16 +293,16 @@ def _first_prose(
     return None if heading_terms else fallback
 
 
-def _workflow(documents: list[_Document]) -> list[dict[str, Any]]:
-    groups: list[tuple[int, int, str, list[tuple[int, str]]]] = []
+def _workflow(documents: list[_Document]) -> tuple[list[dict[str, Any]], bool]:
+    groups: list[tuple[int, str, list[tuple[int, str, str]]]] = []
     for doc_index, document in enumerate(documents):
         current_heading = ""
-        current: list[tuple[int, str]] = []
+        current: list[tuple[int, str, str]] = []
         for line_number, raw_line in document.lines:
             heading = _HEADING_RE.match(raw_line)
             if heading:
-                if 5 <= len(current) <= 7:
-                    groups.append((doc_index, 0, current_heading, current))
+                if len(current) >= 5:
+                    groups.append((doc_index, current_heading, current))
                 current = []
                 current_heading = heading.group(1).lower()
                 continue
@@ -288,35 +310,42 @@ def _workflow(documents: list[_Document]) -> list[dict[str, Any]]:
             if ordered:
                 prose = _safe_prose(ordered.group(1), limit=240)
                 if prose:
-                    current.append((line_number, prose))
+                    current.append((line_number, prose, prose))
+                continue
+            if current and raw_line.startswith(("  ", "\t")):
+                continuation = _safe_prose(raw_line, limit=240)
+                if continuation:
+                    line, title, detail = current[-1]
+                    current[-1] = (line, title, f"{detail} {continuation}"[:320])
                 continue
             if raw_line.strip() and current:
-                if 5 <= len(current) <= 7:
-                    groups.append((doc_index, 0, current_heading, current))
+                if len(current) >= 5:
+                    groups.append((doc_index, current_heading, current))
                 current = []
-        if 5 <= len(current) <= 7:
-            groups.append((doc_index, 0, current_heading, current))
+        if len(current) >= 5:
+            groups.append((doc_index, current_heading, current))
 
     if not groups:
-        return []
+        return [], False
     preferred_terms = ("流程", "workflow", "route", "router", "查询", "工作")
     groups.sort(
         key=lambda item: (
-            0 if any(term in item[2] for term in preferred_terms) else 1,
+            0 if any(term in item[1] for term in preferred_terms) else 1,
             item[0],
-            item[3][0][0],
+            item[2][0][0],
         )
     )
     document = documents[groups[0][0]]
+    selected = groups[0][2]
     return [
         {
             "step": index,
-            "title": text,
-            "detail": text,
+            "title": title,
+            "detail": detail,
             "evidence": [_evidence(document, line, "项目文档中的工作流步骤。")],
         }
-        for index, (line, text) in enumerate(groups[0][3], start=1)
-    ]
+        for index, (line, title, detail) in enumerate(selected[:7], start=1)
+    ], len(selected) > 7
 
 
 def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, Any]]:
@@ -348,12 +377,11 @@ def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, 
                 WHERE e.project_id=? AND e.layer=2 AND e.source_id=?
                   AND f.layer=1 AND f.kind='file'
                 ORDER BY f.key COLLATE NOCASE, f.key
-                LIMIT 3
                 """,
                 (project_id, row["id"]),
             )
-            if _canonical_relative_path(str(path_row["key"]))
-        ]
+            if is_canonical_relative_path(str(path_row["key"]))
+        ][:3]
         data = json_loads(row["data_json"], {})
         count = int(row["linked_files"] or data.get("file_count") or 0)
         evidence = [
@@ -364,6 +392,7 @@ def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, 
                 "source": str(row["source"]),
                 "confidence": float(row["confidence"]),
                 **({"path": paths[0]} if paths else {}),
+                **({"line_start": 1, "line_end": 1} if paths else {}),
             }
         ]
         result.append(
@@ -381,66 +410,220 @@ def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, 
     return result
 
 
+def _file_evidence(path: str, summary: str, *, line: int = 1) -> dict[str, Any]:
+    return {
+        "kind": "repository-file",
+        "summary": summary,
+        "layer": "L1",
+        "source": "repository-index",
+        "confidence": 1.0,
+        "path": path,
+        "line_start": line,
+        "line_end": line,
+    }
+
+
+def _manifest_entry(
+    root: Path,
+    paths: list[str],
+    states: dict[str, sqlite3.Row],
+) -> tuple[str | None, tuple[str, str, dict[str, Any]] | None]:
+    def read_manifest(relative: str) -> tuple[bytes, Path] | None:
+        candidate = root.joinpath(*PurePosixPath(relative).parts)
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            if not resolved.is_file() or not _matches_snapshot(
+                resolved, states.get(relative)
+            ):
+                return None
+            with resolved.open("rb") as handle:
+                payload = handle.read(MAX_DOCUMENT_BYTES + 1)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return (payload, resolved) if len(payload) <= MAX_DOCUMENT_BYTES else None
+
+    path_set = set(paths)
+    if "pyproject.toml" in path_set:
+        manifest_data = read_manifest("pyproject.toml")
+        if manifest_data is not None:
+            try:
+                text = manifest_data[0].decode("utf-8")
+                project = tomllib.loads(text).get("project", {})
+                scripts = project.get("scripts", {}) if isinstance(project, dict) else {}
+                if isinstance(scripts, dict):
+                    for name, value in sorted(scripts.items()):
+                        if not isinstance(name, str) or not isinstance(value, str):
+                            continue
+                        module = value.split(":", 1)[0].strip()
+                        candidates = (
+                            f"src/{module.replace('.', '/')}.py",
+                            f"{module.replace('.', '/')}.py",
+                        )
+                        for candidate in candidates:
+                            if candidate not in path_set:
+                                continue
+                            line = next(
+                                (
+                                    number
+                                    for number, source_line in enumerate(text.splitlines(), 1)
+                                    if name in source_line and "=" in source_line
+                                ),
+                                1,
+                            )
+                            return "pyproject.toml", (
+                                candidate,
+                                f"从 manifest 声明的公开命令 {name} 进入调用链。",
+                                _file_evidence(
+                                    "pyproject.toml",
+                                    "manifest 中的公开命令声明。",
+                                    line=line,
+                                ),
+                            )
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                pass
+        return "pyproject.toml", None
+
+    if "package.json" in path_set:
+        manifest_data = read_manifest("package.json")
+        if manifest_data is not None:
+            try:
+                package = json.loads(manifest_data[0].decode("utf-8"))
+                values: list[str] = []
+                if isinstance(package, dict):
+                    for field in ("bin", "main", "module"):
+                        value = package.get(field)
+                        if isinstance(value, str):
+                            values.append(value)
+                        elif isinstance(value, dict):
+                            values.extend(
+                                item for item in value.values() if isinstance(item, str)
+                            )
+                for candidate in sorted(set(values)):
+                    normalized = candidate.removeprefix("./")
+                    if is_canonical_relative_path(normalized) and normalized in path_set:
+                        return "package.json", (
+                            normalized,
+                            "从 package manifest 声明的公开入口进入调用链。",
+                            _file_evidence(
+                                "package.json", "package manifest 中的入口声明。"
+                            ),
+                        )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                pass
+        return "package.json", None
+    return None, None
+
+
 def _reading_order(
     connection: sqlite3.Connection,
     project_id: str,
     documents: list[_Document],
+    root: Path,
+    states: dict[str, sqlite3.Row],
+    modules: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    selected: list[tuple[str, str]] = []
-    for document in documents:
-        reason = (
-            "先建立项目目的与使用方式。"
-            if PurePosixPath(document.path).name.lower().startswith("readme.")
-            else "理解项目架构与关键设计决定。"
-        )
-        selected.append((document.path, reason))
-
     rows = list(
         connection.execute(
-            """
-            SELECT key FROM nodes
-            WHERE project_id=? AND layer=1 AND kind='file'
-            ORDER BY key COLLATE NOCASE, key
-            """,
+            """SELECT key FROM nodes
+               WHERE project_id=? AND layer=1 AND kind='file'
+               ORDER BY key COLLATE NOCASE, key""",
             (project_id,),
         )
     )
-    paths = [str(row["key"]) for row in rows if _canonical_relative_path(str(row["key"]))]
-    entry_patterns = (
-        re.compile(r"^src/[^/]+/__main__\.py$"),
-        re.compile(r"^src/[^/]+/cli\.py$"),
-        re.compile(r"^(?:pyproject\.toml|package\.json|go\.mod|Cargo\.toml)$"),
-        re.compile(r"^(?:tests?|specs?)/"),
+    paths = [
+        str(row["key"])
+        for row in rows
+        if is_canonical_relative_path(str(row["key"]))
+    ]
+    selected: list[tuple[str, str, dict[str, Any]]] = []
+
+    def add(path: str, reason: str, evidence: dict[str, Any] | None = None) -> None:
+        if path in {item[0] for item in selected} or path not in paths:
+            return
+        selected.append(
+            (
+                path,
+                reason,
+                evidence or _file_evidence(path, "索引中的仓库文件。"),
+            )
+        )
+
+    read_documents = {document.path for document in documents}
+    readme = next(
+        (path for path in paths if "/" not in path and PurePosixPath(path).name.lower().startswith("readme.")),
+        None,
     )
-    reasons = (
-        "从真实运行入口继续阅读。",
-        "了解公开命令和主要调用链。",
-        "确认构建、依赖与公开入口。",
-        "用测试验证关键行为与边界。",
+    if readme in read_documents:
+        add(readme, "先建立项目目的与使用方式。")
+    architecture = next(
+        (path for path in paths if path.lower().startswith("docs/architecture.")),
+        None,
     )
-    for pattern, reason in zip(entry_patterns, reasons):
-        for path in paths:
-            if pattern.search(path) and path not in {item[0] for item in selected}:
-                selected.append((path, reason))
-                break
+    if architecture in read_documents:
+        add(architecture, "理解项目架构与主流程。")
+
+    manifest, entry = _manifest_entry(root, paths, states)
+    if manifest is not None:
+        add(manifest, "确认构建配置、依赖与公开命令。")
+    if entry is not None:
+        add(*entry)
+    else:
+        fallback = next(
+            (
+                path
+                for pattern in (
+                    re.compile(r"^src/[^/]+/__main__\.py$"),
+                    re.compile(r"^src/[^/]+/cli\.py$"),
+                )
+                for path in paths
+                if pattern.search(path)
+            ),
+            None,
+        )
+        if fallback:
+            add(fallback, "按文件名识别的运行入口（fallback），需结合 manifest 核对。")
+
+    core_path = next(
+        (
+            path
+            for module in modules
+            for path in module["paths"]
+            if path.startswith(("src/", "lib/", "app/"))
+            and path not in {item[0] for item in selected}
+        ),
+        None,
+    )
+    if core_path:
+        add(core_path, "阅读核心语义模块的实现。")
+    test_path = next(
+        (path for path in paths if path.startswith(("test/", "tests/", "spec/", "specs/"))),
+        None,
+    )
+    if test_path:
+        add(test_path, "用测试核对关键行为与边界。")
+    adr = next(
+        (
+            document.path
+            for document in documents
+            if document.path.startswith(("docs/adr/", "docs/decisions/"))
+        ),
+        None,
+    )
+    if adr:
+        add(adr, "补充理解首个关键架构决定。")
 
     return [
         {
             "position": index,
             "path": path,
             "reason": reason,
-            "evidence": [
-                {
-                    "kind": "repository-file",
-                    "summary": "索引中的仓库文件。",
-                    "layer": "L1",
-                    "source": "repository-index",
-                    "confidence": 1.0,
-                    "path": path,
-                }
-            ],
+            "evidence": [evidence],
         }
-        for index, (path, reason) in enumerate(selected[:MAX_READING_ORDER], start=1)
+        for index, (path, reason, evidence) in enumerate(
+            selected[:MAX_READING_ORDER], start=1
+        )
     ]
 
 
@@ -452,12 +635,64 @@ def repository_overview_data(
 
     project_id = str(project["id"])
     with database.connect() as connection:
-        document_paths = _document_candidates(
-            connection,
-            project_id,
-            Path(project["root"]),
-        )
-        documents, warnings = _read_documents(Path(project["root"]), document_paths)
+        connection.execute("BEGIN")
+        snapshot_project = connection.execute(
+            "SELECT * FROM projects WHERE id=?", (project_id,)
+        ).fetchone()
+        if snapshot_project is None:
+            raise LookupError("项目快照不存在。")
+        root = Path(snapshot_project["root"])
+        last_scan_at = snapshot_project["last_scan_at"]
+        states = {
+            str(row["path"]): row
+            for row in connection.execute(
+                "SELECT * FROM file_state WHERE project_id=? ORDER BY path",
+                (project_id,),
+            )
+        }
+        revision = _snapshot_revision(project_id, last_scan_at, states)
+        document_paths = _document_candidates(connection, project_id)
+        warnings: list[dict[str, Any]] = []
+        snapshot_stale = False
+        if last_scan_at is None:
+            documents: list[_Document] = []
+        else:
+            documents, document_warnings, snapshot_stale = _read_documents(
+                root,
+                document_paths,
+                states,
+            )
+            warnings.extend(document_warnings)
+            for fixed_path in _FIXED_DOCUMENT_PATHS:
+                if fixed_path in states:
+                    continue
+                try:
+                    exists = root.joinpath(*PurePosixPath(fixed_path).parts).exists()
+                except OSError:
+                    exists = False
+                if exists:
+                    snapshot_stale = True
+                    warnings.append(
+                        {
+                            "code": "SOURCE_SNAPSHOT_STALE",
+                            "message": "扫描后发现新的概览文档，需重新扫描后再使用其证据。",
+                            "evidence": [],
+                        }
+                    )
+                    break
+            for manifest_path in ("pyproject.toml", "package.json"):
+                if manifest_path not in states:
+                    continue
+                if not _matches_snapshot(root / manifest_path, states[manifest_path]):
+                    snapshot_stale = True
+                    warnings.append(
+                        {
+                            "code": "SOURCE_SNAPSHOT_STALE",
+                            "message": "扫描后 manifest 已变化，入口阅读顺序可能过期。",
+                            "evidence": [],
+                        }
+                    )
+
         purpose = _first_prose(
             documents,
             heading_terms=("一句话", "purpose", "定位", "是什么", "目标"),
@@ -470,10 +705,17 @@ def repository_overview_data(
             documents,
             heading_terms=("解决", "solution", "方案"),
         )
-        solution = explicit_solution or purpose
-        workflow = _workflow(documents)
+        solution = explicit_solution
+        workflow, workflow_truncated = _workflow(documents)
         modules = _modules(connection, project_id)
-        reading_order = _reading_order(connection, project_id, documents)
+        reading_order = _reading_order(
+            connection,
+            project_id,
+            documents,
+            root,
+            states,
+            modules,
+        )
         stats = {
             "files": connection.execute(
                 "SELECT COUNT(*) AS count FROM nodes WHERE project_id=? AND layer=1 AND kind='file'",
@@ -491,6 +733,14 @@ def repository_overview_data(
             ).fetchone()["count"],
             "documentsRead": len(documents),
         }
+
+        source_status = (
+            "partial"
+            if last_scan_at is None
+            else "stale"
+            if snapshot_stale
+            else "ready"
+        )
 
     if purpose is None:
         warnings.append(
@@ -516,14 +766,27 @@ def repository_overview_data(
                 "evidence": [],
             }
         )
+    if workflow_truncated:
+        warnings.append(
+            {
+                "code": "WORKFLOW_TRUNCATED",
+                "message": "文档流程超过 7 步，已按稳定顺序展示前 7 步。",
+                "evidence": [],
+            }
+        )
 
     return {
         "project": {
             "id": project_id,
-            "name": str(project["name"]),
-            "root": str(project["root"]),
-            "kind": str(project["kind"]),
-            "last_scan_at": project["last_scan_at"],
+            "name": str(snapshot_project["name"]),
+            "root": str(snapshot_project["root"]),
+            "kind": str(snapshot_project["kind"]),
+            "last_scan_at": last_scan_at,
+        },
+        "sourceState": {
+            "status": source_status,
+            "revision": revision,
+            "indexed_at": last_scan_at,
         },
         "purpose": (
             {"summary": purpose[0], "evidence": [purpose[1]]}

@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
-from pathlib import PurePosixPath
 from typing import Any
 
+from ...privacy import contains_private_path, is_canonical_relative_path
 from ..protocol import AgentNaviView, Evidence, Project, SourceState, Warning
 
 _NOT_INDEXED_MESSAGE = "项目尚未完成索引，当前概览可能不完整。"
-_WINDOWS_ABSOLUTE_RE = re.compile(
-    r"(?i)(?:^|[^A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\[^\\/]+[\\/])"
-)
 
 
 def _mapping(value: Any, field: str) -> Mapping[str, Any]:
@@ -27,31 +23,11 @@ def _sequence(value: Any, field: str) -> Sequence[Any]:
     return value
 
 
-def _contains_posix_absolute(value: str) -> bool:
-    for index, character in enumerate(value):
-        if character != "/":
-            continue
-        if index == 0:
-            return True
-        previous = value[index - 1]
-        if previous == ":" and index + 1 < len(value) and value[index + 1] == "/":
-            continue
-        if previous.isalnum() or previous in "._~-/":
-            continue
-        return True
-    return False
-
-
 def _text(value: Any, field: str, *, limit: int = 320) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field} 必须是字符串。")
     candidate = value[:limit]
-    if (
-        "file://" in candidate.lower()
-        or "~/" in candidate
-        or _WINDOWS_ABSOLUTE_RE.search(candidate)
-        or _contains_posix_absolute(candidate)
-    ):
+    if contains_private_path(candidate):
         return "[内容含路径，已隐藏]"
     return candidate
 
@@ -65,17 +41,7 @@ def _number(value: Any, field: str) -> int | float:
 def _path(value: Any, field: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field} 必须是字符串。")
-    path = PurePosixPath(value)
-    if (
-        not value
-        or value != value.strip()
-        or "\\" in value
-        or value.startswith(("/", "~"))
-        or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value)
-        or str(path) != value
-        or ".." in path.parts
-        or any(part in {"", "."} for part in path.parts)
-    ):
+    if not is_canonical_relative_path(value):
         raise ValueError(f"{field} 必须是 POSIX 相对路径。")
     return value
 
@@ -191,16 +157,26 @@ def _project(core_data: Mapping[str, Any]) -> Project:
 
 
 def _source_state(core_data: Mapping[str, Any]) -> tuple[SourceState, list[Warning]]:
-    raw = _mapping(core_data.get("project"), "repo-overview.project")
+    raw = _mapping(core_data.get("sourceState"), "repo-overview.sourceState")
     warnings = [_warning(item) for item in _sequence(core_data.get("warnings", []), "repo-overview.warnings")]
-    last_scan_at = raw.get("last_scan_at")
-    if last_scan_at is None:
+    status = _text(raw.get("status"), "sourceState.status", limit=16)
+    revision = raw.get("revision")
+    indexed_at = raw.get("indexed_at")
+    if indexed_at is not None:
+        indexed_at = _text(indexed_at, "sourceState.indexed_at", limit=64)
+        if indexed_at.endswith("+00:00"):
+            indexed_at = indexed_at[:-6] + "Z"
+    if status == "partial":
         warnings.append(Warning(code="SOURCE_NOT_INDEXED", message=_NOT_INDEXED_MESSAGE))
-        return SourceState(status="partial"), warnings
-    indexed_at = _text(last_scan_at, "project.last_scan_at", limit=64)
-    if indexed_at.endswith("+00:00"):
-        indexed_at = indexed_at[:-6] + "Z"
-    return SourceState(status="ready", indexed_at=indexed_at), warnings
+    return SourceState(
+        status=status,  # type: ignore[arg-type]
+        revision=(
+            _text(revision, "sourceState.revision", limit=120)
+            if revision is not None
+            else None
+        ),
+        indexed_at=indexed_at,
+    ), warnings
 
 
 def repo_overview_view(core_data: Mapping[str, Any]) -> AgentNaviView:
@@ -214,25 +190,60 @@ def repo_overview_view(core_data: Mapping[str, Any]) -> AgentNaviView:
     )
 
 
+def _evidence_reference(evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not evidence:
+        return "无路径证据"
+    first = evidence[0]
+    path = first.get("path")
+    if not isinstance(path, str):
+        return "无路径证据"
+    line = first.get("lineStart")
+    return f"{path}:{line}" if isinstance(line, int) and line > 0 else path
+
+
 def repo_overview_text(core_data: Mapping[str, Any]) -> str:
     """独立生成模型 fallback，不从 AgentNaviView 或 JSON 反向解析。"""
 
     project = _project(core_data)
     data = _overview_payload(core_data)
     warnings = [_warning(item) for item in _sequence(core_data.get("warnings", []), "repo-overview.warnings")]
-    if _mapping(core_data.get("project"), "repo-overview.project").get("last_scan_at") is None:
+    if _mapping(core_data.get("sourceState"), "repo-overview.sourceState").get("status") == "partial":
         warnings.append(Warning(code="SOURCE_NOT_INDEXED", message=_NOT_INDEXED_MESSAGE))
-    lines = ["[AgentNavi 项目概览]", f"项目：{project.name}（{project.id}）", "", "做什么：", data["purpose"]["summary"] or "暂无足够文档证据。"]
-    lines.extend(["", "为什么：", f"- 问题：{data['need']['problem']['summary'] or '暂无足够文档证据。'}", f"- 方案：{data['need']['solution']['summary'] or '暂无足够文档证据。'}"])
+    purpose = data["purpose"]
+    problem = data["need"]["problem"]
+    solution = data["need"]["solution"]
+    lines = [
+        "[AgentNavi 项目概览]",
+        f"项目：{project.name}（{project.id}）",
+        "",
+        "做什么：",
+        purpose["summary"] or "暂无足够文档证据。",
+        f"证据：{_evidence_reference(purpose['evidence'])}",
+        "",
+        "为什么：",
+        f"- 问题：{problem['summary'] or '暂无足够文档证据。'}",
+        f"  证据：{_evidence_reference(problem['evidence'])}",
+        f"- 方案：{solution['summary'] or '暂无足够文档证据。'}",
+        f"  证据：{_evidence_reference(solution['evidence'])}",
+    ]
     if data["workflow"]:
         lines.extend(["", "主流程："])
-        lines.extend(f"{item['step']}. {item['title']}" for item in data["workflow"])
+        lines.extend(
+            f"{item['step']}. {item['title']} — {item['detail']}（证据：{_evidence_reference(item['evidence'])}）"
+            for item in data["workflow"]
+        )
     if data["modules"]:
         lines.extend(["", "核心模块："])
-        lines.extend(f"- {item['name']}：{item['summary']}" for item in data["modules"])
+        lines.extend(
+            f"- {item['name']}：{item['summary']}；关键文件：{'、'.join(item['paths']) or '无'}；证据：{_evidence_reference(item['evidence'])}"
+            for item in data["modules"]
+        )
     if data["readingOrder"]:
         lines.extend(["", "建议阅读顺序："])
-        lines.extend(f"{item['position']}. {item['path']}（{item['reason']}）" for item in data["readingOrder"])
+        lines.extend(
+            f"{item['position']}. {item['path']}（{item['reason']}；证据：{_evidence_reference(item['evidence'])}）"
+            for item in data["readingOrder"]
+        )
     if warnings:
         lines.extend(["", "提示："])
         lines.extend(f"- {warning.code}：{warning.message}" for warning in warnings)
