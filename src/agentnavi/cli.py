@@ -725,7 +725,7 @@ def command_mcp(args: argparse.Namespace) -> int:
     from .mcp.server import run_stdio
 
     try:
-        run_stdio()
+        run_stdio(home=args.home)
     except ModuleNotFoundError as exc:
         if exc.name != "mcp":
             raise

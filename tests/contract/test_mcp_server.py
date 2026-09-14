@@ -63,21 +63,43 @@ import agentnavi.mcp.server
         self.assertEqual(result.stdout, "")
 
     @unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
-    def test_in_process_client_initializes_and_discovers_empty_primitives(self) -> None:
+    def test_in_process_client_initializes_and_discovers_context_tool(self) -> None:
         from mcp import Client
 
         from agentnavi.mcp.server import create_server
 
-        async def verify() -> None:
-            server = create_server()
+        async def verify(home: Path) -> None:
+            server = create_server(home=home)
             async with Client(server, raise_exceptions=True) as client:
                 self.assertIsNotNone(client.server_info)
                 self.assertEqual(client.server_info.name, "AgentNavi")
-                self.assertEqual((await client.list_tools()).tools, [])
+                tools = (await client.list_tools()).tools
+                self.assertEqual([tool.name for tool in tools], ["agentnavi_context"])
+                self.assertEqual(tools[0].input_schema["required"], ["query"])
+                self.assertEqual(
+                    set(tools[0].input_schema["properties"]),
+                    {"query", "project_id", "workspace"},
+                )
+                self.assertEqual(
+                    set(tools[0].output_schema["required"]),
+                    {
+                        "schemaVersion",
+                        "view",
+                        "project",
+                        "sourceState",
+                        "data",
+                        "warnings",
+                    },
+                )
+                self.assertTrue(tools[0].annotations.read_only_hint)
+                self.assertFalse(tools[0].annotations.destructive_hint)
+                self.assertTrue(tools[0].annotations.idempotent_hint)
+                self.assertFalse(tools[0].annotations.open_world_hint)
                 self.assertEqual((await client.list_resources()).resources, [])
                 self.assertEqual((await client.list_prompts()).prompts, [])
 
-        asyncio.run(verify())
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            asyncio.run(verify(Path(temporary_directory) / "agentnavi-home"))
 
     @unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
     def test_stdio_client_initializes_without_stdout_log_pollution(self) -> None:
@@ -93,7 +115,8 @@ import agentnavi.mcp.server
             # 官方 transport API 可覆盖完整的 mcp>=2,<3 声明范围。
             async with Client(stdio_client(server)) as client:
                 self.assertEqual(client.server_info.name, "AgentNavi")
-                self.assertEqual((await client.list_tools()).tools, [])
+                tools = (await client.list_tools()).tools
+                self.assertEqual([tool.name for tool in tools], ["agentnavi_context"])
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             asyncio.run(verify(Path(temporary_directory) / "agentnavi-home"))

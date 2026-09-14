@@ -177,6 +177,7 @@ def _concept_neighbors(connection: sqlite3.Connection, project_id: str, concept_
         SELECT e.relation, e.confidence, e.source, n.id, n.label, n.key
         FROM edges e JOIN nodes n ON n.id=e.target_id
         WHERE e.project_id=? AND e.layer=2 AND e.source_id=? AND n.layer=2 AND n.kind='concept'
+        ORDER BY e.relation, n.label COLLATE NOCASE, n.key, n.id
         """,
         (project_id, concept_id),
     ):
@@ -196,6 +197,7 @@ def _concept_neighbors(connection: sqlite3.Connection, project_id: str, concept_
         SELECT e.relation, e.confidence, e.source, n.id, n.label, n.key
         FROM edges e JOIN nodes n ON n.id=e.source_id
         WHERE e.project_id=? AND e.layer=2 AND e.target_id=? AND n.layer=2 AND n.kind='concept'
+        ORDER BY e.relation, n.label COLLATE NOCASE, n.key, n.id
         """,
         (project_id, concept_id),
     ):
@@ -383,15 +385,20 @@ def context_data(
     }
 
 
-def format_context(data: dict[str, Any]) -> str:
+def format_context(
+    data: dict[str, Any],
+    *,
+    include_project_root: bool = True,
+) -> str:
     project = data["project"]
     stats = data["stats"]
     lines = [
         "[AgentNavi 项目上下文]",
         f"项目：{project['name']}（{project['id']}）",
-        f"根目录：{project['root']}",
         f"索引：{stats['files']} 个文件 / {stats['concepts']} 个概念 / {stats['tasks']} 个历史任务",
     ]
+    if include_project_root:
+        lines.insert(2, f"根目录：{project['root']}")
     if data.get("query"):
         lines.append(f"当前查询：{data['query']}")
 

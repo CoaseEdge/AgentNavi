@@ -77,6 +77,14 @@ class MCPCLIContractTestCase(unittest.TestCase):
             with self.assertRaises(ModuleNotFoundError):
                 main(["mcp"])
 
+    def test_home_is_forwarded_to_mcp_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch("agentnavi.mcp.server.run_stdio") as run_stdio:
+                result = main(["--home", temporary_directory, "mcp"])
+
+        self.assertEqual(result, 0)
+        run_stdio.assert_called_once_with(home=temporary_directory)
+
 
 if __name__ == "__main__":
     unittest.main()
