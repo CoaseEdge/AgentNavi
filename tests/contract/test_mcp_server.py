@@ -142,8 +142,13 @@ import agentnavi.mcp.server
                 self.assertEqual(visualize_tool.output_schema, context_tool.output_schema)
                 self.assertEqual(
                     visualize_tool.input_schema["properties"]["view"],
-                    {"const": "context", "title": "View", "type": "string"},
+                    {
+                        "enum": ["context", "repo-overview"],
+                        "title": "View",
+                        "type": "string",
+                    },
                 )
+                self.assertEqual(visualize_tool.input_schema["required"], ["view"])
                 self.assertTrue(context_tool.annotations.read_only_hint)
                 self.assertFalse(context_tool.annotations.destructive_hint)
                 self.assertTrue(context_tool.annotations.idempotent_hint)

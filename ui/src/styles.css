@@ -216,6 +216,104 @@ h1 {
   padding-top: 30px;
 }
 
+.repository-view {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding-top: 30px;
+}
+
+.overview-section {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.overview-purpose,
+.overview-workflow,
+.overview-reading {
+  grid-column: 1 / -1;
+}
+
+.overview-purpose {
+  border-left: 4px solid var(--amber);
+}
+
+.overview-section h2 {
+  margin: 7px 0 14px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.overview-section > p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.need-grid {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.need-grid div {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.need-grid dt {
+  font: 10px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.need-grid dd {
+  margin: 5px 0 0;
+  line-height: 1.55;
+}
+
+.overview-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overview-list li {
+  min-width: 0;
+  padding: 12px;
+  border-top: 3px solid var(--green);
+  background: color-mix(in srgb, var(--paper) 45%, transparent);
+}
+
+.overview-list strong,
+.overview-list p,
+.evidence-line {
+  overflow-wrap: anywhere;
+}
+
+.overview-list strong {
+  font-size: 13px;
+}
+
+.overview-list p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.evidence-line {
+  display: block;
+  margin-top: 8px !important;
+  color: var(--muted);
+  font: 10px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+}
+
 .map-stage {
   min-width: 0;
 }
@@ -416,6 +514,16 @@ h1 {
 
   .context-map {
     grid-template-columns: 1fr;
+  }
+
+  .repository-view {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-purpose,
+  .overview-workflow,
+  .overview-reading {
+    grid-column: auto;
   }
 
   .flow-arrow {

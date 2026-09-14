@@ -80,8 +80,59 @@ class WarningOutput(_ExtensibleModel):
     evidence: list[dict[str, Any]]
 
 
-class ContextViewOutput(_ExtensibleModel):
-    """用于 SDK tool discovery 的成功 Context envelope schema。
+class OverviewStatementOutput(_ExtensibleModel):
+    summary: str
+    evidence: list[dict[str, Any]]
+
+
+class OverviewNeedOutput(_ExtensibleModel):
+    problem: OverviewStatementOutput
+    solution: OverviewStatementOutput
+
+
+class OverviewWorkflowOutput(_ExtensibleModel):
+    step: int
+    title: str
+    detail: str
+    evidence: list[dict[str, Any]]
+
+
+class OverviewModuleOutput(_ExtensibleModel):
+    id: str
+    name: str
+    summary: str
+    paths: list[str]
+    layer: Literal["L2"]
+    source: str
+    confidence: float
+    evidence: list[dict[str, Any]]
+
+
+class OverviewReadingOutput(_ExtensibleModel):
+    position: int
+    path: str
+    reason: str
+    evidence: list[dict[str, Any]]
+
+
+class OverviewStatsOutput(_ExtensibleModel):
+    files: int
+    concepts: int
+    tasks: int
+    documents_read: int = Field(alias="documentsRead")
+
+
+class RepositoryOverviewDataOutput(_ExtensibleModel):
+    purpose: OverviewStatementOutput
+    need: OverviewNeedOutput
+    workflow: list[OverviewWorkflowOutput]
+    modules: list[OverviewModuleOutput]
+    reading_order: list[OverviewReadingOutput] = Field(alias="readingOrder")
+    stats: OverviewStatsOutput
+
+
+class AgentNaviViewOutput(_ExtensibleModel):
+    """用于 SDK tool discovery 的成功 VLA envelope schema。
 
     S01 的标准库 DTO 仍是 wire 真相与严格隐私边界；此模型只把同一顶层合同
     暴露给 MCP SDK。SDK 2.0 会错误地对 ``isError`` 结果也执行成功 schema
@@ -90,10 +141,10 @@ class ContextViewOutput(_ExtensibleModel):
     """
 
     schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
-    view: Literal["context"]
+    view: Literal["context", "repo-overview"]
     project: ProjectOutput
     source_state: SourceStateOutput = Field(alias="sourceState")
-    data: ContextDataOutput
+    data: ContextDataOutput | RepositoryOverviewDataOutput
     warnings: list[WarningOutput]
 
     @model_validator(mode="before")
@@ -129,15 +180,29 @@ class ContextViewOutput(_ExtensibleModel):
             }
         return value
 
+    @model_validator(mode="after")
+    def require_matching_view_data(self) -> "AgentNaviViewOutput":
+        if self.view == "context" and not isinstance(self.data, ContextDataOutput):
+            raise ValueError("context view 必须使用 Context data。")
+        if self.view == "repo-overview" and not isinstance(
+            self.data, RepositoryOverviewDataOutput
+        ):
+            raise ValueError("repo-overview view 必须使用 Repository Overview data。")
+        return self
 
-CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
+
+# 保留 S02/S03 引入的公开运行时类型名，避免破坏已有调用方。
+ContextViewOutput = AgentNaviViewOutput
+
+
+CONTEXT_TOOL_RESULT = Annotated[CallToolResult, AgentNaviViewOutput]
 
 # MCPServer 会在调用函数之前按类型注解验证输入。这里用 Any 接住原始值，
 # 保证所有错误都能进入 AgentNavi 的公开错误边界；WithJsonSchema 只负责让
 # tools/list 继续发布精确的 string / const 合同，不依赖 SDK 私有实现。
-CONTEXT_VIEW_INPUT = Annotated[
+VISUALIZE_VIEW_INPUT = Annotated[
     Any,
-    WithJsonSchema({"type": "string", "const": "context"}),
+    WithJsonSchema({"type": "string", "enum": ["context", "repo-overview"]}),
 ]
 REQUIRED_TEXT_INPUT = Annotated[
     Any,
@@ -165,9 +230,11 @@ def context_tool_annotations() -> ToolAnnotations:
 
 __all__ = [
     "CONTEXT_TOOL_RESULT",
-    "CONTEXT_VIEW_INPUT",
+    "VISUALIZE_VIEW_INPUT",
     "OPTIONAL_TEXT_INPUT",
     "REQUIRED_TEXT_INPUT",
     "ContextViewOutput",
+    "AgentNaviViewOutput",
+    "RepositoryOverviewDataOutput",
     "context_tool_annotations",
 ]

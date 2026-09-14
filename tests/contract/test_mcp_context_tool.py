@@ -93,6 +93,30 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             )
             connection.commit()
 
+    def _add_overview_documents(self) -> None:
+        (self.project_root / "docs").mkdir(exist_ok=True)
+        (self.project_root / "README.md").write_text(
+            """# Fixture\n\n## 一句话理解\n\n帮助协作者理解会员项目。\n\n## 问题定义\n\n减少重复搜索与上下文遗漏。\n\n## 解决方式\n\n用项目图谱和文档证据提供导航。\n""",
+            encoding="utf-8",
+        )
+        (self.project_root / "docs" / "architecture.md").write_text(
+            """# 架构\n\n## 主流程\n\n1. 接收请求\n2. 解析项目\n3. 读取文档\n4. 汇总事实\n5. 生成概览\n6. 投影视图\n7. 返回证据\n""",
+            encoding="utf-8",
+        )
+        with self.database.connect() as connection:
+            for path in ("README.md", "docs/architecture.md"):
+                Database.upsert_node(
+                    connection,
+                    project_id="fixture",
+                    layer=1,
+                    kind="file",
+                    key=path,
+                    label=Path(path).name,
+                    data={"language": "markdown"},
+                    source="repository",
+                )
+            connection.commit()
+
     async def _call(
         self,
         arguments: Any,
@@ -125,6 +149,29 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         )
         self.assertIn("会员", result.content[0].text)
         self.assertIn("src/membership.py", result.content[0].text)
+
+    def test_visualize_tool_returns_repository_overview_without_query(self) -> None:
+        self._add_project()
+        self._add_overview_documents()
+
+        result = asyncio.run(
+            self._call(
+                {"view": "repo-overview", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        )
+
+        self.assertFalse(result.is_error)
+        payload = result.structured_content
+        self.assertEqual(payload["view"], "repo-overview")
+        self.assertIn("会员项目", payload["data"]["purpose"]["summary"])
+        self.assertEqual(len(payload["data"]["workflow"]), 7)
+        self.assertEqual(payload["data"]["readingOrder"][0]["path"], "README.md")
+        self.assertIn("做什么", result.content[0].text)
+        self.assertIn("建议阅读顺序", result.content[0].text)
+        wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+        self.assertNotIn(str(self.project_root.resolve()), wire)
+        self.assertNotIn(str(self.database.settings.database_path), wire)
 
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()

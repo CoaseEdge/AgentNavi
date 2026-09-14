@@ -14,6 +14,7 @@ from typing import Any
 from ..config import Settings
 from ..database import ensure_database
 from .adapters.context import context_text, context_view
+from .adapters.repo_overview import repo_overview_text, repo_overview_view
 from .errors import AgentNaviMCPError, to_public_error
 from .project_resolver import resolve_project
 from .protocol import Error
@@ -83,9 +84,9 @@ def create_server(*, home: str | Path | None = None) -> Any:
 
     from .runtime import (
         CONTEXT_TOOL_RESULT,
-        CONTEXT_VIEW_INPUT,
         OPTIONAL_TEXT_INPUT,
         REQUIRED_TEXT_INPUT,
+        VISUALIZE_VIEW_INPUT,
         context_tool_annotations,
     )
 
@@ -143,27 +144,51 @@ def create_server(*, home: str | Path | None = None) -> Any:
 
     def agentnavi_visualize(
         view: Any,
-        query: Any,
+        query: Any = None,
         project_id: Any = None,
         workspace: Any = None,
     ) -> Any:
-        """生成 MCP App 与无 UI Host 都可消费的 Context 结果。"""
+        """生成 MCP App 与无 UI Host 都可消费的只读 VLA 结果。"""
 
         try:
-            if view != "context":
+            if view not in {"context", "repo-overview"}:
                 raise AgentNaviMCPError(
                     "INVALID_ARGUMENT", details={"field": "view"}
                 )
-            return call_context(query, project_id, workspace)
+            if view == "context":
+                return call_context(query, project_id, workspace)
+
+            _validated_text(query, "query", required=False)
+            checked_project_id = _validated_text(
+                project_id, "project_id", required=False
+            )
+            checked_workspace = _validated_text(
+                workspace, "workspace", required=False
+            )
+            project = resolve_project(
+                database,
+                project_id=checked_project_id,
+                workspace=checked_workspace,
+            )
+            from ..repository_views import repository_overview_data
+
+            core_data = repository_overview_data(database, project)
+            structured = repo_overview_view(core_data)
+            text = repo_overview_text(core_data)
+            return CallToolResult(
+                content=[TextContent(type="text", text=text)],
+                structuredContent=structured.to_dict(),
+            )
         except Exception as exc:
             return error_result(exc)
 
     for tool in (agentnavi_context, agentnavi_visualize):
-        tool.__annotations__["query"] = REQUIRED_TEXT_INPUT
         tool.__annotations__["project_id"] = OPTIONAL_TEXT_INPUT
         tool.__annotations__["workspace"] = OPTIONAL_TEXT_INPUT
         tool.__annotations__["return"] = CONTEXT_TOOL_RESULT
-    agentnavi_visualize.__annotations__["view"] = CONTEXT_VIEW_INPUT
+    agentnavi_context.__annotations__["query"] = REQUIRED_TEXT_INPUT
+    agentnavi_visualize.__annotations__["query"] = OPTIONAL_TEXT_INPUT
+    agentnavi_visualize.__annotations__["view"] = VISUALIZE_VIEW_INPUT
 
     apps = Apps()
     apps.add_html_resource(
@@ -173,7 +198,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         .read_text(encoding="utf-8"),
         name="AgentNavi ContextMap",
         title="AgentNavi ContextMap",
-        description="任务到概念与文件的只读项目导航图。",
+        description="项目概览与任务到概念、文件的只读导航视图。",
         csp=ResourceCsp(
             connectDomains=[],
             resourceDomains=[],
@@ -185,7 +210,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
     apps.tool(
         resource_uri=APP_URI,
         name="agentnavi_visualize",
-        description="用只读 ContextMap 展示任务、概念与候选文件。",
+        description="展示只读项目概览，或任务、概念与候选文件的 ContextMap。",
         annotations=context_tool_annotations(),
         structured_output=True,
     )(agentnavi_visualize)

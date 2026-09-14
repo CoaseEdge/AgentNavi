@@ -17,6 +17,18 @@ export interface ContextConcept {
 export interface ContextWarning {
   code: string;
   message: string;
+  evidence: Evidence[];
+}
+
+export interface Evidence {
+  kind: string;
+  summary: string;
+  layer: "L1" | "L2" | "L3";
+  source: string;
+  confidence: number;
+  path?: string;
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 export interface ContextView {
@@ -41,6 +53,51 @@ export interface ContextView {
   };
   warnings: ContextWarning[];
 }
+
+export interface OverviewStatement {
+  summary: string;
+  evidence: Evidence[];
+}
+
+export interface RepositoryOverviewView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "repo-overview";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    purpose: OverviewStatement;
+    need: {
+      problem: OverviewStatement;
+      solution: OverviewStatement;
+    };
+    workflow: Array<{
+      step: number;
+      title: string;
+      detail: string;
+      evidence: Evidence[];
+    }>;
+    modules: Array<{
+      id: string;
+      name: string;
+      summary: string;
+      paths: string[];
+      layer: "L2";
+      source: string;
+      confidence: number;
+      evidence: Evidence[];
+    }>;
+    readingOrder: Array<{
+      position: number;
+      path: string;
+      reason: string;
+      evidence: Evidence[];
+    }>;
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export type AgentNaviView = ContextView | RepositoryOverviewView;
 
 export interface PublicError {
   code: string;
@@ -145,7 +202,7 @@ export function safeTaskQuery(value: string): string {
 function contextConcept(value: unknown): ContextConcept | undefined {
   const item = record(value);
   if (!item) return undefined;
-  const id = text(item.id);
+  const id = displayText(item.id);
   const label = displayText(item.label);
   if (!id || !label) return undefined;
   const files = Array.isArray(item.files)
@@ -165,31 +222,80 @@ function contextWarning(value: unknown): ContextWarning | undefined {
   if (!item) return undefined;
   const code = displayText(item.code);
   const message = displayText(item.message);
-  return code && message ? { code, message } : undefined;
+  const evidence = Array.isArray(item.evidence)
+    ? item.evidence.slice(0, MAX_ITEMS).map(parseEvidence).filter((entry): entry is Evidence => Boolean(entry))
+    : [];
+  return code && message ? { code, message, evidence } : undefined;
 }
 
-export function parseContextView(value: unknown): ContextView | undefined {
+function parseEvidence(value: unknown): Evidence | undefined {
+  const item = record(value);
+  const layer = item?.layer;
+  if (!item || (layer !== "L1" && layer !== "L2" && layer !== "L3")) return undefined;
+  const kind = displayText(item.kind);
+  const summary = displayText(item.summary);
+  const source = displayText(item.source);
+  if (!kind || !summary || !source) return undefined;
+  const pathValue = item.path === undefined ? undefined : text(item.path);
+  if (pathValue !== undefined && !isCanonicalRelativePath(pathValue)) return undefined;
+  const lineStart = count(item.lineStart);
+  const lineEnd = count(item.lineEnd);
+  return {
+    kind,
+    summary,
+    layer,
+    source,
+    confidence: confidence(item.confidence),
+    ...(pathValue ? { path: pathValue } : {}),
+    ...(lineStart > 0 ? { lineStart } : {}),
+    ...(lineEnd > 0 ? { lineEnd } : {}),
+  };
+}
+
+function evidenceList(value: unknown): Evidence[] {
+  return Array.isArray(value)
+    ? value.slice(0, MAX_ITEMS).map(parseEvidence).filter((entry): entry is Evidence => Boolean(entry))
+    : [];
+}
+
+function overviewStatement(value: unknown): OverviewStatement | undefined {
+  const item = record(value);
+  if (!item) return undefined;
+  return { summary: displayText(item.summary), evidence: evidenceList(item.evidence) };
+}
+
+function commonEnvelope(value: unknown): {
+  envelope: Record<string, unknown>;
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: Record<string, unknown>;
+  warnings: ContextWarning[];
+} | undefined {
   const envelope = record(value);
-  if (envelope?.schemaVersion !== SCHEMA_VERSION || envelope.view !== "context") {
-    return undefined;
-  }
+  if (envelope?.schemaVersion !== SCHEMA_VERSION) return undefined;
   const project = record(envelope.project);
   const sourceState = record(envelope.sourceState);
   const data = record(envelope.data);
-  const stats = record(data?.stats);
   const status = sourceState?.status;
-  if (
-    !project ||
-    !data ||
-    !stats ||
-    (status !== "ready" && status !== "partial" && status !== "stale")
-  ) {
+  if (!project || !data || (status !== "ready" && status !== "partial" && status !== "stale")) {
     return undefined;
   }
-  const projectId = text(project.id);
-  const projectName = displayText(project.name);
-  const projectKind = displayText(project.kind);
-  if (!projectId || !projectName || !projectKind) return undefined;
+  const id = displayText(project.id);
+  const name = displayText(project.name);
+  const kind = displayText(project.kind);
+  if (!id || !name || !kind) return undefined;
+  const warnings = Array.isArray(envelope.warnings)
+    ? envelope.warnings.slice(0, MAX_ITEMS).map(contextWarning).filter((entry): entry is ContextWarning => Boolean(entry))
+    : [];
+  return { envelope, project: { id, name, kind }, sourceState: { status }, data, warnings };
+}
+
+export function parseContextView(value: unknown): ContextView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "context") return undefined;
+  const { project, sourceState, data, warnings } = common;
+  const stats = record(data?.stats);
+  if (!stats) return undefined;
 
   const concepts = Array.isArray(data.concepts)
     ? data.concepts.slice(0, MAX_ITEMS).map(contextConcept).filter((entry): entry is ContextConcept => Boolean(entry))
@@ -197,15 +303,11 @@ export function parseContextView(value: unknown): ContextView | undefined {
   const files = Array.isArray(data.files)
     ? data.files.slice(0, MAX_ITEMS).map(contextFile).filter((entry): entry is ContextFile => Boolean(entry))
     : [];
-  const warnings = Array.isArray(envelope.warnings)
-    ? envelope.warnings.slice(0, MAX_ITEMS).map(contextWarning).filter((entry): entry is ContextWarning => Boolean(entry))
-    : [];
-
   return {
     schemaVersion: SCHEMA_VERSION,
     view: "context",
-    project: { id: projectId, name: projectName, kind: projectKind },
-    sourceState: { status },
+    project,
+    sourceState,
     data: {
       stats: {
         files: count(stats.files),
@@ -219,10 +321,93 @@ export function parseContextView(value: unknown): ContextView | undefined {
   };
 }
 
+export function parseRepositoryOverviewView(value: unknown): RepositoryOverviewView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "repo-overview") return undefined;
+  const { project, sourceState, data, warnings } = common;
+  const purpose = overviewStatement(data.purpose);
+  const need = record(data.need);
+  const problem = overviewStatement(need?.problem);
+  const solution = overviewStatement(need?.solution);
+  const stats = record(data.stats);
+  if (!purpose || !need || !problem || !solution || !stats) return undefined;
+
+  const workflow = Array.isArray(data.workflow)
+    ? data.workflow.slice(0, 7).flatMap((value) => {
+      const item = record(value);
+      const step = count(item?.step);
+      const title = displayText(item?.title);
+      if (!item || step < 1 || !title) return [];
+      return [{ step, title, detail: displayText(item.detail), evidence: evidenceList(item.evidence) }];
+    })
+    : [];
+  const modules = Array.isArray(data.modules)
+    ? data.modules.slice(0, 8).flatMap((value) => {
+      const item = record(value);
+      if (!item || item.layer !== "L2") return [];
+      const id = displayText(item.id);
+      const name = displayText(item.name);
+      if (!id || !name) return [];
+      const paths = Array.isArray(item.paths)
+        ? item.paths.slice(0, 3).map((path) => text(path)).filter(isCanonicalRelativePath)
+        : [];
+      return [{
+        id,
+        name,
+        summary: displayText(item.summary),
+        paths,
+        layer: "L2" as const,
+        source: displayText(item.source),
+        confidence: confidence(item.confidence),
+        evidence: evidenceList(item.evidence),
+      }];
+    })
+    : [];
+  const readingOrder = Array.isArray(data.readingOrder)
+    ? data.readingOrder.slice(0, 7).flatMap((value) => {
+      const item = record(value);
+      const position = count(item?.position);
+      const path = text(item?.path);
+      if (!item || position < 1 || !isCanonicalRelativePath(path)) return [];
+      return [{ position, path, reason: displayText(item.reason), evidence: evidenceList(item.evidence) }];
+    })
+    : [];
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "repo-overview",
+    project,
+    sourceState,
+    data: {
+      purpose,
+      need: { problem, solution },
+      workflow,
+      modules,
+      readingOrder,
+      stats: {
+        files: count(stats.files),
+        concepts: count(stats.concepts),
+        tasks: count(stats.tasks),
+        documentsRead: count(stats.documentsRead),
+      },
+    },
+    warnings,
+  };
+}
+
+export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
+  return parseContextView(value) ?? parseRepositoryOverviewView(value);
+}
+
 export function parseTaskQuery(value: unknown): string | undefined {
   const input = record(value);
   const query = text(input?.query).trim();
   return query ? safeTaskQuery(query) : undefined;
+}
+
+export function parseRequestedView(value: unknown): AgentNaviView["view"] | undefined {
+  const input = record(value);
+  return input?.view === "context" || input?.view === "repo-overview" ? input.view : undefined;
 }
 
 export function parsePublicError(value: unknown): PublicError | undefined {

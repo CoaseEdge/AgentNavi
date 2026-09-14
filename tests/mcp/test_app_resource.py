@@ -78,11 +78,11 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             self.assertEqual(tools["agentnavi_visualize"].meta, APP_TOOL_META)
             self.assertEqual(
                 tools["agentnavi_visualize"].input_schema["required"],
-                ["view", "query"],
+                ["view"],
             )
             self.assertEqual(
-                tools["agentnavi_visualize"].input_schema["properties"]["view"]["const"],
-                "context",
+                tools["agentnavi_visualize"].input_schema["properties"]["view"]["enum"],
+                ["context", "repo-overview"],
             )
             self.assertEqual(
                 tools["agentnavi_visualize"].output_schema,

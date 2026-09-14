@@ -37,6 +37,35 @@ function fixture() {
   };
 }
 
+function overviewFixture() {
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "repo-overview",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      purpose: {
+        summary: "帮助协作者理解项目 <script>alert(1)</script>",
+        evidence: [{ kind: "document", summary: "说明", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 4 }],
+      },
+      need: {
+        problem: { summary: "重复搜索", evidence: [] },
+        solution: { summary: "证据导航", evidence: [] },
+      },
+      workflow: Array.from({ length: 7 }, (_, index) => ({
+        step: index + 1,
+        title: `步骤 ${index + 1}`,
+        detail: `步骤 ${index + 1}`,
+        evidence: [{ kind: "document", summary: "流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md", lineStart: index + 3 }],
+      })),
+      modules: [{ id: "core", name: "Core", summary: "核心模块", paths: ["src/core.py"], layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [] }],
+      readingOrder: [{ position: 1, path: "README.md", reason: "先读目的", evidence: [] }],
+      stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
 function setup() {
   const { document } = parseHTML(html);
   globalThis.document = document;
@@ -59,6 +88,29 @@ test("bridge renders a successful result as text and preserves concept-file evid
   assert.equal(document.querySelector(".concept-file-links code").textContent, "src/membership.py");
   assert.match(document.querySelector(".file-node .node-meta").textContent, /^候选 · matched/);
   assert.equal(document.querySelector("#connection-label").textContent, "已连接");
+});
+
+test("renderer registry shows repository overview with safe DOM and evidence", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "repo-overview" });
+  assert.equal(document.querySelector("#view-title").textContent, "Repository Overview");
+  assert.equal(document.querySelector("#context-map").hidden, true);
+  applyToolResult(shell, { structuredContent: overviewFixture() });
+
+  assert.equal(document.querySelector("#repository-view").hidden, false);
+  assert.equal(document.querySelector("#context-map").hidden, true);
+  assert.equal(document.querySelector("#view-title").textContent, "Repository Overview");
+  assert.equal(document.querySelector("#overview-workflow").children.length, 7);
+  assert.equal(document.querySelector("#overview-purpose script"), null);
+  assert.equal(document.querySelector("#overview-purpose").textContent, "[内容含路径，已隐藏]");
+  assert.equal(document.querySelector("#purpose-evidence").textContent, "证据 · README.md:4");
+  assert.match(document.querySelector("#overview-reading-order").textContent, /README\.md/);
+  assert.equal(document.querySelector("#connection-label").textContent, "已连接");
+
+  applyToolResult(shell, { structuredContent: fixture() });
+  assert.equal(document.querySelector("#repository-view").hidden, true);
+  assert.equal(document.querySelector("#overview-workflow").children.length, 0);
+  assert.equal(document.querySelector("#context-map").hidden, false);
 });
 
 test("new input clears stale data before an error and keeps status perceivable", () => {

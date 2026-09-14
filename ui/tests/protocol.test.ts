@@ -1,7 +1,10 @@
 import {
   isCanonicalRelativePath,
+  parseAgentNaviView,
   parseContextView,
   parsePublicError,
+  parseRepositoryOverviewView,
+  parseRequestedView,
   parseTaskQuery,
 } from "../src/protocol.js";
 
@@ -37,7 +40,7 @@ assert(view.data.concepts[0]?.confidence === 1, "置信度应限制在有效范�
 assert(view.data.files[0]?.path === "src/membership.py", "应接受 POSIX 相对路径");
 
 assert(parseContextView({ ...fixture, schemaVersion: "future" }) === undefined, "应拒绝未知协议");
-assert(parseContextView({ ...fixture, view: "impact" }) === undefined, "S04 应拒绝非 context 视图");
+assert(parseContextView({ ...fixture, view: "repo-overview" }) === undefined, "Context parser 应拒绝其他视图");
 const unsafe = structuredClone(fixture);
 unsafe.data.files[0]!.path = "/private/project.py";
 assert(parseContextView(unsafe)?.data.files.length === 0, "应丢弃绝对路径");
@@ -86,5 +89,47 @@ assert(
     "请求参数无效，请检查参数类型和取值。",
   "应只显示本地固定公开错误，不回显远端 message",
 );
+
+const overviewFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "repo-overview",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    purpose: {
+      summary: "帮助协作者理解项目",
+      evidence: [{ kind: "document", summary: "项目说明", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 }],
+    },
+    need: {
+      problem: { summary: "重复搜索", evidence: [] },
+      solution: { summary: "证据导航", evidence: [] },
+    },
+    workflow: Array.from({ length: 7 }, (_, index) => ({
+      step: index + 1,
+      title: `步骤 ${index + 1}`,
+      detail: `步骤 ${index + 1}`,
+      evidence: [{ kind: "document", summary: "流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md", lineStart: index + 3 }],
+    })),
+    modules: [{ id: "concept:core", name: "Core", summary: "核心模块", paths: ["src/core.py"], layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [] }],
+    readingOrder: [{ position: 1, path: "README.md", reason: "先读目的", evidence: [] }],
+    stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+  },
+  warnings: [],
+};
+
+const overview = parseRepositoryOverviewView(overviewFixture);
+assert(overview?.data.workflow.length === 7, "应解析 5–7 步主流程");
+assert(overview?.data.purpose.evidence[0]?.path === "README.md", "应保留规范证据路径");
+assert(parseAgentNaviView(overviewFixture)?.view === "repo-overview", "通用 parser 应分派 Overview");
+assert(parseRequestedView({ view: "repo-overview" }) === "repo-overview", "应识别 Overview 请求");
+
+const unsafeOverview = structuredClone(overviewFixture);
+unsafeOverview.data.purpose.summary = "secret at /private/project";
+unsafeOverview.data.purpose.evidence[0]!.path = "../outside.md";
+unsafeOverview.data.modules[0]!.paths = ["file:///private/source.py"];
+const sanitizedOverview = parseRepositoryOverviewView(unsafeOverview);
+assert(sanitizedOverview?.data.purpose.summary === "[内容含路径，已隐藏]", "应隐藏递归文本路径");
+assert(sanitizedOverview?.data.purpose.evidence.length === 0, "应丢弃不规范 Evidence 路径");
+assert(sanitizedOverview?.data.modules[0]?.paths.length === 0, "应丢弃模块中的不规范路径");
 
 console.log("protocol unit checks passed");

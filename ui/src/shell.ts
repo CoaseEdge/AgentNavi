@@ -1,4 +1,6 @@
-import type { ContextConcept, ContextFile, ContextView } from "./protocol.js";
+import type { AgentNaviView, ContextConcept, ContextFile, ContextView } from "./protocol.js";
+import { renderRegisteredView } from "./views/index.js";
+import { clearRepositoryOverview } from "./views/repo-overview.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -73,12 +75,28 @@ export class AgentNaviShell {
     if (query) this.query = query;
   }
 
-  beginRequest(query: string | undefined): void {
+  private setViewIdentity(view: AgentNaviView["view"]): void {
+    if (view === "repo-overview") {
+      replaceText(element("view-title"), "Repository Overview");
+      replaceText(element("view-eyebrow"), "REPOSITORY UNDERSTANDING");
+      replaceText(element("view-description"), "用证据建立项目目的、主流程、模块与首读路径。");
+    } else {
+      replaceText(element("view-title"), "ContextMap");
+      replaceText(element("view-eyebrow"), "READING CONTEXT");
+      replaceText(element("view-description"), "从当前任务，沿概念定位到必要文件。");
+    }
+  }
+
+  beginRequest(query: string | undefined, view: AgentNaviView["view"] = "context"): void {
     this.setQuery(query);
     this.clearResult();
+    this.setViewIdentity(view);
     replaceText(element("task-query"), this.query);
-    replaceText(element("empty-title"), "正在读取 Context");
-    replaceText(element("empty-message"), "新请求已收到，旧导航结果已清除。");
+    replaceText(
+      element("empty-title"),
+      view === "repo-overview" ? "正在读取项目概览" : "正在读取 Context",
+    );
+    replaceText(element("empty-message"), "新请求已收到，旧视图结果已清除。");
     element("empty-state").hidden = false;
     this.setConnection("正在查询", true);
   }
@@ -92,6 +110,7 @@ export class AgentNaviShell {
 
   private clearResult(): void {
     element("context-map").hidden = true;
+    clearRepositoryOverview();
     element("concept-list").replaceChildren();
     element("file-list").replaceChildren();
     element("warning-list").replaceChildren();
@@ -103,19 +122,25 @@ export class AgentNaviShell {
     replaceText(element("file-count"), "0");
   }
 
-  render(view: ContextView): void {
-    element("error-panel").hidden = true;
-    replaceText(element("project-name"), view.project.name);
-    replaceText(element("source-state"), view.sourceState.status.toUpperCase());
-    replaceText(element("file-count"), String(view.data.stats.files));
+  private renderContext(view: ContextView): void {
     replaceText(element("task-query"), this.query);
-
     element("concept-list").replaceChildren(
       ...view.data.concepts.map((concept, index) => conceptNode(concept, index)),
     );
     element("file-list").replaceChildren(
       ...view.data.files.map((file, index) => fileNode(file, index)),
     );
+    element("context-map").hidden = false;
+  }
+
+  render(view: AgentNaviView): void {
+    this.clearResult();
+    replaceText(element("project-name"), view.project.name);
+    replaceText(element("source-state"), view.sourceState.status.toUpperCase());
+    replaceText(element("file-count"), String(view.data.stats.files));
+    this.setViewIdentity(view.view);
+
+    renderRegisteredView(view, (context) => this.renderContext(context));
 
     const warningPanel = element("warning-panel");
     const warningList = element("warning-list");
@@ -128,6 +153,5 @@ export class AgentNaviShell {
     );
     warningPanel.hidden = view.warnings.length === 0;
     element("empty-state").hidden = true;
-    element("context-map").hidden = false;
   }
 }
