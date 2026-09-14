@@ -10,6 +10,7 @@ from .semantic_relations import CONCEPT_FILE_MAPPING_RELATIONS_SQL
 from .utils import json_dumps, stable_id, utc_now
 
 SCHEMA_VERSION = 4
+L2_CONCEPT_EDGE_PROJECTION_VERSION = 1
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -271,57 +272,36 @@ class Database:
     def initialize(self) -> None:
         self.settings.ensure_layout()
         with self.connect() as connection:
-            objects = {str(row[0]) for row in connection.execute(
-                """SELECT name FROM sqlite_master
-                   WHERE name IN (
-                     'meta', 'l2_concept_edges',
-                     'idx_edges_source_relation', 'idx_edges_target_relation',
-                     'idx_edges_target_provenance',
-                     'idx_edges_source_semantic_v2', 'idx_edges_target_semantic_v2',
-                     'idx_l2_concept_edges_source', 'idx_l2_concept_edges_target',
-                     'trg_l2_concept_edges_insert', 'trg_l2_concept_edges_update',
-                     'trg_l2_concept_edges_node_identity'
-                   )"""
-            )}
-            old_version: int | None = None
-            if "meta" in objects:
-                row = connection.execute(
-                    "SELECT value FROM meta WHERE key='schema_version'"
-                ).fetchone()
-                if row is not None:
-                    old_version = int(row["value"])
+            objects, old_version, projection_version = self._schema_state(connection)
             if old_version is not None and old_version > SCHEMA_VERSION:
                 raise RuntimeError(
                     f"数据库 schema 版本 {old_version} 高于当前程序支持的 {SCHEMA_VERSION}"
                 )
-            required = {
-                "meta", "l2_concept_edges",
-                "idx_edges_source_relation", "idx_edges_target_relation",
-                "idx_edges_target_provenance",
-                "idx_edges_source_semantic_v2", "idx_edges_target_semantic_v2",
-                "idx_l2_concept_edges_source", "idx_l2_concept_edges_target",
-                "trg_l2_concept_edges_insert", "trg_l2_concept_edges_update",
-                "trg_l2_concept_edges_node_identity",
-            }
-            if old_version == SCHEMA_VERSION and required <= objects:
+            if self._schema_is_current(objects, old_version, projection_version):
                 return
 
-            lookup_was_missing = "l2_concept_edges" not in objects
-            connection.executescript(SCHEMA)
-            if old_version is None or old_version < SCHEMA_VERSION or lookup_was_missing:
-                connection.execute("BEGIN IMMEDIATE")
-                current_row = connection.execute(
-                    "SELECT value FROM meta WHERE key='schema_version'"
-                ).fetchone()
-                current_version = int(current_row["value"]) if current_row is not None else None
-                lookup_has_rows = connection.execute(
-                    "SELECT 1 FROM l2_concept_edges LIMIT 1"
-                ).fetchone() is not None
-                should_rebuild = (
-                    current_version is None or current_version < SCHEMA_VERSION
-                    or (lookup_was_missing and not lookup_has_rows)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_objects, locked_version, locked_projection = self._schema_state(connection)
+                if locked_version is not None and locked_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"数据库 schema 版本 {locked_version} 高于当前程序支持的 {SCHEMA_VERSION}"
+                    )
+                if self._schema_is_current(
+                    locked_objects, locked_version, locked_projection
+                ):
+                    connection.commit()
+                    return
+
+                projection_incomplete = (
+                    locked_version is None or locked_version < SCHEMA_VERSION
+                    or locked_projection != L2_CONCEPT_EDGE_PROJECTION_VERSION
+                    or not self._projection_objects() <= locked_objects
                 )
-                if should_rebuild:
+                self._execute_schema(connection)
+                if projection_incomplete:
                     connection.execute("DELETE FROM l2_concept_edges")
                     connection.execute(
                         """INSERT INTO l2_concept_edges(
@@ -339,11 +319,81 @@ class Database:
                            WHERE edge.layer=2"""
                     )
                     connection.execute(
-                        "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                        "INSERT INTO meta(key, value) VALUES(?, ?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        (str(SCHEMA_VERSION),),
+                        ("l2_concept_edges_projection_version",
+                         str(L2_CONCEPT_EDGE_PROJECTION_VERSION)),
                     )
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(SCHEMA_VERSION),),
+                )
                 connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    @staticmethod
+    def _projection_objects() -> set[str]:
+        return {
+            "l2_concept_edges",
+            "idx_l2_concept_edges_source", "idx_l2_concept_edges_target",
+            "trg_l2_concept_edges_insert", "trg_l2_concept_edges_update",
+            "trg_l2_concept_edges_node_identity",
+        }
+
+    @classmethod
+    def _required_schema_objects(cls) -> set[str]:
+        return {
+            "meta",
+            "idx_edges_source_relation", "idx_edges_target_relation",
+            "idx_edges_target_provenance",
+            "idx_edges_source_semantic_v2", "idx_edges_target_semantic_v2",
+            *cls._projection_objects(),
+        }
+
+    @classmethod
+    def _schema_is_current(cls, objects: set[str], version: int | None,
+                           projection_version: int | None) -> bool:
+        return (
+            version == SCHEMA_VERSION
+            and projection_version == L2_CONCEPT_EDGE_PROJECTION_VERSION
+            and cls._required_schema_objects() <= objects
+        )
+
+    @classmethod
+    def _schema_state(cls, connection: sqlite3.Connection) -> tuple[set[str], int | None, int | None]:
+        names = cls._required_schema_objects()
+        placeholders = ",".join("?" for _ in names)
+        objects = {str(row[0]) for row in connection.execute(
+            f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
+            tuple(sorted(names)),
+        )}
+        if "meta" not in objects:
+            return objects, None, None
+        values = {str(row["key"]): str(row["value"]) for row in connection.execute(
+            "SELECT key,value FROM meta WHERE key IN "
+            "('schema_version','l2_concept_edges_projection_version')"
+        )}
+        version = int(values["schema_version"]) if "schema_version" in values else None
+        projection = (int(values["l2_concept_edges_projection_version"])
+                      if "l2_concept_edges_projection_version" in values else None)
+        return objects, version, projection
+
+    @staticmethod
+    def _execute_schema(connection: sqlite3.Connection) -> None:
+        statement = ""
+        for line in SCHEMA.splitlines():
+            if not statement and line.strip().upper().startswith("PRAGMA "):
+                continue
+            statement = f"{statement}\n{line}" if statement else line
+            if sqlite3.complete_statement(statement):
+                if statement.strip():
+                    connection.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise RuntimeError("数据库 schema 包含不完整语句。")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

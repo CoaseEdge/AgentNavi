@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -837,6 +838,7 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertEqual(after_mtime, before_mtime)
 
     def test_schema_v4_lookup_migration_is_concurrent_and_idempotent(self) -> None:
+        self.assertNotIn("executescript", inspect.getsource(Database.initialize))
         with self.database.connect() as connection:
             connection.execute("DROP TRIGGER trg_l2_concept_edges_insert")
             connection.execute("DROP TRIGGER trg_l2_concept_edges_update")
@@ -845,14 +847,7 @@ class ImpactViewTestCase(unittest.TestCase):
             connection.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
             connection.commit()
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(ensure_database, self.database.settings) for _ in range(2)]
-            databases = [future.result(timeout=10) for future in futures]
-        self.assertEqual(len(databases), 2)
         with self.database.connect() as connection:
-            count, distinct_count = connection.execute(
-                "SELECT COUNT(*), COUNT(DISTINCT edge_id) FROM l2_concept_edges"
-            ).fetchone()
             expected = connection.execute(
                 """SELECT COUNT(*) FROM edges edge
                    JOIN nodes source ON source.id=edge.source_id
@@ -863,12 +858,186 @@ class ImpactViewTestCase(unittest.TestCase):
                      AND target.layer=2 AND target.kind='concept'
                    WHERE edge.layer=2"""
             ).fetchone()[0]
+        barrier = threading.Barrier(2)
+        original_connect = Database.connect
+
+        @contextmanager
+        def synchronized_connect(database: Database):
+            with original_connect(database) as connection:
+                def trace(statement: str) -> None:
+                    if statement.strip().upper() == "BEGIN IMMEDIATE":
+                        barrier.wait(timeout=5)
+                connection.set_trace_callback(trace)
+                try:
+                    yield connection
+                finally:
+                    connection.set_trace_callback(None)
+
+        def initialize_and_count() -> int:
+            database = ensure_database(self.database.settings)
+            with original_connect(database) as connection:
+                return int(connection.execute(
+                    "SELECT COUNT(*) FROM l2_concept_edges"
+                ).fetchone()[0])
+
+        with patch.object(Database, "connect", synchronized_connect):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(initialize_and_count) for _ in range(2)]
+                returned_counts = [future.result(timeout=10) for future in futures]
+        self.assertEqual(returned_counts, [expected, expected])
+        with self.database.connect() as connection:
+            count, distinct_count = connection.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT edge_id) FROM l2_concept_edges"
+            ).fetchone()
             version = int(connection.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()[0])
         self.assertEqual(count, expected)
         self.assertEqual(distinct_count, expected)
         self.assertEqual(version, SCHEMA_VERSION)
+
+    def test_missing_projection_index_forces_complete_rebuild(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        dependency = Database.node_id("fixture", 2, "concept", "dependency")
+        edge_id = Database.edge_id("fixture", 2, focus, "depends_on", dependency)
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM l2_concept_edges WHERE edge_id=?", (edge_id,))
+            connection.execute("DROP INDEX idx_l2_concept_edges_source")
+            connection.commit()
+        ensure_database(self.database.settings)
+        with self.database.connect() as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM l2_concept_edges WHERE edge_id=?", (edge_id,),
+            ).fetchone())
+
+    def test_missing_maintenance_triggers_force_backfill_of_missed_writes(self) -> None:
+        now = "2026-09-15T10:00:00+00:00"
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        cases: list[tuple[str, str]] = []
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_insert")
+            insert_peer = Database.upsert_node(
+                connection, project_id="fixture", layer=2, kind="concept",
+                key="missed-insert", label="Missed insert", source="human-overlay",
+            )
+            insert_edge = Database.edge_id("fixture", 2, focus, "insert_case", insert_peer)
+            connection.execute(
+                """INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,
+                                     data_json,confidence,source,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (insert_edge, "fixture", 2, focus, "insert_case", insert_peer,
+                 "{}", 1.0, "human-overlay", now, now),
+            )
+            connection.commit()
+            cases.append(("trg_l2_concept_edges_insert", insert_edge))
+        ensure_database(self.database.settings)
+
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_update")
+            update_peer = Database.upsert_node(
+                connection, project_id="fixture", layer=2, kind="concept",
+                key="missed-update", label="Missed update", source="human-overlay",
+            )
+            update_edge = Database.edge_id("fixture", 1, focus, "update_case", update_peer)
+            connection.execute(
+                """INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,
+                                     data_json,confidence,source,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (update_edge, "fixture", 1, focus, "update_case", update_peer,
+                 "{}", 1.0, "human-overlay", now, now),
+            )
+            connection.execute("UPDATE edges SET layer=2 WHERE id=?", (update_edge,))
+            connection.commit()
+            cases.append(("trg_l2_concept_edges_update", update_edge))
+        ensure_database(self.database.settings)
+
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_node_identity")
+            node_peer = Database.upsert_node(
+                connection, project_id="fixture", layer=2, kind="file",
+                key="missed-node", label="Missed node", source="human-overlay",
+            )
+            node_edge = Database.edge_id("fixture", 2, focus, "node_case", node_peer)
+            connection.execute(
+                """INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,
+                                     data_json,confidence,source,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (node_edge, "fixture", 2, focus, "node_case", node_peer,
+                 "{}", 1.0, "human-overlay", now, now),
+            )
+            connection.execute("UPDATE nodes SET kind='concept' WHERE id=?", (node_peer,))
+            connection.commit()
+            cases.append(("trg_l2_concept_edges_node_identity", node_edge))
+        ensure_database(self.database.settings)
+
+        with self.database.connect() as connection:
+            for trigger, edge_id in cases:
+                with self.subTest(trigger=trigger):
+                    self.assertIsNotNone(connection.execute(
+                        "SELECT 1 FROM l2_concept_edges WHERE edge_id=?", (edge_id,),
+                    ).fetchone())
+
+    def test_migration_backfill_includes_writer_committed_while_waiting_for_lock(self) -> None:
+        now = "2026-09-15T10:00:00+00:00"
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_insert")
+            old_peer = Database.upsert_node(
+                connection, project_id="fixture", layer=2, kind="concept",
+                key="old-missed", label="Old missed", source="human-overlay",
+            )
+            old_edge = Database.edge_id("fixture", 2, focus, "old_case", old_peer)
+            connection.execute(
+                """INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,
+                                     data_json,confidence,source,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (old_edge, "fixture", 2, focus, "old_case", old_peer,
+                 "{}", 1.0, "human-overlay", now, now),
+            )
+            connection.commit()
+
+        begin_seen = threading.Event()
+        original_connect = Database.connect
+        with self.database.connect() as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            new_peer = Database.upsert_node(
+                writer, project_id="fixture", layer=2, kind="concept",
+                key="concurrent-missed", label="Concurrent missed", source="human-overlay",
+            )
+            new_edge = Database.edge_id("fixture", 2, focus, "concurrent_case", new_peer)
+            writer.execute(
+                """INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,
+                                     data_json,confidence,source,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (new_edge, "fixture", 2, focus, "concurrent_case", new_peer,
+                 "{}", 1.0, "human-overlay", now, now),
+            )
+
+            @contextmanager
+            def traced_connect(database: Database):
+                with original_connect(database) as connection:
+                    connection.set_trace_callback(
+                        lambda statement: begin_seen.set()
+                        if statement.strip().upper() == "BEGIN IMMEDIATE" else None
+                    )
+                    try:
+                        yield connection
+                    finally:
+                        connection.set_trace_callback(None)
+
+            with patch.object(Database, "connect", traced_connect):
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(ensure_database, self.database.settings)
+                    self.assertTrue(begin_seen.wait(timeout=3))
+                    writer.commit()
+                    future.result(timeout=10)
+
+        with self.database.connect() as connection:
+            projected = {str(row[0]) for row in connection.execute(
+                "SELECT edge_id FROM l2_concept_edges WHERE edge_id IN (?,?)",
+                (old_edge, new_edge),
+            )}
+        self.assertEqual(projected, {old_edge, new_edge})
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")
