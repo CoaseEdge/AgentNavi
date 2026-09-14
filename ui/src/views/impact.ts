@@ -28,7 +28,7 @@ function appendEvidence(node: HTMLElement, evidence: Evidence[]): void {
 
 export function clearImpact(): void {
   byId("impact-view").hidden = true;
-  for (const id of ["impact-semantic", "impact-incoming", "impact-outgoing", "impact-history", "impact-tests", "impact-risks", "impact-actions", "impact-anchors"]) byId(id).replaceChildren();
+  for (const id of ["impact-semantic", "impact-incoming", "impact-outgoing", "impact-history", "impact-tests", "impact-risks", "impact-actions", "impact-anchors", "impact-concepts"]) byId(id).replaceChildren();
   replaceText(byId("impact-focus-label"), "");
   replaceText(byId("impact-focus-path"), "");
 }
@@ -38,8 +38,14 @@ export function renderImpact(view: ImpactView): void {
   replaceText(byId("impact-focus-label"), focus.label);
   replaceText(byId("impact-focus-path"), focus.path ?? "概念焦点");
   byId("impact-anchors").replaceChildren(...view.data.anchorFiles.map((item) => {
-    const node = document.createElement("li"); const path = document.createElement("code");
-    replaceText(path, item.entity.path ?? item.entity.label); node.append(path); appendEvidence(node, item.evidence); return node;
+    const node = document.createElement("li"); const path = document.createElement("code"); const relation = document.createElement("span");
+    replaceText(path, item.entity.path ?? item.entity.label); replaceText(relation, item.mapping?.relation ?? "identity");
+    node.append(path, relation); appendEvidence(node, item.evidence); return node;
+  }));
+  byId("impact-concepts").replaceChildren(...view.data.focusConcepts.map((item) => {
+    const node = document.createElement("li"); const label = document.createElement("strong"); const relation = document.createElement("span");
+    replaceText(label, item.entity.label); replaceText(relation, item.mapping?.relation ?? "identity");
+    node.append(label, relation); appendEvidence(node, item.evidence); return node;
   }));
   byId("impact-incoming").replaceChildren(...view.data.incoming.map((item) => laneCard(item, true)));
   byId("impact-outgoing").replaceChildren(...view.data.outgoing.map((item) => laneCard(item, false)));

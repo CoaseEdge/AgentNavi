@@ -660,26 +660,52 @@ class FlowViewOutput(_ExtensibleModel):
         return value
 
 
+class ImpactFileEntityOutput(ArchitectureEntryEntityOutput):
+    path: str = Field(min_length=1)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=8)
+
+
+class ImpactConceptEntityOutput(ArchitectureComponentEntityOutput):
+    kind: Literal["concept"]
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=8)
+
+
+ImpactFocusEntityOutput = Annotated[
+    ImpactFileEntityOutput | ImpactConceptEntityOutput,
+    Field(discriminator="kind"),
+]
+
+
 class ImpactFocusOutput(_ExtensibleModel):
-    entity: TourEntityOutput
+    entity: ImpactFocusEntityOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactAnchorRelationOutput(ArchitectureConnectionOutput):
+    relation: Literal["implemented_by", "configured_by"]
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactOwnershipRelationOutput(ArchitectureConnectionOutput):
+    relation: Literal["implemented_by", "configured_by", "tested_by"]
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactAnchorOutput(_ExtensibleModel):
-    entity: ArchitectureEntryEntityOutput
-    mapping: ArchitectureConnectionOutput | None
+    entity: ImpactFileEntityOutput
+    mapping: ImpactAnchorRelationOutput | None
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactFocusConceptOutput(_ExtensibleModel):
-    entity: ArchitectureComponentEntityOutput
-    mapping: ArchitectureConnectionOutput | None
+    entity: ImpactConceptEntityOutput
+    mapping: ImpactOwnershipRelationOutput | None
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactLaneOutput(_ExtensibleModel):
-    peer: ArchitectureEntryEntityOutput
-    relation: TourRelationOutput
+    peer: ImpactFileEntityOutput
+    relation: "ImpactL1RelationOutput"
     via_path: str = Field(alias="viaPath", min_length=1)
     recorded_order: int = Field(alias="recordedOrder", ge=1)
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
@@ -688,8 +714,8 @@ class ImpactLaneOutput(_ExtensibleModel):
 class ImpactSemanticOutput(_ExtensibleModel):
     direction: Literal["incoming", "outgoing"]
     focus_concept_id: str = Field(alias="focusConceptId", min_length=1)
-    peer: ArchitectureComponentEntityOutput
-    relation: ArchitectureConnectionOutput
+    peer: ImpactConceptEntityOutput
+    relation: "ImpactL2RelationOutput"
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
@@ -705,22 +731,70 @@ class ImpactSemanticOutput(_ExtensibleModel):
         return self
 
 
+class ImpactTaskEvidenceOutput(TourEvidenceOutput):
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+
+
+class ImpactTaskEntityOutput(FlowTaskEntityOutput):
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
 class ImpactHistoryOutput(_ExtensibleModel):
-    entity: FlowTaskEntityOutput
+    entity: ImpactTaskEntityOutput
     status: str = Field(min_length=1)
-    relation: TourRelationOutput
+    relation: "ImpactL3RelationOutput"
     recorded_order: int = Field(alias="recordedOrder", ge=1)
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
-class ImpactTestOutput(_ExtensibleModel):
-    basis: Literal["physical-tests", "semantic-tested-by"]
+class ImpactL1RelationOutput(TourRelationOutput):
+    layer: Literal["L1"]
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactL2RelationOutput(ArchitectureConnectionOutput):
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactL3RelationOutput(TourRelationOutput):
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactPhysicalTestOutput(_ExtensibleModel):
+    basis: Literal["physical-tests"]
     path: str = Field(min_length=1)
     reason: str = Field(min_length=1)
-    source_concept: ArchitectureComponentEntityOutput | None = Field(alias="sourceConcept")
-    entity: ArchitectureEntryEntityOutput
-    relation: TourRelationOutput
+    source_concept: None = Field(alias="sourceConcept")
+    entity: ImpactFileEntityOutput
+    relation: "ImpactPhysicalTestRelationOutput"
     evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactSemanticTestOutput(_ExtensibleModel):
+    basis: Literal["semantic-tested-by"]
+    path: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    source_concept: ImpactConceptEntityOutput = Field(alias="sourceConcept")
+    entity: ImpactFileEntityOutput
+    relation: "ImpactSemanticTestRelationOutput"
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+ImpactTestOutput = Annotated[
+    ImpactPhysicalTestOutput | ImpactSemanticTestOutput,
+    Field(discriminator="basis"),
+]
+
+
+class ImpactPhysicalTestRelationOutput(ImpactL1RelationOutput):
+    relation: Literal["tests"]
+
+
+class ImpactSemanticTestRelationOutput(ImpactL2RelationOutput):
+    relation: Literal["tested_by"]
 
 
 class ImpactRiskOutput(_ExtensibleModel):
@@ -802,7 +876,10 @@ class ImpactDataOutput(_ExtensibleModel):
         valid_targets = {self.focus.entity.id, *anchors.values(), *concept_ids}
         if any(item.entity.source != "task-events" or item.relation.source != "task-events"
                or item.relation.source_id != item.entity.id
-               or item.relation.target_id not in valid_targets for item in self.history):
+               or item.relation.target_id not in valid_targets
+               or item.entity.evidence != item.evidence
+               or any(e.layer != "L3" or e.source != "task-events" for e in item.entity.evidence)
+               for item in self.history):
             raise ValueError("history provenance invalid")
         lane_edges = {item.relation.id: item.relation for item in self.incoming + self.outgoing}
         for item in self.test_recommendations:
@@ -826,7 +903,8 @@ class ImpactDataOutput(_ExtensibleModel):
                             *(item.entity for item in self.test_recommendations),
                             *(item.source_concept for item in self.test_recommendations if item.source_concept)]
         for entity in visible_entities:
-            signature = (entity.kind, entity.layer, entity.path, entity.label, entity.source, entity.confidence)
+            signature = (entity.kind, entity.layer, entity.path, entity.label, entity.source,
+                         entity.confidence, tuple(item.model_dump_json(by_alias=True) for item in entity.evidence))
             if entity.id in edge_ids or (entity.id in entity_signatures and entity_signatures[entity.id] != signature):
                 raise ValueError("visible entity registry conflict")
             entity_signatures[entity.id] = signature
@@ -892,6 +970,37 @@ CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
 IMPACT_TOOL_RESULT = Annotated[CallToolResult, ImpactViewOutput]
 VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 
+
+class _VisualizeInputBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str | None = Field(default=None, min_length=1, max_length=4096)
+    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
+class VisualizeContextInput(_VisualizeInputBase):
+    view: Literal["context"]
+    query: str = Field(min_length=1, max_length=4096)
+
+
+class VisualizeImpactInput(_VisualizeInputBase):
+    view: Literal["impact"]
+    query: str = Field(min_length=1, max_length=4096)
+
+
+class VisualizeRepositoryInput(_VisualizeInputBase):
+    view: Literal["repo-overview", "repo-tour", "architecture", "flow"]
+    query: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
+class VisualizeInput(RootModel[Annotated[
+    VisualizeContextInput | VisualizeImpactInput | VisualizeRepositoryInput,
+    Field(discriminator="view"),
+]]):
+    pass
+
+
+VISUALIZE_INPUT_SCHEMA = {"type": "object", **VisualizeInput.model_json_schema()}
+
 # MCPServer 会在调用函数之前按类型注解验证输入。这里用 Any 接住原始值，
 # 保证所有错误都能进入 AgentNavi 的公开错误边界；WithJsonSchema 只负责让
 # tools/list 继续发布精确的 string / const 合同，不依赖 SDK 私有实现。
@@ -935,6 +1044,7 @@ __all__ = [
     "IMPACT_TOOL_RESULT",
     "ImpactViewOutput",
     "VISUALIZE_TOOL_RESULT",
+    "VISUALIZE_INPUT_SCHEMA",
     "VISUALIZE_VIEW_INPUT",
     "OPTIONAL_TEXT_INPUT",
     "REQUIRED_TEXT_INPUT",

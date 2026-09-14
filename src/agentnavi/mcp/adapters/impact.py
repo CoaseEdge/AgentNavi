@@ -12,7 +12,8 @@ from .repo_tour import _entity, _relation
 _ACTIONS = (("purpose", "它做什么"), ("callers", "谁调用它"),
             ("dependencies", "它依赖谁"), ("change", "如果修改它"),
             ("history", "过去谁改过它"))
-_MAPPINGS = {"implemented_by", "configured_by"}
+_ANCHOR_MAPPINGS = {"implemented_by", "configured_by"}
+_OWNERSHIP_MAPPINGS = _ANCHOR_MAPPINGS | {"tested_by"}
 
 
 def _required(value: Any, field: str, limit: int = 320) -> str:
@@ -44,9 +45,13 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     known_evidence: set[str] = set()
 
     def entity(value: Any, field: str) -> dict[str, Any]:
+        raw = _mapping(value, field)
+        raw_evidence = _sequence(raw.get("evidence", []), f"{field}.evidence")
+        if not raw_evidence or len(raw_evidence) > 8:
+            raise ValueError(f"{field}.evidence 无效。")
         parsed = _entity(value, field)
         signature = _sig({key: parsed.get(key) for key in
-                          ("kind", "label", "path", "layer", "source", "confidence")})
+                          ("kind", "label", "path", "layer", "source", "confidence", "evidence")})
         if entities.setdefault(parsed["id"], signature) != signature or parsed["id"] in edges:
             raise ValueError("impact entity id 冲突。")
         known_evidence.update(_sig(item) for item in parsed["evidence"])
@@ -90,7 +95,7 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         mapping = edge(item["mapping"], "impact.anchorFiles.mapping") if item.get("mapping") is not None else None
         wrapper = evidence(item.get("evidence", []), "impact.anchorFiles.evidence", mapping)
         if focus["kind"] == "concept":
-            if mapping is None or mapping["layer"] != "L2" or mapping["relation"] not in _MAPPINGS or \
+            if mapping is None or mapping["layer"] != "L2" or mapping["relation"] not in _ANCHOR_MAPPINGS or \
                     (mapping["sourceId"], mapping["targetId"]) != (focus["id"], file["id"]):
                 raise ValueError("concept anchor mapping 无效。")
         elif mapping is not None or (file["id"], file["path"]) != (focus["id"], focus["path"]):
@@ -114,7 +119,7 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         if focus["kind"] == "concept":
             if concept["id"] != focus["id"] or mapping is not None:
                 raise ValueError("concept identity 无效。")
-        elif mapping is None or mapping["layer"] != "L2" or mapping["relation"] not in _MAPPINGS or \
+        elif mapping is None or mapping["layer"] != "L2" or mapping["relation"] not in _OWNERSHIP_MAPPINGS or \
                 (mapping["sourceId"], mapping["targetId"]) != (concept["id"], focus["id"]):
             raise ValueError("file concept mapping 无效。")
         concepts.append({"entity": concept, "mapping": mapping, "evidence": wrapper}); concept_ids.add(concept["id"])
@@ -177,6 +182,7 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
         if task["kind"] != "task" or task["layer"] != "L3" or task["source"] != "task-events" or \
                 relation["layer"] != "L3" or relation["source"] != "task-events" or relation["sourceId"] != task["id"] or \
                 relation["targetId"] not in valid_targets or any(e["layer"] != "L3" or e["source"] != "task-events" for e in wrapper) or \
+                task["evidence"] != wrapper or \
                 isinstance(recorded, bool) or not isinstance(recorded, int) or recorded < 1:
             raise ValueError("impact history provenance 无效。")
         history.append({"entity": task, "status": _required(item.get("status"), "history.status", 40),
@@ -249,14 +255,21 @@ def impact_to_view(core_data: Mapping[str, Any]) -> AgentNaviView:
 def impact_text(core_data: Mapping[str, Any]) -> str:
     project, data = _project(core_data), _impact_payload(core_data)
     _, warnings = _source_state(core_data); focus = data["focus"]["entity"]
-    lines = ["[AgentNavi 影响分析]", f"项目：{project.name}（{project.id}）", f"Focus：{focus['label']}", "", "锚点文件："]
-    lines += [f"- {item['entity']['path']}" for item in data["anchorFiles"]]
-    lines += ["", "Semantic（上）："] + [f"- {i['direction']} · {i['relation']['relation']} · {i['peer']['label']}" for i in data["semantic"]]
-    lines += ["", "Incoming → Focus → Outgoing："] + [f"- IN · {i['peer']['path']} → {i['viaPath']}" for i in data["incoming"]] + [f"- OUT · {i['viaPath']} → {i['peer']['path']}" for i in data["outgoing"]]
-    lines += ["", "建议测试："] + [f"- {i['path']}：{i['reason']}" for i in data["testRecommendations"]]
-    lines += ["", "风险位置："] + [f"- [{i['severity']}] {i['summary']}" for i in data["risks"]]
-    lines += ["", "History（下，按关系记录顺序）："] + [f"- {i['entity']['label']} [{i['status']}]" for i in data["history"]]
-    lines += ["", "本地查看："] + [f"- {i['label']}：{i['summary']}" for i in data["actions"]]
+    def refs(items: list[dict[str, Any]]) -> str:
+        return "；".join(
+            f"{item['path']}" if item.get("path") else f"{item['layer']} · {item['source']}"
+            for item in items
+        ) or "当前无可展示 Evidence"
+    lines = ["[AgentNavi 影响分析]", f"项目：{project.name}（{project.id}）",
+             f"Focus：{focus['label']}", f"  Evidence：{refs(data['focus']['evidence'])}", "", "锚点文件："]
+    lines += [f"- {i['entity']['path']} · {i['mapping']['relation'] if i['mapping'] else 'identity'}\n  Evidence：{refs(i['evidence'])}" for i in data["anchorFiles"]]
+    lines += ["", "关联概念："] + [f"- {i['entity']['label']} · {i['mapping']['relation'] if i['mapping'] else 'identity'}\n  Evidence：{refs(i['evidence'])}" for i in data["focusConcepts"]]
+    lines += ["", "Semantic（上）："] + [f"- {i['direction']} · {i['relation']['relation']} · {i['peer']['label']}\n  Evidence：{refs(i['evidence'])}" for i in data["semantic"]]
+    lines += ["", "Incoming → Focus → Outgoing："] + [f"- IN · {i['peer']['path']} → {i['viaPath']}\n  Evidence：{refs(i['evidence'])}" for i in data["incoming"]] + [f"- OUT · {i['viaPath']} → {i['peer']['path']}\n  Evidence：{refs(i['evidence'])}" for i in data["outgoing"]]
+    lines += ["", "建议测试："] + [f"- {i['path']}：{i['reason']}\n  Evidence：{refs(i['evidence'])}" for i in data["testRecommendations"]]
+    lines += ["", "风险位置："] + [f"- [{i['severity']}] {i['summary']}\n  Evidence：{refs(i['evidence'])}" for i in data["risks"]]
+    lines += ["", "History（下，按关系记录顺序）："] + [f"- {i['entity']['label']} [{i['status']}]\n  Evidence：{refs(i['evidence'])}" for i in data["history"]]
+    lines += ["", "本地查看："] + [f"- {i['label']}：{i['summary']}\n  Evidence：{refs(i['evidence'])}" for i in data["actions"]]
     if warnings: lines += ["", "提示："] + [f"- {w.code}：{w.message}" for w in warnings]
     return "\n".join(lines)
 

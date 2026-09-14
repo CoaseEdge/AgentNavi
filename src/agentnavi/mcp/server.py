@@ -95,6 +95,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         OPTIONAL_TEXT_INPUT,
         REQUIRED_TEXT_INPUT,
         VISUALIZE_TOOL_RESULT,
+        VISUALIZE_INPUT_SCHEMA,
         VISUALIZE_VIEW_INPUT,
         context_tool_annotations,
     )
@@ -204,6 +205,8 @@ def create_server(*, home: str | Path | None = None) -> Any:
                 return call_context(query, project_id, workspace)
 
             checked_query = _validated_text(query, "query", required=False)
+            if view == "impact" and checked_query is None:
+                raise AgentNaviMCPError("INVALID_ARGUMENT", details={"field": "query"})
             checked_project_id = _validated_text(
                 project_id, "project_id", required=False
             )
@@ -216,7 +219,8 @@ def create_server(*, home: str | Path | None = None) -> Any:
                 workspace=checked_workspace,
             )
             if view == "impact":
-                return call_impact(query, project_id, workspace)
+                assert checked_query is not None
+                return call_impact(checked_query, project_id, workspace)
             if view == "repo-overview":
                 from ..repository_views import repository_overview_data
 
@@ -306,6 +310,13 @@ def create_server(*, home: str | Path | None = None) -> Any:
         annotations=context_tool_annotations(),
         structured_output=True,
     )
+
+    # FastMCP 2.x 从单个函数参数生成扁平 schema，无法表达 query 是否必填取决于
+    # view。保留 handler 的公开错误防线，同时用公开 tools/list 合同发布判别联合。
+    visualize_tool = server._tool_manager.get_tool("agentnavi_visualize")
+    if visualize_tool is None:  # pragma: no cover - SDK 注册失败的防御分支
+        raise RuntimeError("agentnavi_visualize 注册失败")
+    visualize_tool.parameters = VISUALIZE_INPUT_SCHEMA
 
     return server
 

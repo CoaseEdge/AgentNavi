@@ -594,6 +594,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             ("agentnavi_impact", None, "selector"),
             ("agentnavi_impact", {"selector": "   "}, "selector"),
             ("agentnavi_impact", {"selector": list(private_tokens)}, "selector"),
+            ("agentnavi_visualize", {"view": "impact"}, "query"),
             (
                 "agentnavi_visualize",
                 {"query": private_tokens[0], "project_id": private_tokens[1]},
@@ -687,6 +688,39 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                     self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
                     self.assertNotIn(secret, json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str))
 
+    def test_tested_by_file_focus_succeeds_for_both_impact_tools(self) -> None:
+        self._add_project()
+        relative = "checks/membership_contract.py"
+        absolute = self.project_root / relative
+        absolute.parent.mkdir(parents=True, exist_ok=True)
+        absolute.write_text("assert True\n", encoding="utf-8")
+        now = utc_now()
+        with self.database.connect() as connection:
+            file_id = Database.upsert_node(connection, project_id="fixture", layer=1,
+                                           kind="file", key=relative, label=absolute.name,
+                                           source="repository")
+            concept_id = Database.node_id("fixture", 2, "concept", "membership")
+            Database.upsert_edge(connection, project_id="fixture", layer=2,
+                                 source_id=concept_id, relation="tested_by", target_id=file_id,
+                                 source="semantic-heuristic", confidence=.8)
+            stat = absolute.stat()
+            connection.execute(
+                "INSERT INTO file_state(project_id,path,mtime_ns,size,digest,updated_at) VALUES (?,?,?,?,?,?)",
+                ("fixture", relative, stat.st_mtime_ns, stat.st_size,
+                 hashlib.blake2s(absolute.read_bytes()).hexdigest(), now),
+            )
+            connection.commit()
+        for tool_name, arguments in (
+            ("agentnavi_impact", {"selector": relative, "project_id": "fixture"}),
+            ("agentnavi_visualize", {"view": "impact", "query": relative, "project_id": "fixture"}),
+        ):
+            with self.subTest(tool=tool_name):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertFalse(result.is_error)
+                concepts = result.structured_content["data"]["focusConcepts"]
+                self.assertEqual(concepts[0]["mapping"]["relation"], "tested_by")
+                self.assertIn("tested_by", result.content[0].text)
+
     def test_runtime_schema_rejects_invalid_success_envelopes(self) -> None:
         from pydantic import ValidationError
 
@@ -694,6 +728,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             ArchitectureViewOutput,
             ContextViewOutput,
             FlowViewOutput,
+            ImpactViewOutput,
             RepositoryOverviewViewOutput,
             RepositoryTourViewOutput,
             VisualizeViewOutput,
@@ -705,6 +740,20 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         )
         payload = result.structured_content
         ContextViewOutput.model_validate(payload)
+        impact = asyncio.run(self._call(
+            {"selector": "src/membership.py", "project_id": "fixture"},
+            tool_name="agentnavi_impact",
+        )).structured_content
+        ImpactViewOutput.model_validate(impact)
+        from jsonschema import ValidationError as JsonSchemaError, validate
+        invalid_focus = json.loads(json.dumps(impact))
+        invalid_focus["data"]["focus"]["entity"].update({"kind": "task", "layer": "L3"})
+        with self.assertRaises(JsonSchemaError):
+            validate(invalid_focus, ImpactViewOutput.model_json_schema())
+        invalid_registry = json.loads(json.dumps(impact))
+        invalid_registry["data"]["anchorFiles"][0]["entity"]["evidence"][0]["summary"] = "different"
+        with self.assertRaises(ValidationError):
+            ImpactViewOutput.model_validate(invalid_registry)
         VisualizeViewOutput.model_validate(payload)
         invalid_context = json.loads(json.dumps(payload))
         invalid_context["data"]["navigation"]["readingOrder"][0]["chains"][0][

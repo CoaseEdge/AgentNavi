@@ -177,8 +177,10 @@ function impactFixture() {
   const focus = { id: "file:focus", kind: "file", label: "focus.py <script>alert(1)</script>", path: "src/focus.py", layer: "L1", source: "repository", confidence: 1, evidence: [evidence] };
   const caller = { id: "file:caller", kind: "file", label: "caller.py", path: "src/caller.py", layer: "L1", source: "repository", confidence: 1, evidence: [evidence] };
   const relation = { id: "edge:imports", sourceId: caller.id, targetId: focus.id, relation: "imports", layer: "L1", source: "extractor", confidence: 1, evidence: [evidence] };
+  const concept = { id: "concept:focus", kind: "concept", label: "Focus concept", layer: "L2", source: "semantic", confidence: .8, evidence: [evidence] };
+  const mapping = { id: "edge:tested", sourceId: concept.id, targetId: focus.id, relation: "tested_by", layer: "L2", source: "semantic", confidence: .8, evidence: [evidence] };
   return { schemaVersion: "agentnavi.vla.v1", view: "impact", project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" },
-    data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: focus, evidence: [evidence] }, anchorFiles: [{ entity: focus, mapping: null, evidence: [evidence] }], focusConcepts: [], incoming: [{ peer: caller, relation, viaPath: focus.path, recordedOrder: 1, evidence: [evidence] }], outgoing: [], semantic: [], history: [], testRecommendations: [],
+    data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: focus, evidence: [evidence] }, anchorFiles: [{ entity: focus, mapping: null, evidence: [evidence] }], focusConcepts: [{ entity: concept, mapping, evidence: [evidence] }], incoming: [{ peer: caller, relation, viaPath: focus.path, recordedOrder: 1, evidence: [evidence] }], outgoing: [], semantic: [], history: [], testRecommendations: [],
       risks: [{ kind: "incoming", severity: "medium", summary: "调用方可能受影响", evidence: [evidence] }], actions: [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]].map(([kind, label]) => ({ kind, label, summary: `${label}说明`, evidence: [evidence] })), stats: { files: 2, concepts: 0, tasks: 0 } }, warnings: [] };
 }
 
@@ -348,6 +350,9 @@ test("impact renders fixed lanes, local actions, safe DOM, and clears across vie
   assert.equal(document.querySelector("#impact-focus-label").textContent, "[内容含路径，已隐藏]");
   assert.equal(document.querySelector("#impact-focus script"), null);
   assert.equal(document.querySelectorAll("#impact-actions details").length, 5);
+  assert.equal(document.querySelector("#impact-anchors-title").textContent, "锚点文件");
+  assert.equal(document.querySelector("#impact-concepts-title").textContent, "关联概念");
+  assert.equal(document.querySelector("#impact-concepts span").textContent, "tested_by");
   assert.ok(document.querySelector("#impact-risks .impact-evidence"));
   assert.ok(document.querySelector("#impact-actions .impact-evidence"));
   applyToolResult(shell, { structuredContent: flowFixture() });

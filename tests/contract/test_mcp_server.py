@@ -200,15 +200,22 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/ImpactViewOutput"},
                     ],
                 )
-                self.assertEqual(
-                    visualize_tool.input_schema["properties"]["view"],
-                    {
-                        "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow", "impact"],
-                        "title": "View",
-                        "type": "string",
-                    },
-                )
-                self.assertEqual(visualize_tool.input_schema["required"], ["view"])
+                self.assertEqual(visualize_tool.input_schema["discriminator"]["propertyName"], "view")
+                self.assertEqual(len(visualize_tool.input_schema["oneOf"]), 3)
+                context_input = visualize_tool.input_schema["$defs"]["VisualizeContextInput"]
+                impact_input = visualize_tool.input_schema["$defs"]["VisualizeImpactInput"]
+                repository_input = visualize_tool.input_schema["$defs"]["VisualizeRepositoryInput"]
+                self.assertEqual(context_input["required"], ["view", "query"])
+                self.assertEqual(impact_input["required"], ["view", "query"])
+                self.assertEqual(impact_input["properties"]["query"]["maxLength"], 4096)
+                self.assertEqual(repository_input["required"], ["view"])
+                from jsonschema import ValidationError, validate
+                validate({"view": "impact", "query": "focus"}, visualize_tool.input_schema)
+                validate({"view": "repo-overview"}, visualize_tool.input_schema)
+                with self.assertRaises(ValidationError):
+                    validate({"view": "impact"}, visualize_tool.input_schema)
+                with self.assertRaises(ValidationError):
+                    validate({"view": "context", "query": "x" * 4097}, visualize_tool.input_schema)
                 self.assertTrue(context_tool.annotations.read_only_hint)
                 self.assertFalse(context_tool.annotations.destructive_hint)
                 self.assertTrue(context_tool.annotations.idempotent_hint)

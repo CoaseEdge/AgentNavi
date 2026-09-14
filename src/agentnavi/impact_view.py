@@ -16,7 +16,8 @@ IMPACT_ANCHOR_SCAN_LIMIT = 32
 IMPACT_LANE_LIMIT = 8
 IMPACT_LANE_PER_ANCHOR_SCAN_LIMIT = 24
 IMPACT_SEMANTIC_LIMIT = 8
-IMPACT_SEMANTIC_SCAN_LIMIT = 64
+IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT = 24
+IMPACT_SEMANTIC_MERGE_LIMIT = 64
 IMPACT_HISTORY_LIMIT = 5
 IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT = 40
 IMPACT_TEST_LIMIT = 5
@@ -89,7 +90,7 @@ def _mapping_evidence(row: sqlite3.Row | dict[str, Any], path: str) -> list[dict
                       confidence=float(row["confidence"]), path=path)]
 
 
-def _physical_evidence(row: sqlite3.Row) -> list[dict[str, Any]]:
+def _physical_evidence(row: sqlite3.Row | dict[str, Any]) -> list[dict[str, Any]]:
     source_path, target_path = str(row["source_path"]), str(row["target_path"])
     return [_evidence(kind="physical-relation",
                       summary=f"{source_path} {row['relation']} {target_path}",
@@ -141,6 +142,27 @@ def _history_rows(connection: sqlite3.Connection, project_id: str,
              AND edge.source='task-events' AND task_node.source='task-events'
            ORDER BY edge.rowid DESC LIMIT ?""",
         (project_id, target_id, IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT + 1),
+    ).fetchall()
+
+
+def _semantic_rows(connection: sqlite3.Connection, project_id: str,
+                   concept_id: str, direction: str) -> list[sqlite3.Row]:
+    indexed = "idx_edges_source" if direction == "outgoing" else "idx_edges_target"
+    endpoint = "source_id" if direction == "outgoing" else "target_id"
+    return connection.execute(
+        f"""SELECT /* impact-semantic-{direction} */ edge.*, edge.rowid AS recorded_order,
+                   source.label AS source_label, source.source AS source_node_source,
+                   source.confidence AS source_node_confidence,
+                   target.label AS target_label, target.source AS target_node_source,
+                   target.confidence AS target_node_confidence
+            FROM edges edge INDEXED BY {indexed}
+            JOIN nodes source ON source.id=edge.source_id
+              AND source.layer=2 AND source.kind='concept'
+            JOIN nodes target ON target.id=edge.target_id
+              AND target.layer=2 AND target.kind='concept'
+            WHERE edge.project_id=? AND edge.layer=2 AND edge.{endpoint}=?
+            ORDER BY edge.rowid DESC LIMIT ?""",
+        (project_id, concept_id, IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT + 1),
     ).fetchall()
 
 
@@ -207,52 +229,36 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
                      AND concept.layer=2 AND concept.kind='concept'
                    WHERE edge.project_id=? AND edge.layer=2 AND edge.target_id=?
                      AND edge.relation IN ('implemented_by','configured_by','tested_by')
-                   ORDER BY edge.rowid DESC LIMIT 9""",
+                   ORDER BY edge.rowid DESC LIMIT 33""",
                 (project_id, focus["id"]),
             ).fetchall()
-            focus_concept_rows = [(row, row) for row in rows[:8]]
-            if len(rows) > 8:
+            focus_concept_candidates = []
+            seen_focus_concepts: set[str] = set()
+            for row in rows[:32]:
+                if str(row["id"]) not in seen_focus_concepts:
+                    seen_focus_concepts.add(str(row["id"])); focus_concept_candidates.append((row, row))
+            focus_concept_rows = focus_concept_candidates[:8]
+            if len(rows) > 32 or len(focus_concept_candidates) > 8:
                 warnings.append({"code": "IMPACT_FOCUS_CONCEPTS_TRUNCATED", "message": "Focus 关联概念最多展示 8 项。", "evidence": []})
         focus_concept_ids = {str(row[0]["id"]) for row in focus_concept_rows}
 
-        semantic_rows: list[sqlite3.Row] = []
-        if focus_concept_ids:
-            marks = ",".join("?" for _ in focus_concept_ids)
-            semantic_rows = connection.execute(
-                f"""SELECT /* impact-semantic */ edge.*,
-                           source.label AS source_label, source.source AS source_node_source,
-                           source.confidence AS source_node_confidence,
-                           target.label AS target_label, target.source AS target_node_source,
-                           target.confidence AS target_node_confidence
-                    FROM edges edge JOIN nodes source ON source.id=edge.source_id
-                    JOIN nodes target ON target.id=edge.target_id
-                    WHERE edge.project_id=? AND edge.layer=2
-                      AND source.layer=2 AND source.kind='concept'
-                      AND target.layer=2 AND target.kind='concept'
-                      AND (edge.source_id IN ({marks}) OR edge.target_id IN ({marks}))
-                    ORDER BY edge.rowid DESC LIMIT ?""",
-                (project_id, *focus_concept_ids, *focus_concept_ids,
-                 IMPACT_SEMANTIC_SCAN_LIMIT + 1),
-            ).fetchall()
-        if len(semantic_rows) > IMPACT_SEMANTIC_SCAN_LIMIT:
-            warnings.append({"code": "IMPACT_SEMANTIC_SCAN_TRUNCATED", "message": f"Semantic 扫描达到 {IMPACT_SEMANTIC_SCAN_LIMIT} 项预算。", "evidence": []})
-        semantic_rows = semantic_rows[:IMPACT_SEMANTIC_SCAN_LIMIT]
-        semantic_node_ids = sorted({str(row[key]) for row in semantic_rows for key in ("source_id", "target_id")})
-        component_mapping_rows: list[sqlite3.Row] = []
-        if semantic_node_ids:
-            marks = ",".join("?" for _ in semantic_node_ids)
-            component_mapping_rows = connection.execute(
-                f"""SELECT /* impact-component-mappings */ edge.source_id AS concept_id,
-                           file.key AS path
-                    FROM edges edge JOIN nodes file ON file.id=edge.target_id
-                    WHERE edge.project_id=? AND edge.layer=2
-                      AND edge.relation IN ('implemented_by','configured_by','tested_by')
-                      AND edge.source_id IN ({marks})
-                      AND file.layer=1 AND file.kind='file'
-                    ORDER BY edge.rowid DESC LIMIT ?""",
-                (project_id, *semantic_node_ids, IMPACT_FRESHNESS_PATH_LIMIT + 1),
-            ).fetchall()
-
+        semantic_candidates: list[sqlite3.Row] = []
+        semantic_scan_truncated = False
+        for concept_id in sorted(focus_concept_ids):
+            for direction in ("incoming", "outgoing"):
+                rows = _semantic_rows(connection, project_id, concept_id, direction)
+                semantic_scan_truncated = semantic_scan_truncated or len(rows) > IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT
+                semantic_candidates.extend(rows[:IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT])
+        semantic_rows = []
+        seen_semantic: set[str] = set()
+        for row in sorted(semantic_candidates, key=lambda item: (-int(item["recorded_order"]), str(item["id"]))):
+            if str(row["id"]) not in seen_semantic:
+                seen_semantic.add(str(row["id"])); semantic_rows.append(row)
+        if semantic_scan_truncated:
+            warnings.append({"code": "IMPACT_SEMANTIC_SCAN_TRUNCATED", "message": f"每个焦点概念每方向最多扫描 {IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT} 条语义记录。", "evidence": []})
+        if len(semantic_rows) > IMPACT_SEMANTIC_MERGE_LIMIT:
+            warnings.append({"code": "IMPACT_SEMANTIC_MERGE_TRUNCATED", "message": f"Semantic 合并候选最多保留 {IMPACT_SEMANTIC_MERGE_LIMIT} 项。", "evidence": []})
+        semantic_rows = semantic_rows[:IMPACT_SEMANTIC_MERGE_LIMIT]
         tested_by_rows: list[sqlite3.Row] = []
         if focus_concept_ids:
             marks = ",".join("?" for _ in focus_concept_ids)
@@ -274,7 +280,6 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
         for lane_rows in raw_lanes.values():
             for row in lane_rows:
                 freshness_paths.extend((str(row["source_path"]), str(row["target_path"])))
-        freshness_paths.extend(str(row["path"]) for row in component_mapping_rows)
         freshness_paths.extend(str(row["test_path"]) for row in tested_by_rows)
         for row in semantic_rows:
             raw = json_loads(str(row["data_json"]), {}).get("evidence", [])
@@ -393,28 +398,69 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
             focus_concept_by_id[str(row["id"])] = entry
 
         component_paths: dict[str, set[str]] = defaultdict(set)
-        for row in component_mapping_rows:
-            if str(row["path"]) in fresh_paths:
-                component_paths[str(row["concept_id"])].add(str(row["path"]))
-        physical_lookup: dict[tuple[str, str, str], sqlite3.Row] = {}
-        physical_lookup_truncated = False
-        if fresh_paths:
-            paths = sorted(fresh_paths)
-            marks = ",".join("?" for _ in paths)
-            rows = connection.execute(
-                f"""SELECT /* impact-physical-lookup */ edge.*,
-                           source.key AS source_path, target.key AS target_path
-                    FROM edges edge JOIN nodes source ON source.id=edge.source_id
-                    JOIN nodes target ON target.id=edge.target_id
-                    WHERE edge.project_id=? AND edge.layer=1
-                      AND source.key IN ({marks}) AND target.key IN ({marks})
-                    ORDER BY edge.rowid DESC LIMIT ?""",
-                (project_id, *paths, *paths, IMPACT_PHYSICAL_LOOKUP_LIMIT + 1),
+        component_file_ids: dict[tuple[str, str], str] = {}
+        raw_component_pairs: set[tuple[str, str]] = set()
+        for semantic_row in semantic_rows:
+            raw = json_loads(str(semantic_row["data_json"]), {}).get("evidence", [])
+            if not isinstance(raw, list):
+                continue
+            for item in raw[:IMPACT_RAW_EVIDENCE_LIMIT]:
+                if isinstance(item, dict):
+                    source_path, target_path = item.get("source"), item.get("target")
+                    if isinstance(source_path, str) and source_path in fresh_paths:
+                        raw_component_pairs.add((str(semantic_row["source_id"]), source_path))
+                    if isinstance(target_path, str) and target_path in fresh_paths:
+                        raw_component_pairs.add((str(semantic_row["target_id"]), target_path))
+        mapping_candidates: dict[str, tuple[str, str, str]] = {}
+        mapping_pair_truncated = len(raw_component_pairs) > IMPACT_PHYSICAL_LOOKUP_LIMIT
+        for concept_id, path in sorted(raw_component_pairs)[:IMPACT_PHYSICAL_LOOKUP_LIMIT]:
+            file_id = Database.node_id(project_id, 1, "file", path)
+            for relation in ("implemented_by", "configured_by", "tested_by"):
+                mapping_candidates[Database.edge_id(project_id, 2, concept_id, relation, file_id)] = (concept_id, path, file_id)
+        if mapping_candidates:
+            marks = ",".join("?" for _ in mapping_candidates)
+            mapping_rows = connection.execute(
+                f"SELECT /* impact-component-mapping-exact */ id FROM edges WHERE id IN ({marks})",
+                tuple(mapping_candidates),
             ).fetchall()
-            physical_lookup_truncated = len(rows) > IMPACT_PHYSICAL_LOOKUP_LIMIT
-            for row in rows[:IMPACT_PHYSICAL_LOOKUP_LIMIT]:
-                physical_lookup.setdefault((str(row["source_path"]), str(row["target_path"]),
-                                            str(row["relation"])), row)
+            for mapping_row in mapping_rows:
+                concept_id, path, file_id = mapping_candidates[str(mapping_row["id"])]
+                component_paths[concept_id].add(path)
+                component_file_ids[(concept_id, path)] = file_id
+        physical_lookup: dict[tuple[str, str, str], sqlite3.Row | dict[str, Any]] = {}
+        physical_lookup_truncated = False
+        physical_candidates: dict[str, tuple[str, str, str]] = {}
+        for semantic_row in semantic_rows:
+            raw = json_loads(str(semantic_row["data_json"]), {}).get("evidence", [])
+            if not isinstance(raw, list):
+                continue
+            for item in raw[:IMPACT_RAW_EVIDENCE_LIMIT]:
+                if not isinstance(item, dict):
+                    continue
+                source_path, target_path, relation = item.get("source"), item.get("target"), item.get("physical_relation")
+                if not all(isinstance(value, str) for value in (source_path, target_path, relation)):
+                    continue
+                source_file = component_file_ids.get((str(semantic_row["source_id"]), source_path))
+                target_file = component_file_ids.get((str(semantic_row["target_id"]), target_path))
+                if source_file and target_file:
+                    edge_id = Database.edge_id(project_id, 1, source_file, relation, target_file)
+                    physical_candidates.setdefault(edge_id, (source_path, target_path, relation))
+        if len(physical_candidates) > IMPACT_PHYSICAL_LOOKUP_LIMIT:
+            physical_lookup_truncated = True
+        candidate_items = list(physical_candidates.items())[:IMPACT_PHYSICAL_LOOKUP_LIMIT]
+        if candidate_items:
+            marks = ",".join("?" for _ in candidate_items)
+            rows = connection.execute(
+                f"""SELECT /* impact-physical-lookup-exact */ edge.*
+                    FROM edges edge WHERE edge.id IN ({marks})""",
+                tuple(edge_id for edge_id, _ in candidate_items),
+            ).fetchall()
+            paths_by_id = dict(candidate_items)
+            for row in rows:
+                source_path, target_path, relation = paths_by_id[str(row["id"])]
+                physical_lookup[(source_path, target_path, relation)] = {
+                    **dict(row), "source_path": source_path, "target_path": target_path,
+                }
 
         semantic = []
         semantic_evidence_dropped = False
@@ -469,6 +515,8 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
             warnings.append({"code": "IMPACT_SEMANTIC_EVIDENCE_TRUNCATED", "message": f"每条语义关系最多核验 {IMPACT_RAW_EVIDENCE_LIMIT} 项原始证据。", "evidence": []})
         if physical_lookup_truncated:
             warnings.append({"code": "IMPACT_PHYSICAL_LOOKUP_TRUNCATED", "message": f"物理证据核验达到 {IMPACT_PHYSICAL_LOOKUP_LIMIT} 条预算。", "evidence": []})
+        if mapping_pair_truncated:
+            warnings.append({"code": "IMPACT_COMPONENT_MAPPING_TRUNCATED", "message": f"概念文件证据核验达到 {IMPACT_PHYSICAL_LOOKUP_LIMIT} 对预算。", "evidence": []})
 
         history_rows = []
         history_scan_truncated = False
