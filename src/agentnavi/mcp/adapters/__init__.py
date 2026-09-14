@@ -2,10 +2,13 @@
 
 from .context import context_text, context_view
 from .repo_overview import repo_overview_text, repo_overview_view
+from .repo_tour import repo_tour_text, repo_tour_view
 
 __all__ = [
     "context_text",
     "context_view",
     "repo_overview_text",
     "repo_overview_view",
+    "repo_tour_text",
+    "repo_tour_view",
 ]

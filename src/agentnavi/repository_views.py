@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import tomllib
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -837,15 +838,20 @@ def _filter_fresh_output_paths(
     return filtered_modules, filtered_reading, warnings, bool(stale_paths)
 
 
-def repository_overview_data(
+def _repository_overview_data(
     database: Database,
     project: sqlite3.Row,
+    *,
+    connection: sqlite3.Connection | None = None,
+    snapshot_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """生成 Repository Overview Core 数据；全过程只读且先排序后截断。"""
 
     project_id = str(project["id"])
-    with database.connect() as connection:
-        connection.execute("BEGIN")
+    manager = database.connect() if connection is None else nullcontext(connection)
+    with manager as connection:
+        if not connection.in_transaction:
+            connection.execute("BEGIN")
         snapshot_project = connection.execute(
             "SELECT * FROM projects WHERE id=?", (project_id,)
         ).fetchone()
@@ -957,6 +963,13 @@ def repository_overview_data(
             if snapshot_stale
             else "ready"
         )
+        if snapshot_context is not None:
+            snapshot_context.update(
+                {
+                    "documents": documents,
+                    "freshness": dict(freshness),
+                }
+            )
 
     if purpose is None:
         warnings.append(
@@ -1029,6 +1042,573 @@ def repository_overview_data(
     }
 
 
+def repository_overview_data(
+    database: Database,
+    project: sqlite3.Row,
+) -> dict[str, Any]:
+    return _repository_overview_data(database, project)
+
+
+_TOUR_DEPTHS = (
+    ("one-minute", "1 分钟", 4),
+    ("five-minutes", "5 分钟", 8),
+    ("source-deep-dive", "深入源码", 12),
+)
+
+
+def _tour_stop(
+    stop_id: str,
+    kind: str,
+    title: str,
+    plain_language: str,
+    technical_explanation: str,
+    evidence: list[dict[str, Any]],
+    *,
+    entity: dict[str, Any] | None = None,
+    relations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """只有可追溯证据完整时才构造 Tour stop。"""
+
+    if not plain_language or not technical_explanation or not evidence:
+        return None
+    return {
+        "id": stop_id,
+        "kind": kind,
+        "title": title,
+        "plainLanguage": plain_language,
+        "technicalExplanation": technical_explanation,
+        "evidence": evidence,
+        "entity": entity,
+        "relations": relations or [],
+    }
+
+
+def _tour_entity(
+    entity_id: str,
+    kind: str,
+    label: str,
+    evidence: list[dict[str, Any]],
+    *,
+    path: str | None = None,
+    layer: str | None = None,
+    source: str | None = None,
+    confidence: float | None = None,
+) -> dict[str, Any]:
+    first = evidence[0]
+    return {
+        "id": entity_id,
+        "kind": kind,
+        "label": label,
+        "path": path,
+        "layer": layer or first["layer"],
+        "source": source or first["source"],
+        "confidence": confidence if confidence is not None else first["confidence"],
+        "evidence": evidence,
+    }
+
+
+def _tour_graph_facts(
+    connection: sqlite3.Connection,
+    project_id: str,
+    fresh_paths: set[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """从已通过 Overview freshness 核对的路径中有界读取 Tour 图事实。"""
+
+    if not fresh_paths:
+        return {"symbols": [], "data_structures": [], "dependencies": [], "tests": []}
+    ordered_paths = sorted(fresh_paths)
+    placeholders = ",".join("?" for _ in ordered_paths)
+    symbols: list[dict[str, Any]] = []
+    data_structures: list[dict[str, Any]] = []
+    for row in connection.execute(
+        f"""
+        SELECT resource.id, resource.label, resource.data_json,
+               resource.confidence, resource.source, parent.key AS parent_path
+        FROM nodes resource
+        JOIN edges containment
+          ON containment.project_id=resource.project_id
+         AND containment.layer=1 AND containment.relation='contains'
+         AND containment.target_id=resource.id
+        JOIN nodes parent
+          ON parent.id=containment.source_id AND parent.layer=1 AND parent.kind='file'
+        WHERE resource.project_id=? AND resource.layer=1 AND resource.kind='symbol'
+          AND parent.key IN ({placeholders})
+        ORDER BY parent.key COLLATE NOCASE, parent.key,
+                 resource.label COLLATE NOCASE, resource.key, resource.id
+        LIMIT 24
+        """,
+        (project_id, *ordered_paths),
+    ):
+        path = str(row["parent_path"])
+        if path not in fresh_paths:
+            continue
+        data = json_loads(row["data_json"], {})
+        symbol_kind = str(data.get("symbol_kind") or "symbol")
+        evidence = [_file_evidence(path, "文件索引中的源码符号。")]
+        item = {
+            "id": str(row["id"]),
+            "label": str(row["label"])[:160],
+            "symbol_kind": symbol_kind,
+            "path": path,
+            "source": str(row["source"])[:120],
+            "confidence": float(row["confidence"]),
+            "evidence": evidence,
+        }
+        symbols.append(item)
+        if symbol_kind in {
+            "class", "type", "interface", "struct", "record", "enum",
+            "trait", "protocol", "object", "module",
+        }:
+            data_structures.append(item)
+        if len(symbols) >= 6 and len(data_structures) >= 3:
+            break
+
+    dependencies: list[dict[str, Any]] = []
+    tests: list[dict[str, Any]] = []
+    for row in connection.execute(
+        f"""
+        SELECT e.id, e.relation, e.confidence, e.source,
+               source.key AS source_path, target.key AS target_path
+        FROM edges e
+        JOIN nodes source ON source.id=e.source_id AND source.layer=1 AND source.kind='file'
+        JOIN nodes target ON target.id=e.target_id AND target.layer=1 AND target.kind='file'
+        WHERE e.project_id=? AND e.layer=1
+          AND e.relation IN ('imports', 'depends_on', 'references', 'tests')
+          AND source.key IN ({placeholders})
+          AND target.key IN ({placeholders})
+        ORDER BY e.relation, source.key COLLATE NOCASE, source.key,
+                 target.key COLLATE NOCASE, target.key, e.id
+        LIMIT 32
+        """,
+        (project_id, *ordered_paths, *ordered_paths),
+    ):
+        source_path = str(row["source_path"])
+        target_path = str(row["target_path"])
+        if source_path not in fresh_paths or target_path not in fresh_paths:
+            continue
+        evidence = [_file_evidence(source_path, "索引中的文件关系。")]
+        item = {
+            "id": str(row["id"]),
+            "relation": str(row["relation"]),
+            "source_path": source_path,
+            "target_path": target_path,
+            "source": str(row["source"])[:120],
+            "confidence": float(row["confidence"]),
+            "evidence": evidence,
+        }
+        if item["relation"] == "tests":
+            tests.append(item)
+        else:
+            dependencies.append(item)
+
+    return {
+        "symbols": symbols[:6],
+        "data_structures": data_structures[:3],
+        "dependencies": dependencies[:4],
+        "tests": tests[:4],
+    }
+
+
+def repository_tour_data(
+    database: Database,
+    project: sqlite3.Row,
+) -> dict[str, Any]:
+    """在一个数据库 read snapshot 中生成固定三档 Guided Repository Tour。"""
+
+    with database.connect() as connection:
+        connection.execute("BEGIN")
+        snapshot_context: dict[str, Any] = {}
+        overview = _repository_overview_data(
+            database,
+            project,
+            connection=connection,
+            snapshot_context=snapshot_context,
+        )
+        purpose = overview["purpose"]
+        problem = overview["need"]["problem"]
+        solution = overview["need"]["solution"]
+        workflow = overview["workflow"]
+        modules = overview["modules"]
+        reading_order = overview["readingOrder"]
+        if overview["sourceState"]["status"] == "partial":
+            modules = []
+            reading_order = []
+        evidence_paths = {
+            evidence["path"]
+            for collection in (
+                [purpose, problem, solution],
+                workflow,
+                modules,
+                reading_order,
+            )
+            for item in collection
+            for evidence in item["evidence"]
+            if isinstance(evidence.get("path"), str)
+        }
+        evidence_paths.update(
+            path for module in modules for path in module["paths"]
+        )
+        evidence_paths.update(entry["path"] for entry in reading_order)
+        graph_facts = _tour_graph_facts(connection, str(project["id"]), evidence_paths)
+        tasks = list(
+            connection.execute(
+                """SELECT id, title, status, summary, created_at, updated_at, closed_at
+                   FROM tasks WHERE project_id=? AND status='completed'
+                   ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
+                   LIMIT 3""",
+                (str(project["id"]),),
+            )
+        )
+        task_history = []
+        ordered_evidence_paths = sorted(evidence_paths)
+        path_placeholders = ",".join("?" for _ in ordered_evidence_paths)
+        history_rows = (
+            connection.execute(
+                f"""
+            SELECT task.id AS task_id, task.title, task.summary,
+                   edge.id AS edge_id, edge.relation, edge.source,
+                   edge.confidence, file.key AS path
+            FROM tasks task
+            JOIN nodes task_node
+              ON task_node.project_id=task.project_id AND task_node.layer=3
+             AND task_node.kind='task' AND task_node.key=task.id
+            JOIN edges edge
+              ON edge.project_id=task.project_id AND edge.layer=3
+             AND edge.source_id=task_node.id
+             AND edge.relation IN ('read', 'modified', 'tested', 'searched')
+            JOIN nodes file
+              ON file.id=edge.target_id AND file.layer=1 AND file.kind='file'
+            WHERE task.project_id=? AND task.status='completed'
+              AND file.key IN ({path_placeholders})
+            ORDER BY COALESCE(task.closed_at, task.updated_at, task.created_at) DESC,
+                     task.id DESC, edge.relation, file.key COLLATE NOCASE, file.key,
+                     edge.id
+            LIMIT 24
+            """,
+                (str(project["id"]), *ordered_evidence_paths),
+            )
+            if ordered_evidence_paths
+            else ()
+        )
+        for row in history_rows:
+            path = str(row["path"])
+            if path not in evidence_paths:
+                continue
+            task_history.append(
+                {
+                    "task_id": str(row["task_id"]),
+                    "title": str(row["title"]),
+                    "summary": str(row["summary"]),
+                    "edge_id": str(row["edge_id"]),
+                    "relation": str(row["relation"]),
+                    "source": str(row["source"]),
+                    "confidence": float(row["confidence"]),
+                    "path": path,
+                }
+            )
+            if len(task_history) >= 3:
+                break
+
+        def document_entity(stop_id: str, kind: str, value: dict[str, Any]) -> dict[str, Any] | None:
+            if not value["evidence"]:
+                return None
+            evidence = value["evidence"]
+            return _tour_entity(
+                stable_id(str(project["id"]), stop_id, prefix="tour_"),
+                kind,
+                value["summary"],
+                evidence,
+                path=evidence[0].get("path"),
+            )
+
+        purpose_stop = _tour_stop(
+            "purpose", "purpose", "是什么", purpose["summary"],
+            "从项目文档的明确目的说明建立整体心智模型。", purpose["evidence"],
+            entity=document_entity("purpose", "concept", purpose),
+        )
+        why_evidence = [*problem["evidence"], *solution["evidence"]]
+        why_stop = _tour_stop(
+            "why", "why", "为什么", problem["summary"], solution["summary"], why_evidence,
+            entity=(
+                _tour_entity(
+                    stable_id(str(project["id"]), "why", prefix="tour_"),
+                    "concept", problem["summary"], why_evidence,
+                    path=why_evidence[0].get("path"),
+                )
+                if why_evidence else None
+            ),
+        )
+        workflow_step = workflow[0] if workflow else None
+        workflow_stop = (
+            _tour_stop(
+                "core-flow", "workflow", "核心流程", workflow_step["title"],
+                workflow_step["detail"], workflow_step["evidence"],
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), "core-flow", prefix="tour_"),
+                    "workflow", workflow_step["title"], workflow_step["evidence"],
+                    path=workflow_step["evidence"][0].get("path"),
+                ),
+            )
+            if workflow_step else None
+        )
+        module = modules[0] if modules else None
+        module_stop = (
+            _tour_stop(
+                "main-module", "module", "主要模块", module["name"],
+                f"{module['summary']} 关键实现：{'、'.join(module['paths'])}", module["evidence"],
+                entity=_tour_entity(
+                    module["id"], "concept", module["name"], module["evidence"],
+                    path=module["paths"][0], layer="L2", source=module["source"],
+                    confidence=module["confidence"],
+                ),
+                relations=[
+                    {
+                        "id": stable_id(module["id"], module["paths"][0], prefix="tour_edge_"),
+                        "sourceId": module["id"],
+                        "targetId": stable_id(str(project["id"]), module["paths"][0], prefix="file_"),
+                        "relation": "implemented_by",
+                        "layer": "L2",
+                        "source": module["source"],
+                        "confidence": module["confidence"],
+                        "evidence": module["evidence"],
+                    }
+                ],
+            )
+            if module else None
+        )
+
+        data_structure_stops = [
+            _tour_stop(
+                f"data-{item['id']}", "data-structure", "核心数据结构",
+                item["label"], f"{item['symbol_kind']} · {item['path']}", item["evidence"],
+                entity=_tour_entity(
+                    item["id"], "symbol", item["label"], item["evidence"],
+                    path=item["path"], layer="L1", source=item["source"], confidence=item["confidence"],
+                ),
+            )
+            for item in graph_facts["data_structures"][:1]
+        ]
+        task_stops = []
+        for task in tasks[:1]:
+            title = _safe_prose(str(task["title"]), limit=240)
+            detail = _safe_prose(str(task["summary"] or task["status"]), limit=320)
+            if not title or not detail:
+                continue
+            evidence = [{
+                "kind": "task-record", "summary": f"任务记录 {task['id']}",
+                "layer": "L3", "source": "task-events", "confidence": 1.0,
+            }]
+            task_stops.append(_tour_stop(
+                f"task-{task['id']}", "task", "真实任务示例", title, detail, evidence,
+                entity=_tour_entity(str(task["id"]), "task", title, evidence, layer="L3", source="task-events", confidence=1.0),
+            ))
+        key_file_stops = [
+            _tour_stop(
+                f"key-file-{entry['position']}", "file", "关键文件",
+                entry["path"], entry["reason"], entry["evidence"],
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), entry["path"], prefix="file_"),
+                    "file", entry["path"], entry["evidence"], path=entry["path"], layer="L1",
+                ),
+            )
+            for entry in reading_order[:1]
+        ]
+        history_stops = []
+        for document in snapshot_context.get("documents", []):
+            if not document.path.startswith(("docs/adr/", "docs/decisions/")):
+                continue
+            title = PurePosixPath(document.path).stem
+            prose = None
+            prose_line = None
+            for line_number, raw_line in document.lines:
+                heading = _HEADING_RE.match(raw_line)
+                if heading and title == PurePosixPath(document.path).stem:
+                    title = _safe_prose(heading.group(1), limit=160) or title
+                    continue
+                candidate = _safe_prose(raw_line)
+                if candidate:
+                    prose = candidate
+                    prose_line = line_number
+                    break
+            if not prose or prose_line is None:
+                continue
+            evidence = [_evidence(document, prose_line, "设计决定文档的首段说明。")]
+            history_stops.append(_tour_stop(
+                f"history-{document.path}", "history", "设计历史", title, prose, evidence,
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), document.path, prefix="file_"),
+                    "document", title, evidence, path=document.path, layer="L1",
+                ),
+            ))
+            break
+
+        file_stops = [
+            _tour_stop(
+                f"source-file-{entry['position']}", "file", entry["path"],
+                entry["reason"], "该路径已通过当前索引快照核对。", entry["evidence"],
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), entry["path"], prefix="file_"),
+                    "file", entry["path"], entry["evidence"], path=entry["path"], layer="L1",
+                ),
+            )
+            for entry in reading_order[:2]
+        ]
+        symbol_stops = [
+            _tour_stop(
+                f"symbol-{item['id']}", "symbol", item["label"],
+                f"{item['symbol_kind']} in {item['path']}", "该符号由文件提取器识别。", item["evidence"],
+                entity=_tour_entity(
+                    item["id"], "symbol", item["label"], item["evidence"], path=item["path"],
+                    layer="L1", source=item["source"], confidence=item["confidence"],
+                ),
+            )
+            for item in graph_facts["symbols"][:2]
+        ]
+        dependency_stops = [
+            _tour_stop(
+                f"dependency-{item['id']}", "dependency", "文件依赖",
+                f"{item['source_path']} → {item['target_path']}", item["relation"], item["evidence"],
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), item["source_path"], prefix="file_"),
+                    "file", item["source_path"], item["evidence"], path=item["source_path"], layer="L1",
+                ),
+                relations=[{
+                    "id": item["id"],
+                    "sourceId": stable_id(str(project["id"]), item["source_path"], prefix="file_"),
+                    "targetId": stable_id(str(project["id"]), item["target_path"], prefix="file_"),
+                    "relation": item["relation"], "layer": "L1", "source": item["source"],
+                    "confidence": item["confidence"], "evidence": item["evidence"],
+                }],
+            )
+            for item in graph_facts["dependencies"][:2]
+        ]
+        test_stops = [
+            _tour_stop(
+                f"test-{item['id']}", "test", "对应测试",
+                item["source_path"], f"验证 {item['target_path']}", item["evidence"],
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), item["source_path"], prefix="file_"),
+                    "file", item["source_path"], item["evidence"], path=item["source_path"], layer="L1",
+                ),
+                relations=[{
+                    "id": item["id"],
+                    "sourceId": stable_id(str(project["id"]), item["source_path"], prefix="file_"),
+                    "targetId": stable_id(str(project["id"]), item["target_path"], prefix="file_"),
+                    "relation": "tests", "layer": "L1", "source": item["source"],
+                    "confidence": item["confidence"], "evidence": item["evidence"],
+                }],
+            )
+            for item in graph_facts["tests"][:1]
+        ]
+        evidence_stop = (
+            _tour_stop(
+                "evidence", "evidence", "源码证据", first["path"],
+                first["summary"], [first],
+                entity=_tour_entity(
+                    stable_id(str(project["id"]), first["path"], prefix="evidence_"),
+                    "evidence", first["path"], [first], path=first["path"],
+                ),
+            )
+            if (first := next(
+                (
+                    evidence
+                    for entry in reading_order
+                    for evidence in entry["evidence"]
+                    if isinstance(evidence.get("path"), str)
+                ),
+                None,
+            )) else None
+        )
+        task_history_stops = []
+        for item in task_history:
+            title = _safe_prose(item["title"], limit=240)
+            detail = _safe_prose(item["summary"] or item["relation"], limit=320)
+            if not title or not detail:
+                continue
+            evidence = [{
+                "kind": "task-file-relation",
+                "summary": f"任务通过 {item['relation']} 关联此文件。",
+                "layer": "L3", "source": item["source"],
+                "confidence": item["confidence"], "path": item["path"],
+            }]
+            task_history_stops.append(_tour_stop(
+                f"task-history-{item['edge_id']}", "task-history", "任务历史",
+                title, f"{detail} · {item['relation']} {item['path']}", evidence,
+                entity=_tour_entity(
+                    item["task_id"], "task", title, evidence,
+                    layer="L3", source=item["source"], confidence=item["confidence"],
+                ),
+                relations=[{
+                    "id": item["edge_id"], "sourceId": item["task_id"],
+                    "targetId": stable_id(str(project["id"]), item["path"], prefix="file_"),
+                    "relation": item["relation"], "layer": "L3",
+                    "source": item["source"], "confidence": item["confidence"],
+                    "evidence": evidence,
+                }],
+            ))
+
+        tiers_by_depth: dict[str, list[dict[str, Any] | None]] = {
+            "one-minute": [purpose_stop, why_stop, workflow_stop, module_stop],
+            "five-minutes": [
+                purpose_stop, why_stop, workflow_stop, module_stop,
+                *data_structure_stops, *task_stops, *key_file_stops, *history_stops,
+            ],
+            "source-deep-dive": [
+                *file_stops, *symbol_stops, *dependency_stops, *test_stops,
+                *task_history_stops, evidence_stop,
+            ],
+        }
+        required_kinds = {
+            "one-minute": {"purpose", "why", "workflow", "module"},
+            "five-minutes": {
+                "purpose", "why", "workflow", "module", "data-structure",
+                "task", "file", "history",
+            },
+            "source-deep-dive": {
+                "file", "symbol", "dependency", "test", "task-history", "evidence",
+            },
+        }
+        tiers: list[dict[str, Any]] = []
+        tour_warnings: list[dict[str, Any]] = []
+        for depth, label, limit in _TOUR_DEPTHS:
+            stops = [item for item in tiers_by_depth[depth] if item is not None][:limit]
+            tiers.append({"depth": depth, "label": label, "stops": stops})
+            missing = sorted(required_kinds[depth] - {item["kind"] for item in stops})
+            if missing:
+                tour_warnings.append({
+                    "code": "TOUR_EVIDENCE_INSUFFICIENT",
+                    "message": f"{label}导览缺少可追溯的 {', '.join(missing)} 事实，未生成推测性 stop。",
+                    "evidence": [],
+                })
+
+        revision_parts = [str(overview["sourceState"].get("revision") or "")]
+        for tier in tiers:
+            for stop in tier["stops"]:
+                revision_parts.append(
+                    json.dumps(
+                        stop,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+        source_state = {
+            **overview["sourceState"],
+            "revision": stable_id(*revision_parts, prefix="tour_snapshot_"),
+        }
+
+    return {
+        "project": overview["project"],
+        "sourceState": source_state,
+        "tiers": tiers,
+        "stats": overview["stats"],
+        "warnings": sorted(
+            [*overview["warnings"], *tour_warnings],
+            key=lambda item: (item["code"], item["message"]),
+        ),
+    }
+
+
 __all__ = [
     "MAX_DOCUMENTS",
     "MAX_DOCUMENT_BYTES",
@@ -1037,4 +1617,5 @@ __all__ = [
     "MAX_FRESHNESS_FILE_BYTES",
     "MAX_TOTAL_FRESHNESS_BYTES",
     "repository_overview_data",
+    "repository_tour_data",
 ]

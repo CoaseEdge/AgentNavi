@@ -82,7 +82,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             )
             self.assertEqual(
                 tools["agentnavi_visualize"].input_schema["properties"]["view"]["enum"],
-                ["context", "repo-overview"],
+                ["context", "repo-overview", "repo-tour"],
             )
             self.assertEqual(
                 tools["agentnavi_context"].output_schema["properties"]["view"]["const"],
@@ -93,6 +93,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
                 [
                     {"$ref": "#/$defs/ContextViewOutput"},
                     {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                    {"$ref": "#/$defs/RepositoryTourViewOutput"},
                 ],
             )
 

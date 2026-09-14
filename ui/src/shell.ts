@@ -1,6 +1,7 @@
 import type { AgentNaviView, ContextConcept, ContextFile, ContextView } from "./protocol.js";
 import { renderRegisteredView } from "./views/index.js";
 import { clearRepositoryOverview } from "./views/repo-overview.js";
+import { clearRepositoryTour } from "./views/repo-tour.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -80,6 +81,10 @@ export class AgentNaviShell {
       replaceText(element("view-title"), "Repository Overview");
       replaceText(element("view-eyebrow"), "REPOSITORY UNDERSTANDING");
       replaceText(element("view-description"), "用证据建立项目目的、主流程、模块与首读路径。");
+    } else if (view === "repo-tour") {
+      replaceText(element("view-title"), "Repository Tour");
+      replaceText(element("view-eyebrow"), "GUIDED REPOSITORY TOUR");
+      replaceText(element("view-description"), "在讲人话、技术解释与源码证据之间逐层深入。");
     } else {
       replaceText(element("view-title"), "ContextMap");
       replaceText(element("view-eyebrow"), "READING CONTEXT");
@@ -94,7 +99,11 @@ export class AgentNaviShell {
     replaceText(element("task-query"), this.query);
     replaceText(
       element("empty-title"),
-      view === "repo-overview" ? "正在读取项目概览" : "正在读取 Context",
+      view === "repo-overview"
+        ? "正在读取项目概览"
+        : view === "repo-tour"
+          ? "正在生成仓库导览"
+          : "正在读取 Context",
     );
     replaceText(element("empty-message"), "新请求已收到，旧视图结果已清除。");
     element("empty-state").hidden = false;
@@ -111,6 +120,7 @@ export class AgentNaviShell {
   private clearResult(): void {
     element("context-map").hidden = true;
     clearRepositoryOverview();
+    clearRepositoryTour();
     element("concept-list").replaceChildren();
     element("file-list").replaceChildren();
     element("warning-list").replaceChildren();

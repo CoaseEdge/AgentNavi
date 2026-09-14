@@ -97,7 +97,50 @@ export interface RepositoryOverviewView {
   warnings: ContextWarning[];
 }
 
-export type AgentNaviView = ContextView | RepositoryOverviewView;
+export type TourDepth = "one-minute" | "five-minutes" | "source-deep-dive";
+
+export interface TourStop {
+  id: string;
+  kind: string;
+  title: string;
+  plainLanguage: string;
+  technicalExplanation: string;
+  evidence: Evidence[];
+  entity: {
+    id: string;
+    kind: string;
+    label: string;
+    path?: string;
+    layer: "L1" | "L2" | "L3";
+    source: string;
+    confidence: number;
+    evidence: Evidence[];
+  };
+  relations: Array<{
+    id: string;
+    sourceId: string;
+    targetId: string;
+    relation: string;
+    layer: "L1" | "L2" | "L3";
+    source: string;
+    confidence: number;
+    evidence: Evidence[];
+  }>;
+}
+
+export interface RepositoryTourView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "repo-tour";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    tiers: Array<{ depth: TourDepth; label: string; stops: TourStop[] }>;
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export type AgentNaviView = ContextView | RepositoryOverviewView | RepositoryTourView;
 
 export interface PublicError {
   code: string;
@@ -424,8 +467,107 @@ export function parseRepositoryOverviewView(value: unknown): RepositoryOverviewV
   };
 }
 
+const TOUR_DEPTHS: TourDepth[] = ["one-minute", "five-minutes", "source-deep-dive"];
+const TOUR_KINDS = new Set([
+  "purpose", "why", "workflow", "module", "data-structure", "task", "file",
+  "history", "symbol", "dependency", "test", "task-history", "evidence",
+]);
+
+function tourEntity(value: unknown): TourStop["entity"] | undefined {
+  const item = record(value);
+  const layer = item?.layer;
+  if (!item || (layer !== "L1" && layer !== "L2" && layer !== "L3")) return undefined;
+  const id = displayText(item.id);
+  const kind = displayText(item.kind);
+  const label = displayText(item.label);
+  const source = displayText(item.source);
+  const path = item.path === undefined ? undefined : text(item.path);
+  if (!id || !kind || !label || !source || (path !== undefined && !isCanonicalRelativePath(path))) {
+    return undefined;
+  }
+  return {
+    id,
+    kind,
+    label,
+    ...(path ? { path } : {}),
+    layer,
+    source,
+    confidence: confidence(item.confidence),
+    evidence: evidenceList(item.evidence),
+  };
+}
+
+function tourRelation(value: unknown): TourStop["relations"][number] | undefined {
+  const item = record(value);
+  const layer = item?.layer;
+  if (!item || (layer !== "L1" && layer !== "L2" && layer !== "L3")) return undefined;
+  const id = displayText(item.id);
+  const sourceId = displayText(item.sourceId);
+  const targetId = displayText(item.targetId);
+  const relation = displayText(item.relation);
+  const source = displayText(item.source);
+  if (!id || !sourceId || !targetId || !relation || !source) return undefined;
+  return {
+    id, sourceId, targetId, relation, layer, source,
+    confidence: confidence(item.confidence),
+    evidence: evidenceList(item.evidence),
+  };
+}
+
+function tourStop(value: unknown): TourStop | undefined {
+  const item = record(value);
+  const id = displayText(item?.id);
+  const kind = displayText(item?.kind);
+  const title = displayText(item?.title);
+  const plainLanguage = displayText(item?.plainLanguage);
+  const technicalExplanation = displayText(item?.technicalExplanation);
+  const evidence = evidenceList(item?.evidence);
+  const entity = tourEntity(item?.entity);
+  if (
+    !item || !id || !TOUR_KINDS.has(kind) || !title || !plainLanguage ||
+    !technicalExplanation || evidence.length === 0 || !entity
+  ) return undefined;
+  const relations = Array.isArray(item.relations)
+    ? item.relations.slice(0, 4).map(tourRelation).filter((entry): entry is TourStop["relations"][number] => Boolean(entry))
+    : [];
+  return { id, kind, title, plainLanguage, technicalExplanation, evidence, entity, relations };
+}
+
+export function parseRepositoryTourView(value: unknown): RepositoryTourView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "repo-tour") return undefined;
+  const stats = record(common.data.stats);
+  const rawTiers = Array.isArray(common.data.tiers) ? common.data.tiers.slice(0, 3) : [];
+  if (!stats || rawTiers.length !== 3) return undefined;
+  const tiers = TOUR_DEPTHS.map((depth) => {
+    const tier = rawTiers.map(record).find((item) => item?.depth === depth);
+    if (!tier) return undefined;
+    const label = displayText(tier.label);
+    if (!label) return undefined;
+    const stops = Array.isArray(tier.stops)
+      ? tier.stops.slice(0, 12).map(tourStop).filter((entry): entry is TourStop => Boolean(entry))
+      : [];
+    return { depth, label, stops };
+  });
+  if (tiers.some((tier) => !tier)) return undefined;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "repo-tour",
+    project: common.project,
+    sourceState: common.sourceState,
+    data: {
+      tiers: tiers as RepositoryTourView["data"]["tiers"],
+      stats: {
+        files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks),
+        documentsRead: count(stats.documentsRead),
+      },
+    },
+    warnings: common.warnings,
+  };
+}
+
 export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
-  return parseContextView(value) ?? parseRepositoryOverviewView(value);
+  return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value);
 }
 
 export function parseTaskQuery(value: unknown): string | undefined {
@@ -436,7 +578,9 @@ export function parseTaskQuery(value: unknown): string | undefined {
 
 export function parseRequestedView(value: unknown): AgentNaviView["view"] | undefined {
   const input = record(value);
-  return input?.view === "context" || input?.view === "repo-overview" ? input.view : undefined;
+  return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour"
+    ? input.view
+    : undefined;
 }
 
 export function parsePublicError(value: unknown): PublicError | undefined {

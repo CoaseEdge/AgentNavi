@@ -135,6 +135,20 @@
           </section>
         </div>
 
+        <div id="repository-tour" class="repository-tour" hidden>
+          <nav class="tour-depths" aria-label="导览深度">
+            <button id="tour-depth-one-minute" type="button" aria-pressed="true">1 分钟</button>
+            <button id="tour-depth-five-minutes" type="button" aria-pressed="false">5 分钟</button>
+            <button id="tour-depth-source-deep-dive" type="button" aria-pressed="false">深入源码</button>
+          </nav>
+          <section class="tour-panel" aria-labelledby="tour-depth-label">
+            <span class="stage-index">GUIDED PATH</span>
+            <h2 id="tour-depth-label"></h2>
+            <p id="tour-empty" class="tour-empty" hidden>当前深度没有足够的可追溯证据。</p>
+            <ol id="tour-stops" class="tour-stops"></ol>
+          </section>
+        </div>
+
         <section id="warning-panel" class="warning-panel" hidden aria-label="数据提示">
           <span class="warning-label">WARNINGS</span>
           <ul id="warning-list"></ul>

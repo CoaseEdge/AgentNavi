@@ -4,6 +4,7 @@ import {
   parseContextView,
   parsePublicError,
   parseRepositoryOverviewView,
+  parseRepositoryTourView,
   parseRequestedView,
   parseTaskQuery,
 } from "../src/protocol.js";
@@ -131,6 +132,39 @@ assert(overview?.data.workflow.length === 7, "应解析 5–7 步主流程");
 assert(overview?.data.purpose.evidence[0]?.path === "README.md", "应保留规范证据路径");
 assert(parseAgentNaviView(overviewFixture)?.view === "repo-overview", "通用 parser 应分派 Overview");
 assert(parseRequestedView({ view: "repo-overview" }) === "repo-overview", "应识别 Overview 请求");
+
+const tourEvidence = { kind: "document", summary: "证据", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 };
+const tourStop = {
+  id: "purpose",
+  kind: "purpose",
+  title: "是什么",
+  plainLanguage: "帮助理解项目",
+  technicalExplanation: "来自项目文档",
+  evidence: [tourEvidence],
+  entity: { id: "purpose", kind: "concept", label: "项目目的", path: "README.md", layer: "L1", source: "repository-document", confidence: 1, evidence: [tourEvidence] },
+  relations: [],
+};
+const tourFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "repo-tour",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    tiers: [
+      { depth: "one-minute", label: "1 分钟", stops: [tourStop] },
+      { depth: "five-minutes", label: "5 分钟", stops: [{ ...tourStop, id: "file", kind: "file" }] },
+      { depth: "source-deep-dive", label: "深入源码", stops: [{ ...tourStop, id: "symbol", kind: "symbol" }] },
+    ],
+    stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+  },
+  warnings: [],
+};
+assert(parseRepositoryTourView(tourFixture)?.data.tiers.length === 3, "应解析固定三档 Tour");
+assert(parseAgentNaviView(tourFixture)?.view === "repo-tour", "通用 parser 应分派 Tour");
+assert(parseRequestedView({ view: "repo-tour" }) === "repo-tour", "应识别 Tour 请求");
+const unsafeTour = structuredClone(tourFixture);
+unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
+assert(parseRepositoryTourView(unsafeTour)?.data.tiers[0]?.stops.length === 0, "无有效证据的 Tour stop 应被丢弃");
 
 const unsafeOverview = structuredClone(overviewFixture);
 unsafeOverview.data.purpose.summary = "secret at /private/project";

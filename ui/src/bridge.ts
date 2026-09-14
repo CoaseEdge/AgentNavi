@@ -9,7 +9,13 @@ export interface ToolResultLike {
 export function applyToolInput(shell: AgentNaviShell, toolArguments: unknown): void {
   const requestedView = parseRequestedView(toolArguments);
   shell.beginRequest(
-    parseTaskQuery(toolArguments) ?? (requestedView === "repo-overview" ? "项目概览" : undefined),
+    parseTaskQuery(toolArguments) ?? (
+      requestedView === "repo-overview"
+        ? "项目概览"
+        : requestedView === "repo-tour"
+          ? "仓库导览"
+          : undefined
+    ),
     requestedView,
   );
 }

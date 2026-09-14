@@ -188,6 +188,30 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertNotIn(str(self.project_root.resolve()), wire)
         self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_visualize_tool_returns_all_repository_tour_depths_without_query(self) -> None:
+        self._add_project()
+        self._add_overview_documents()
+
+        result = asyncio.run(
+            self._call(
+                {"view": "repo-tour", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        )
+
+        self.assertFalse(result.is_error)
+        payload = result.structured_content
+        self.assertEqual(payload["view"], "repo-tour")
+        self.assertEqual(
+            [tier["depth"] for tier in payload["data"]["tiers"]],
+            ["one-minute", "five-minutes", "source-deep-dive"],
+        )
+        self.assertIn("1 分钟", result.content[0].text)
+        self.assertIn("技术说明", result.content[0].text)
+        wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+        self.assertNotIn(str(self.project_root.resolve()), wire)
+        self.assertNotIn(str(self.database.settings.database_path), wire)
+
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()
 

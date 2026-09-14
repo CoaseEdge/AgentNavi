@@ -66,6 +66,35 @@ function overviewFixture() {
   };
 }
 
+function tourFixture() {
+  const evidence = { kind: "document", summary: "仓库证据", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 };
+  const stop = (id, kind, title) => ({
+    id,
+    kind,
+    title,
+    plainLanguage: `${title}的讲人话说明 <script>alert(1)</script>`,
+    technicalExplanation: `${title}的技术说明`,
+    evidence: [evidence],
+    entity: { id, kind: "concept", label: title, path: "README.md", layer: "L1", source: "repository-document", confidence: 1, evidence: [evidence] },
+    relations: [],
+  });
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "repo-tour",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      tiers: [
+        { depth: "one-minute", label: "1 分钟", stops: [stop("purpose", "purpose", "是什么")] },
+        { depth: "five-minutes", label: "5 分钟", stops: [stop("file", "file", "关键文件")] },
+        { depth: "source-deep-dive", label: "深入源码", stops: [stop("symbol", "symbol", "PublicModel")] },
+      ],
+      stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
 function setup() {
   const { document } = parseHTML(html);
   globalThis.document = document;
@@ -117,6 +146,29 @@ test("renderer registry shows repository overview with safe DOM and evidence", (
   assert.equal(document.querySelector("#problem-evidence").textContent, "");
   assert.equal(document.querySelector("#solution-evidence").textContent, "");
   assert.equal(document.querySelector("#context-map").hidden, false);
+});
+
+test("repository tour switches depth locally with accessible controls and safe details", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "repo-tour" });
+  applyToolResult(shell, { structuredContent: tourFixture() });
+
+  assert.equal(document.querySelector("#repository-tour").hidden, false);
+  assert.equal(document.querySelector("#repository-view").hidden, true);
+  assert.equal(document.querySelector("#view-title").textContent, "Repository Tour");
+  assert.equal(document.querySelector("#tour-depth-one-minute").getAttribute("aria-pressed"), "true");
+  assert.equal(document.querySelector("#tour-stops h3").textContent, "是什么");
+  assert.equal(document.querySelector("#tour-stops script"), null);
+  assert.equal(document.querySelector("#tour-stops details summary").textContent, "技术说明与源码证据");
+
+  document.querySelector("#tour-depth-source-deep-dive").click();
+  assert.equal(document.querySelector("#tour-depth-one-minute").getAttribute("aria-pressed"), "false");
+  assert.equal(document.querySelector("#tour-depth-source-deep-dive").getAttribute("aria-pressed"), "true");
+  assert.equal(document.querySelector("#tour-stops h3").textContent, "PublicModel");
+
+  applyToolResult(shell, { structuredContent: fixture() });
+  assert.equal(document.querySelector("#repository-tour").hidden, true);
+  assert.equal(document.querySelector("#tour-stops").children.length, 0);
 });
 
 test("new input clears stale data before an error and keeps status perceivable", () => {

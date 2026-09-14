@@ -15,6 +15,7 @@ from ..config import Settings
 from ..database import ensure_database
 from .adapters.context import context_text, context_view
 from .adapters.repo_overview import repo_overview_text, repo_overview_view
+from .adapters.repo_tour import repo_tour_text, repo_tour_view
 from .errors import AgentNaviMCPError, to_public_error
 from .project_resolver import resolve_project
 from .protocol import Error
@@ -152,7 +153,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         """生成 MCP App 与无 UI Host 都可消费的只读 VLA 结果。"""
 
         try:
-            if view not in {"context", "repo-overview"}:
+            if view not in {"context", "repo-overview", "repo-tour"}:
                 raise AgentNaviMCPError(
                     "INVALID_ARGUMENT", details={"field": "view"}
                 )
@@ -171,11 +172,18 @@ def create_server(*, home: str | Path | None = None) -> Any:
                 project_id=checked_project_id,
                 workspace=checked_workspace,
             )
-            from ..repository_views import repository_overview_data
+            if view == "repo-overview":
+                from ..repository_views import repository_overview_data
 
-            core_data = repository_overview_data(database, project)
-            structured = repo_overview_view(core_data)
-            text = repo_overview_text(core_data)
+                core_data = repository_overview_data(database, project)
+                structured = repo_overview_view(core_data)
+                text = repo_overview_text(core_data)
+            else:
+                from ..repository_views import repository_tour_data
+
+                core_data = repository_tour_data(database, project)
+                structured = repo_tour_view(core_data)
+                text = repo_tour_text(core_data)
             return CallToolResult(
                 content=[TextContent(type="text", text=text)],
                 structuredContent=structured.to_dict(),
@@ -200,7 +208,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         .read_text(encoding="utf-8"),
         name="AgentNavi ContextMap",
         title="AgentNavi ContextMap",
-        description="项目概览与任务到概念、文件的只读导航视图。",
+        description="项目概览、仓库导览与任务到概念、文件的只读导航视图。",
         csp=ResourceCsp(
             connectDomains=[],
             resourceDomains=[],
@@ -212,7 +220,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
     apps.tool(
         resource_uri=APP_URI,
         name="agentnavi_visualize",
-        description="展示只读项目概览，或任务、概念与候选文件的 ContextMap。",
+        description="展示只读项目概览、分层仓库导览或 ContextMap。",
         annotations=context_tool_annotations(),
         structured_output=True,
     )(agentnavi_visualize)

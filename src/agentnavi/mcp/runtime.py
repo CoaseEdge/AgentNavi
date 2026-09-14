@@ -229,8 +229,93 @@ class RepositoryOverviewViewOutput(_ExtensibleModel):
         return value
 
 
+class TourEntityOutput(_ExtensibleModel):
+    id: str
+    kind: str
+    label: str
+    path: str | None = None
+    layer: Literal["L1", "L2", "L3"]
+    source: str
+    confidence: float
+    evidence: list[dict[str, Any]]
+
+
+class TourRelationOutput(_ExtensibleModel):
+    id: str
+    source_id: str = Field(alias="sourceId")
+    target_id: str = Field(alias="targetId")
+    relation: str
+    layer: Literal["L1", "L2", "L3"]
+    source: str
+    confidence: float
+    evidence: list[dict[str, Any]]
+
+
+class TourStopOutput(_ExtensibleModel):
+    id: str
+    kind: Literal[
+        "purpose", "why", "workflow", "module", "data-structure", "task",
+        "file", "history", "symbol", "dependency", "test", "task-history",
+        "evidence",
+    ]
+    title: str
+    plain_language: str = Field(alias="plainLanguage")
+    technical_explanation: str = Field(alias="technicalExplanation")
+    evidence: list[dict[str, Any]]
+    entity: TourEntityOutput
+    relations: list[TourRelationOutput]
+
+
+class TourTierOutput(_ExtensibleModel):
+    depth: Literal["one-minute", "five-minutes", "source-deep-dive"]
+    label: str
+    stops: list[TourStopOutput]
+
+
+class RepositoryTourDataOutput(_ExtensibleModel):
+    tiers: list[TourTierOutput]
+    stats: OverviewStatsOutput
+
+
+class RepositoryTourViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["repo-tour"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: RepositoryTourDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "view": "repo-tour",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "tiers": [
+                        {"depth": depth, "label": label, "stops": []}
+                        for depth, label in (
+                            ("one-minute", "1 分钟"),
+                            ("five-minutes", "5 分钟"),
+                            ("source-deep-dive", "深入源码"),
+                        )
+                    ],
+                    "stats": {
+                        "files": 0, "concepts": 0, "tasks": 0, "documentsRead": 0,
+                    },
+                },
+                "warnings": [],
+            }
+        return value
+
+
 class VisualizeViewOutput(
-    RootModel[ContextViewOutput | RepositoryOverviewViewOutput]
+    RootModel[
+        ContextViewOutput | RepositoryOverviewViewOutput | RepositoryTourViewOutput
+    ]
 ):
     """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
 
@@ -250,7 +335,9 @@ VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 # tools/list 继续发布精确的 string / const 合同，不依赖 SDK 私有实现。
 VISUALIZE_VIEW_INPUT = Annotated[
     Any,
-    WithJsonSchema({"type": "string", "enum": ["context", "repo-overview"]}),
+    WithJsonSchema(
+        {"type": "string", "enum": ["context", "repo-overview", "repo-tour"]}
+    ),
 ]
 REQUIRED_TEXT_INPUT = Annotated[
     Any,
@@ -285,6 +372,8 @@ __all__ = [
     "ContextViewOutput",
     "RepositoryOverviewViewOutput",
     "RepositoryOverviewDataOutput",
+    "RepositoryTourViewOutput",
+    "RepositoryTourDataOutput",
     "VisualizeViewOutput",
     "context_tool_annotations",
 ]

@@ -156,12 +156,13 @@ import agentnavi.mcp.server
                     [
                         {"$ref": "#/$defs/ContextViewOutput"},
                         {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                        {"$ref": "#/$defs/RepositoryTourViewOutput"},
                     ],
                 )
                 self.assertEqual(
                     visualize_tool.input_schema["properties"]["view"],
                     {
-                        "enum": ["context", "repo-overview"],
+                        "enum": ["context", "repo-overview", "repo-tour"],
                         "title": "View",
                         "type": "string",
                     },
@@ -268,6 +269,7 @@ import agentnavi.mcp.server
                     [
                         {"$ref": "#/$defs/ContextViewOutput"},
                         {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                        {"$ref": "#/$defs/RepositoryTourViewOutput"},
                     ],
                 )
                 overview = await client.call_tool(

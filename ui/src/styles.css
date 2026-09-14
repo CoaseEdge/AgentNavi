@@ -229,6 +229,101 @@ h1 {
   padding-top: 30px;
 }
 
+.repository-tour {
+  padding-top: 30px;
+}
+
+.tour-depths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tour-depths button {
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.tour-depths button[aria-pressed="true"] {
+  border-color: var(--green);
+  background: var(--green);
+  color: #08110c;
+}
+
+.tour-panel {
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.tour-panel > h2 {
+  margin: 7px 0 16px;
+}
+
+.tour-stops {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tour-stop {
+  min-width: 0;
+  padding: 14px;
+  border-left: 4px solid var(--green);
+  background: color-mix(in srgb, var(--paper) 45%, transparent);
+}
+
+.tour-stop h3,
+.tour-stop p {
+  overflow-wrap: anywhere;
+}
+
+.tour-stop h3 {
+  margin: 5px 0 7px;
+  font-size: 16px;
+}
+
+.tour-plain,
+.tour-technical {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.tour-stop details {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.tour-stop summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tour-technical {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tour-evidence {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font: 10px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+}
+
+.tour-empty {
+  color: var(--muted);
+}
+
 .overview-section {
   min-width: 0;
   padding: 18px;
