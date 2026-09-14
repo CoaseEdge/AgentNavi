@@ -37,6 +37,12 @@ def _sig(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _stat(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} 必须是非负整数。")
+    return value
+
+
 def _impact_evidence(value: Any, field: str, *, limit: int) -> list[dict[str, Any]]:
     raw_items = _sequence(value, field)
     if not raw_items or len(raw_items) > limit:
@@ -310,7 +316,9 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
             "focus": {"entity": focus, "evidence": focus_evidence}, "anchorFiles": anchors,
             "focusConcepts": concepts, "incoming": incoming, "outgoing": outgoing, "semantic": semantic,
             "history": history, "testRecommendations": tests, "risks": risks, "actions": actions,
-            "stats": {"files": int(stats.get("files", 0)), "concepts": int(stats.get("concepts", 0)), "tasks": int(stats.get("tasks", 0))}}
+            "stats": {"files": _stat(stats.get("files"), "stats.files"),
+                      "concepts": _stat(stats.get("concepts"), "stats.concepts"),
+                      "tasks": _stat(stats.get("tasks"), "stats.tasks")}}
 
 
 def impact_to_view(core_data: Mapping[str, Any]) -> AgentNaviView:

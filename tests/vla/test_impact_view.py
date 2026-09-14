@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from agentnavi.config import Settings
 from agentnavi.database import Database, ensure_database
-from agentnavi.impact_view import _resolve_focus, _semantic_rows, _tested_by_rows, impact_view_data
+from agentnavi.impact_view import _lane_rows, _resolve_focus, _semantic_rows, _tested_by_rows, impact_view_data
 from agentnavi.mcp.adapters.impact import impact_text, impact_to_view
 
 
@@ -296,6 +296,9 @@ class ImpactViewTestCase(unittest.TestCase):
         blank = {**core, "revision": "   "}
         with self.assertRaises(ValueError):
             impact_to_view(blank)
+        for value in (True, -1, 1.5, "1"):
+            with self.subTest(stat=value), self.assertRaises((TypeError, ValueError)):
+                impact_to_view({**core, "stats": {**core["stats"], "files": value}})
 
     def test_large_lane_population_uses_endpoint_index_and_constant_scan_budget(self) -> None:
         focus_id = Database.node_id("fixture", 1, "file", "src/focus.py")
@@ -463,9 +466,68 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertIn("IDX_EDGES_SOURCE", detail)
         self.assertNotIn("TEMP B-TREE", detail)
         self.assertLess(vm_steps, 1500)
-        self.assertEqual(len(rows), 25)
+        self.assertEqual(len(rows), 24)
         data = impact_view_data(self.database, self.project, "Focus")
         self.assertIn("IMPACT_TESTED_BY_SCAN_TRUNCATED", {item["code"] for item in data["warnings"]})
+
+    def test_raw_endpoint_windows_bound_invalid_edge_populations_before_filtering(self) -> None:
+        now = "2026-09-15T10:00:00+00:00"
+        focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
+        focus_concept = Database.node_id("fixture", 2, "concept", "focus")
+        dependency_file = Database.node_id("fixture", 1, "file", "src/dependency.py")
+        with self.database.connect() as connection:
+            connection.executemany(
+                "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"raw-concept-{index}", "fixture", 2, "concept", f"raw-{index}",
+                  f"Raw {index}", "{}", .8, "semantic-heuristic", now, now)
+                 for index in range(5000)],
+            )
+            connection.executemany(
+                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"raw-lane-{index}", "fixture", 2, f"raw-concept-{index}", "implemented_by",
+                  focus_file, "{}", .8, "semantic-heuristic", now, now)
+                 for index in range(5000)],
+            )
+            connection.executemany(
+                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"raw-semantic-{index}", "fixture", 1, focus_concept, f"contains-{index}",
+                  dependency_file, "{}", 1.0, "extractor", now, now)
+                 for index in range(5000)],
+            )
+            step_counts = []
+            results = []
+            statements: list[str] = []
+            connection.set_trace_callback(statements.append)
+            for query in (
+                lambda: _lane_rows(connection, "fixture", focus_file, "incoming"),
+                lambda: _semantic_rows(connection, "fixture", focus_concept, "outgoing"),
+                lambda: _tested_by_rows(connection, "fixture", focus_concept),
+            ):
+                steps = 0
+                def count_vm() -> int:
+                    nonlocal steps
+                    steps += 1
+                    return 0
+                connection.set_progress_handler(count_vm, 1)
+                result = query()
+                connection.set_progress_handler(None, 0)
+                results.append(result); step_counts.append(steps)
+            connection.set_trace_callback(None)
+            plans = [row for statement in statements if "impact-" in statement
+                     for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()]
+            connection.commit()
+        self.assertEqual([len(result) for result in results], [0, 0, 0])
+        self.assertTrue(all(result.raw_truncated for result in results))
+        self.assertTrue(all(steps < 2000 for steps in step_counts), step_counts)
+        detail = " ".join(str(row[3]).upper() for row in plans)
+        self.assertIn("IDX_EDGES_TARGET_ENDPOINT", detail)
+        self.assertIn("IDX_EDGES_SOURCE_ENDPOINT", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+        data = impact_view_data(self.database, self.project, "Focus")
+        codes = {item["code"] for item in data["warnings"]}
+        self.assertIn("IMPACT_LANE_SCAN_TRUNCATED", codes)
+        self.assertIn("IMPACT_SEMANTIC_SCAN_TRUNCATED", codes)
+        self.assertIn("IMPACT_TESTED_BY_SCAN_TRUNCATED", codes)
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")

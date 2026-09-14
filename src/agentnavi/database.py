@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(project_id, layer, source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(project_id, layer, target_id);
+CREATE INDEX IF NOT EXISTS idx_edges_source_endpoint ON edges(project_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target_endpoint ON edges(project_id, target_id);
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(project_id, relation);
 
 CREATE TABLE IF NOT EXISTS file_state (

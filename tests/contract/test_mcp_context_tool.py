@@ -688,6 +688,30 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                     self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
                     self.assertNotIn(secret, json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str))
 
+    def test_invalid_impact_stats_are_public_for_both_tools(self) -> None:
+        from agentnavi.impact_view import impact_view_data
+
+        self._add_project()
+        with self.database.connect() as connection:
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        core = impact_view_data(self.database, project, "src/membership.py")
+        secret = str(self.database.settings.database_path)
+        for value in (True, -1, 1.5, "1"):
+            bad_core = {**core, "stats": {**core["stats"], "files": value}}
+            for tool_name, arguments in (
+                ("agentnavi_impact", {"selector": "src/membership.py", "project_id": "fixture"}),
+                ("agentnavi_visualize", {"view": "impact", "query": "src/membership.py", "project_id": "fixture"}),
+            ):
+                with self.subTest(value=value, tool=tool_name), patch(
+                    "agentnavi.impact_view.impact_view_data", return_value=bad_core
+                ):
+                    result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                    self.assertTrue(result.is_error)
+                    self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                    wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+                    self.assertNotIn(secret, wire)
+                    self.assertNotIn("validation", wire.lower())
+
     def test_tested_by_file_focus_succeeds_for_both_impact_tools(self) -> None:
         self._add_project()
         relative = "checks/membership_contract.py"
@@ -840,6 +864,9 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             tool_name="agentnavi_impact",
         )).structured_content
         ImpactViewOutput.model_validate(impact)
+        stats_schema = ImpactViewOutput.model_json_schema()["$defs"]["ImpactStatsOutput"]
+        self.assertEqual(stats_schema["properties"]["files"]["minimum"], 0)
+        self.assertEqual(stats_schema["properties"]["files"]["type"], "integer")
         from jsonschema import ValidationError as JsonSchemaError, validate
         invalid_focus = json.loads(json.dumps(impact))
         invalid_focus["data"]["focus"]["entity"].update({"kind": "task", "layer": "L3"})

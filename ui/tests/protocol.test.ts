@@ -306,6 +306,11 @@ for (const badConfidence of [true, Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1
   badScalar.data.focus.entity.confidence = badConfidence;
   assert(parseImpactView(badScalar) === undefined, "Impact confidence 必须为 0..1 finite number");
 }
+for (const badStat of [true, 1.5, "1", -1]) {
+  const badStats: any = structuredClone(impactFixture);
+  badStats.data.stats.files = badStat;
+  assert(parseImpactView(badStats) === undefined, "Impact stats 必须为非负整数");
+}
 for (const badLine of [true, 1.5, 0, -1]) {
   const badScalar: any = structuredClone(impactFixture);
   badScalar.data.focus.evidence[0].lineStart = badLine;

@@ -1113,6 +1113,11 @@ export function parseImpactView(value: unknown): ImpactView | undefined {
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "impact" || common.data.layout !== "incoming-focus-outgoing") return undefined;
   const revision = displayText(common.data.revision); const stats = record(common.data.stats);
+  const impactStat = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+  const parsedStats = stats ? {
+    files: impactStat(stats.files), concepts: impactStat(stats.concepts), tasks: impactStat(stats.tasks),
+  } : undefined;
   const entityRegistry = new Map<string, string>(); const edgeRegistry = new Map<string, string>();
   const knownEvidence = new Set<string>(); const signature = (item: unknown): string => JSON.stringify(item);
   const impactEvidence = (value: unknown, limit = 3): Evidence[] | undefined => {
@@ -1167,7 +1172,8 @@ export function parseImpactView(value: unknown): ImpactView | undefined {
   };
   const sameEvidence = (left: Evidence[], right: Evidence[]): boolean => signature(left) === signature(right);
   const rawFocus = record(common.data.focus); const focus = parseEntity(rawFocus?.entity); const focusEvidence = impactEvidence(rawFocus?.evidence);
-  if (!nonBlank(revision) || !stats || !rawFocus || !focus || !focusEvidence || !sameEvidence(focusEvidence, focus.evidence) ||
+  if (!nonBlank(revision) || !parsedStats || parsedStats.files === undefined || parsedStats.concepts === undefined ||
+      parsedStats.tasks === undefined || !rawFocus || !focus || !focusEvidence || !sameEvidence(focusEvidence, focus.evidence) ||
       !((focus.kind === "file" && focus.layer === "L1" && focus.path) || (focus.kind === "concept" && focus.layer === "L2"))) return undefined;
   const rawAnchors = Array.isArray(common.data.anchorFiles) ? common.data.anchorFiles : [];
   if (rawAnchors.length > 8) return undefined;
@@ -1265,7 +1271,7 @@ export function parseImpactView(value: unknown): ImpactView | undefined {
   }
   return { schemaVersion: SCHEMA_VERSION, view: "impact", project: common.project, sourceState: common.sourceState,
     data: { layout: "incoming-focus-outgoing", revision, focus: { entity: focus, evidence: focusEvidence }, anchorFiles, focusConcepts, incoming, outgoing, semantic, history, testRecommendations, risks, actions,
-      stats: { files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks) } }, warnings: common.warnings };
+      stats: { files: parsedStats.files, concepts: parsedStats.concepts, tasks: parsedStats.tasks } }, warnings: common.warnings };
 }
 
 export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {

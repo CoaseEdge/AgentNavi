@@ -964,6 +964,12 @@ class ImpactActionOutput(_ExtensibleModel):
         return value
 
 
+class ImpactStatsOutput(_ExtensibleModel):
+    files: int = Field(strict=True, ge=0)
+    concepts: int = Field(strict=True, ge=0)
+    tasks: int = Field(strict=True, ge=0)
+
+
 class ImpactDataOutput(_ExtensibleModel):
     layout: Literal["incoming-focus-outgoing"]
     revision: str = Field(min_length=1)
@@ -977,7 +983,7 @@ class ImpactDataOutput(_ExtensibleModel):
     test_recommendations: list[ImpactTestOutput] = Field(alias="testRecommendations", max_length=5)
     risks: list[ImpactRiskOutput] = Field(max_length=5)
     actions: list[ImpactActionOutput] = Field(min_length=5, max_length=5)
-    stats: ContextStatsOutput
+    stats: ImpactStatsOutput
 
     @field_validator("revision")
     @classmethod
