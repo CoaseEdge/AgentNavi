@@ -140,6 +140,16 @@ class VLAProtocolContractTests(unittest.TestCase):
             "../README.md",
             "docs\\README.md",
             "./docs/README.md",
+            "docs/../README.md",
+            "docs//README.md",
+            "docs/README.md/",
+            "C:README.md",
+            "https://example.com/README.md",
+            "custom:README.md",
+            " docs/README.md",
+            "docs/README.md ",
+            "docs/README\n.md",
+            "docs/README\x7f.md",
         )
         for path in invalid_paths:
             with self.subTest(path=path):
@@ -152,6 +162,16 @@ class VLAProtocolContractTests(unittest.TestCase):
                         source="repository",
                         confidence=1.0,
                     )
+
+        evidence = Evidence(
+            kind="source-location",
+            summary="证据",
+            path="docs/Project Plan.md",
+            layer="L1",
+            source="repository",
+            confidence=1.0,
+        )
+        self.assertEqual(evidence.path, "docs/Project Plan.md")
 
         with self.assertRaisesRegex(ValueError, "POSIX 相对路径|不得包含绝对路径"):
             AgentNaviView(

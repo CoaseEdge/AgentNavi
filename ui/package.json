@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && node scripts/security-check.mjs",
-    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/protocol.test.js",
+    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/protocol.test.js && node --test tests/shell.test.mjs tests/contracts.test.mjs",
     "build": "vite build",
     "generate": "npm run build && node scripts/sync-generated.mjs",
     "check:generated": "npm run build && node scripts/check-generated.mjs"
@@ -18,6 +18,7 @@
     "@modelcontextprotocol/ext-apps": "2.0.0"
   },
   "devDependencies": {
+    "linkedom": "0.18.13",
     "typescript": "7.0.2",
     "vite": "8.3.0",
     "vite-plugin-singlefile": "2.3.3"

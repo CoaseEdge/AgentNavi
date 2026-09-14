@@ -54,6 +54,10 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
         )
 
         async with Client(create_server(home=self.home), raise_exceptions=True) as client:
+            self.assertEqual(
+                client.server_capabilities.extensions,
+                {"io.modelcontextprotocol/ui": {}},
+            )
             resources = (await client.list_resources()).resources
             self.assertEqual(len(resources), 1)
             resource = resources[0]
@@ -79,6 +83,10 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             self.assertEqual(
                 tools["agentnavi_visualize"].input_schema["properties"]["view"]["const"],
                 "context",
+            )
+            self.assertEqual(
+                tools["agentnavi_visualize"].output_schema,
+                tools["agentnavi_context"].output_schema,
             )
 
             fallback = await client.call_tool(

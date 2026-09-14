@@ -4,7 +4,9 @@
   --paper: #e7e2d6;
   --green: #5faf87;
   --amber: #d6a85f;
-  --muted: #77827b;
+  --amber-text: #72500d;
+  --muted: #4e5a53;
+  --rail-muted: #abb5ae;
   --panel: #d9d5ca;
   --line: rgba(16, 21, 18, 0.2);
   font-family: "Avenir Next", "Noto Sans SC", system-ui, sans-serif;
@@ -17,6 +19,8 @@
   --paper: #101512;
   --panel: #18201b;
   --line: rgba(231, 226, 214, 0.18);
+  --muted: #abb5ae;
+  --amber-text: #d6a85f;
 }
 
 * {
@@ -85,6 +89,8 @@ select {
 .node-number,
 .node-meta,
 .warning-label,
+.error-label,
+.relation-label,
 .project-facts dt,
 .connection-state {
   font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
@@ -139,7 +145,7 @@ h1 {
 }
 
 .project-facts dt {
-  color: var(--muted);
+  color: var(--rail-muted);
 }
 
 .project-facts dd {
@@ -184,7 +190,7 @@ h1 {
 
 .empty-index {
   font: 11px "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
-  color: var(--amber);
+  color: var(--amber-text);
 }
 
 .empty-state h2 {
@@ -241,7 +247,7 @@ h1 {
 }
 
 .node-kind {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 
 .task-card p {
@@ -292,6 +298,30 @@ h1 {
   text-transform: none;
 }
 
+.concept-file-links {
+  grid-column: 2;
+  display: grid;
+  gap: 6px;
+  margin: 5px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+
+.concept-file-links li {
+  display: grid;
+  gap: 3px;
+}
+
+.relation-label {
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.concept-file-links code {
+  font-size: 11px;
+}
+
 .flow-arrow {
   display: grid;
   place-items: start center;
@@ -307,8 +337,26 @@ h1 {
   background: color-mix(in srgb, var(--amber) 14%, transparent);
 }
 
+.error-panel {
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px solid #8f342c;
+  border-left-width: 4px;
+  background: color-mix(in srgb, #8f342c 10%, var(--paper));
+  color: var(--ink);
+}
+
+.error-label {
+  color: #8f342c;
+}
+
+.error-panel p {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
 .warning-label {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 
 .warning-panel ul {
@@ -378,8 +426,7 @@ h1 {
 }
 
 @media (max-width: 460px) {
-  .schema-chip,
-  .connection-state span:last-child {
+  .schema-chip {
     display: none;
   }
 

@@ -17,7 +17,7 @@
           <span class="eyebrow">AGENTNAVI / VLA</span>
           <h1 id="view-title">ContextMap</h1>
         </div>
-        <div class="connection-state" id="connection-state" role="status">
+        <div class="connection-state" id="connection-state" role="status" aria-live="polite">
           <span class="state-dot" aria-hidden="true"></span>
           <span id="connection-label">正在连接</span>
         </div>
@@ -46,10 +46,15 @@
           <span class="schema-chip">agentnavi.vla.v1</span>
         </header>
 
+        <section id="error-panel" class="error-panel" hidden role="alert" aria-live="assertive">
+          <span class="error-label">ERROR</span>
+          <p id="error-message">查询失败。</p>
+        </section>
+
         <div id="empty-state" class="empty-state">
           <span class="empty-index">00</span>
-          <h2>等待 Context 结果</h2>
-          <p>调用 agentnavi_visualize 后，这里会显示只读导航关系。</p>
+          <h2 id="empty-title">等待 Context 结果</h2>
+          <p id="empty-message">调用 agentnavi_visualize 后，这里会显示只读导航关系。</p>
         </div>
 
         <div id="context-map" class="context-map" hidden>

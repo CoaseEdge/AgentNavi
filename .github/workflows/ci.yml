@@ -74,6 +74,7 @@ jobs:
       - name: 运行 MCP 合同测试
         run: |
           python -m unittest tests.contract.test_mcp_server -v
+          python -m unittest tests.contract.test_mcp_context_tool -v
           python -m unittest tests.commands.test_mcp_cli tests.unit.test_project_resolver -v
           python -m unittest tests.mcp.test_app_resource -v
 

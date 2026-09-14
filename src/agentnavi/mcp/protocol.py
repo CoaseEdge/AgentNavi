@@ -79,6 +79,7 @@ _FORBIDDEN_KEYS = frozenset(
 )
 _WINDOWS_ABSOLUTE_RE = re.compile(r"(?i)(?:^|[^A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\[^\\/]+[\\/])")
 _UNC_FORWARD_RE = re.compile(r"(?<!:)//[A-Za-z0-9._~-]+(?:/|\b)")
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _RFC3339_UTC_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
@@ -110,7 +111,14 @@ def _validate_confidence(confidence: float) -> None:
 
 
 def _validate_relative_path(path: str) -> str:
-    if not isinstance(path, str) or not path or "\\" in path:
+    if (
+        not isinstance(path, str)
+        or not path
+        or path != path.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or "\\" in path
+        or _URI_SCHEME_RE.match(path)
+    ):
         raise ValueError(f"路径必须是 POSIX 相对路径：{path!r}")
     posix_path = PurePosixPath(path)
     if (

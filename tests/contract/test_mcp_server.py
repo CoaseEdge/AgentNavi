@@ -73,18 +73,25 @@ import agentnavi.mcp.server
             async with Client(server, raise_exceptions=True) as client:
                 self.assertIsNotNone(client.server_info)
                 self.assertEqual(client.server_info.name, "AgentNavi")
-                tools = (await client.list_tools()).tools
                 self.assertEqual(
-                    [tool.name for tool in tools],
-                    ["agentnavi_context", "agentnavi_visualize"],
+                    client.server_capabilities.extensions,
+                    {"io.modelcontextprotocol/ui": {}},
                 )
-                self.assertEqual(tools[0].input_schema["required"], ["query"])
+                tools = (await client.list_tools()).tools
+                tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
-                    set(tools[0].input_schema["properties"]),
+                    set(tools_by_name),
+                    {"agentnavi_context", "agentnavi_visualize"},
+                )
+                context_tool = tools_by_name["agentnavi_context"]
+                visualize_tool = tools_by_name["agentnavi_visualize"]
+                self.assertEqual(context_tool.input_schema["required"], ["query"])
+                self.assertEqual(
+                    set(context_tool.input_schema["properties"]),
                     {"query", "project_id", "workspace"},
                 )
                 self.assertEqual(
-                    set(tools[0].output_schema["required"]),
+                    set(context_tool.output_schema["required"]),
                     {
                         "schemaVersion",
                         "view",
@@ -94,10 +101,15 @@ import agentnavi.mcp.server
                         "warnings",
                     },
                 )
-                self.assertTrue(tools[0].annotations.read_only_hint)
-                self.assertFalse(tools[0].annotations.destructive_hint)
-                self.assertTrue(tools[0].annotations.idempotent_hint)
-                self.assertFalse(tools[0].annotations.open_world_hint)
+                self.assertEqual(visualize_tool.output_schema, context_tool.output_schema)
+                self.assertEqual(
+                    visualize_tool.input_schema["properties"]["view"],
+                    {"const": "context", "title": "View", "type": "string"},
+                )
+                self.assertTrue(context_tool.annotations.read_only_hint)
+                self.assertFalse(context_tool.annotations.destructive_hint)
+                self.assertTrue(context_tool.annotations.idempotent_hint)
+                self.assertFalse(context_tool.annotations.open_world_hint)
                 resources = (await client.list_resources()).resources
                 self.assertEqual(
                     [str(resource.uri) for resource in resources],
@@ -122,10 +134,15 @@ import agentnavi.mcp.server
             # 官方 transport API 可覆盖完整的 mcp>=2,<3 声明范围。
             async with Client(stdio_client(server)) as client:
                 self.assertEqual(client.server_info.name, "AgentNavi")
-                tools = (await client.list_tools()).tools
                 self.assertEqual(
-                    [tool.name for tool in tools],
-                    ["agentnavi_context", "agentnavi_visualize"],
+                    client.server_capabilities.extensions,
+                    {"io.modelcontextprotocol/ui": {}},
+                )
+                tools = (await client.list_tools()).tools
+                tools_by_name = {tool.name: tool for tool in tools}
+                self.assertEqual(
+                    set(tools_by_name),
+                    {"agentnavi_context", "agentnavi_visualize"},
                 )
                 resources = (await client.list_resources()).resources
                 self.assertEqual(
@@ -154,10 +171,14 @@ import agentnavi.mcp.server
                 self.assertEqual(content.mime_type, "text/html;profile=mcp-app")
                 self.assertEqual(content.meta, resources[0].meta)
                 self.assertIn("AgentNavi ContextMap", content.text)
-                self.assertFalse(tools[0].meta)
+                self.assertFalse(tools_by_name["agentnavi_context"].meta)
                 self.assertEqual(
-                    tools[1].meta,
+                    tools_by_name["agentnavi_visualize"].meta,
                     {"ui": {"resourceUri": "ui://agentnavi/app.html"}},
+                )
+                self.assertEqual(
+                    tools_by_name["agentnavi_visualize"].output_schema,
+                    tools_by_name["agentnavi_context"].output_schema,
                 )
                 fallback = await client.call_tool(
                     "agentnavi_visualize",
@@ -169,6 +190,17 @@ import agentnavi.mcp.server
                     "PROJECT_REQUIRED",
                 )
                 self.assertIn("AgentNavi 错误", fallback.content[0].text)
+                invalid_token = "/private/stdio-secret.py"
+                invalid = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": invalid_token, "query": "会员入口"},
+                )
+                self.assertTrue(invalid.is_error)
+                self.assertEqual(invalid.structured_content["code"], "INVALID_ARGUMENT")
+                self.assertNotIn(
+                    invalid_token,
+                    str(invalid.model_dump(by_alias=True)),
+                )
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             asyncio.run(verify(Path(temporary_directory) / "agentnavi-home"))

@@ -1,4 +1,4 @@
-import type { ContextConcept, ContextFile, ContextView } from "./protocol";
+import type { ContextConcept, ContextFile, ContextView } from "./protocol.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -26,6 +26,22 @@ function conceptNode(concept: ContextConcept, index: number): HTMLLIElement {
   const label = document.createElement("strong");
   replaceText(label, concept.label);
   item.append(number, label, meta(concept.source, `${Math.round(concept.confidence * 100)}%`));
+  if (concept.files.length > 0) {
+    const links = document.createElement("ul");
+    links.className = "concept-file-links";
+    links.setAttribute("aria-label", `${concept.label} 的文件关系`);
+    for (const file of concept.files) {
+      const link = document.createElement("li");
+      const relation = document.createElement("span");
+      relation.className = "relation-label";
+      replaceText(relation, file.relation);
+      const path = document.createElement("code");
+      replaceText(path, file.path);
+      link.append(relation, path);
+      links.append(link);
+    }
+    item.append(links);
+  }
   return item;
 }
 
@@ -37,7 +53,7 @@ function fileNode(file: ContextFile, index: number): HTMLLIElement {
   replaceText(number, String(index + 1).padStart(2, "0"));
   const path = document.createElement("code");
   replaceText(path, file.path);
-  item.append(number, path, meta(file.relation, file.language));
+  item.append(number, path, meta(`候选 · ${file.relation}`, file.language));
   return item;
 }
 
@@ -57,7 +73,38 @@ export class AgentNaviShell {
     if (query) this.query = query;
   }
 
+  beginRequest(query: string | undefined): void {
+    this.setQuery(query);
+    this.clearResult();
+    replaceText(element("task-query"), this.query);
+    replaceText(element("empty-title"), "正在读取 Context");
+    replaceText(element("empty-message"), "新请求已收到，旧导航结果已清除。");
+    element("empty-state").hidden = false;
+    this.setConnection("正在查询", true);
+  }
+
+  showError(message: string): void {
+    this.clearResult();
+    replaceText(element("error-message"), message);
+    element("error-panel").hidden = false;
+    this.setConnection("查询失败", false);
+  }
+
+  private clearResult(): void {
+    element("context-map").hidden = true;
+    element("concept-list").replaceChildren();
+    element("file-list").replaceChildren();
+    element("warning-list").replaceChildren();
+    element("warning-panel").hidden = true;
+    element("error-panel").hidden = true;
+    element("empty-state").hidden = true;
+    replaceText(element("project-name"), "等待数据");
+    replaceText(element("source-state"), "—");
+    replaceText(element("file-count"), "0");
+  }
+
   render(view: ContextView): void {
+    element("error-panel").hidden = true;
     replaceText(element("project-name"), view.project.name);
     replaceText(element("source-state"), view.sourceState.status.toUpperCase());
     replaceText(element("file-count"), String(view.data.stats.files));

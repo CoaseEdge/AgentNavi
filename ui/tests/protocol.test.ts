@@ -1,4 +1,9 @@
-import { parseContextView, parseTaskQuery } from "../src/protocol.js";
+import {
+  isCanonicalRelativePath,
+  parseContextView,
+  parsePublicError,
+  parseTaskQuery,
+} from "../src/protocol.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -37,7 +42,49 @@ const unsafe = structuredClone(fixture);
 unsafe.data.files[0]!.path = "/private/project.py";
 assert(parseContextView(unsafe)?.data.files.length === 0, "应丢弃绝对路径");
 
+const rejectedPaths = [
+  "/private/file.py",
+  "C:\\private\\file.py",
+  "C:/private/file.py",
+  "C:file.py",
+  "\\\\server\\share\\file.py",
+  "//server/share/file.py",
+  "file:///private/file.py",
+  "https://example.com/file.py",
+  "custom:file.py",
+  "../file.py",
+  "docs/../file.py",
+  "./docs/file.py",
+  "docs//file.py",
+  " docs/file.py",
+  "docs/file.py ",
+  "docs/file\n.py",
+  "docs/file\u007f.py",
+];
+for (const path of rejectedPaths) {
+  assert(!isCanonicalRelativePath(path), `应拒绝非规范路径：${JSON.stringify(path)}`);
+}
+assert(isCanonicalRelativePath("docs/Project Plan.md"), "应允许文件名中的普通空格");
+
 assert(parseTaskQuery({ query: " 会员入口 " }) === "会员入口", "应规范化 query");
 assert(parseTaskQuery({ query: 42 }) === undefined, "应拒绝非字符串 query");
+for (const query of [
+  "/private/file.py",
+  "fix /private/file.py now",
+  String.raw`fix C:\Users\alice\file.py`,
+  String.raw`fix \\server\share\file.py`,
+  "inspect file:///private/file.py",
+]) {
+  assert(parseTaskQuery({ query }) === "[查询含路径，已隐藏]", "路径型 query 不应回显");
+}
+assert(
+  parseTaskQuery({ query: "inspect https://example.com/api" }) === "inspect https://example.com/api",
+  "HTTP URL 不应误判为本地路径",
+);
+assert(
+  parsePublicError({ code: "INVALID_ARGUMENT", message: "/private/secret.py" })?.message ===
+    "请求参数无效，请检查参数类型和取值。",
+  "应只显示本地固定公开错误，不回显远端 message",
+);
 
 console.log("protocol unit checks passed");

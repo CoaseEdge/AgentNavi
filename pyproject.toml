@@ -40,7 +40,7 @@ package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
-agentnavi = ["mcp/resources/*.html"]
+agentnavi = ["mcp/resources/*.html", "mcp/resources/*.txt"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
