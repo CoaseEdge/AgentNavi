@@ -31,8 +31,25 @@ test("small text color tokens meet WCAG AA contrast", () => {
   assert.ok(contrast("#ef8d83", "#101512") >= 4.5);
 });
 
+test("dark rail title and project facts use an independent AA foreground", () => {
+  assert.match(css, /--rail-background:\s*#101512/);
+  assert.match(css, /--rail-foreground:\s*#e7e2d6/);
+  assert.match(css, /:root\[data-theme="dark"\][^{]*\{[^}]*--rail-background:\s*#0a0e0c/);
+  assert.match(css, /:root\[data-theme="dark"\][^{]*\{[^}]*--rail-foreground:\s*#f1ede4/);
+  assert.match(css, /\.status-rail\s+h1,[\s\S]*?\.project-facts\s+dd\s*\{[^}]*color:\s*var\(--rail-foreground\)/);
+  assert.ok(contrast("#e7e2d6", "#101512") >= 4.5);
+  assert.ok(contrast("#f1ede4", "#0a0e0c") >= 4.5);
+  assert.ok(contrast("#bcc6bf", "#0a0e0c") >= 4.5);
+});
+
 test("390px layout does not hide connection or error status", () => {
   const narrow = css.slice(css.indexOf("@media (max-width: 460px)"));
   assert.doesNotMatch(narrow, /connection-state\s+span/);
   assert.doesNotMatch(narrow, /error-panel[^}]*display:\s*none/);
+});
+
+test("390px dark layout keeps rail title and facts on the AA token", () => {
+  const narrow = css.slice(css.indexOf("@media (max-width: 760px)"));
+  assert.doesNotMatch(narrow, /(?:status-rail\s+h1|project-facts\s+dd)[^}]*color:/);
+  assert.ok(contrast("#f1ede4", "#0a0e0c") >= 4.5);
 });

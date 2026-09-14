@@ -222,8 +222,8 @@ test("every displayed non-path string hides local path tokens recursively", () =
 test("overview hides invalid why evidence and reports malformed workflow", () => {
   const { document, shell } = setup();
   const malicious = overviewFixture();
-  malicious.data.need.problem.evidence[0].path = "vscode://file/private/problem.md";
-  malicious.data.need.solution.evidence[0].path = "file:/private/solution.md";
+  malicious.data.need.problem.evidence[0].path = "cursor://file/private/problem.md";
+  malicious.data.need.solution.evidence[0].path = "custom-editor://file/private/solution.md";
   malicious.data.workflow[4].step = 4;
 
   applyToolResult(shell, { structuredContent: malicious });

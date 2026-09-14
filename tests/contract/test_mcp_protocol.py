@@ -140,6 +140,8 @@ class VLAProtocolContractTests(unittest.TestCase):
             "file:/private/project/README.md",
             "vscode://file/private/project/README.md",
             "vscode-insiders://file/private/project/README.md",
+            "cursor://file/private/project/README.md",
+            "custom-editor://file/private/project/README.md",
             "../README.md",
             "docs\\README.md",
             "./docs/README.md",
@@ -243,6 +245,14 @@ class VLAProtocolContractTests(unittest.TestCase):
                 code="PATH_LEAK",
                 message="编辑器位置 vscode-insiders://file/private/repo",
             ),
+            lambda: Warning(
+                code="PATH_LEAK",
+                message="编辑器位置 cursor://file/private/repo",
+            ),
+            lambda: Warning(
+                code="PATH_LEAK",
+                message="编辑器位置 custom-editor://file/private/repo",
+            ),
             lambda: Warning(code="PATH_LEAK", message="位置 file:/private/repo"),
             lambda: Project(
                 id="agentnavi",
@@ -256,12 +266,19 @@ class VLAProtocolContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "不得包含绝对路径"):
                     factory()
 
+        public_url = Warning(
+            code="PUBLIC_DOC",
+            message="公开说明位于 https://file.example.com/docs/overview。",
+        )
+        self.assertIn("https://file.example.com", public_url.to_dict()["message"])
+
     def test_absolute_path_canaries_cover_object_keys_but_allow_relative_path_indexes(self) -> None:
         private_keys = (
             "/private/project/file.py",
             "file:///private/project/file.py",
             "file:/private/project/file.py",
             "vscode://file/private/project/file.py",
+            "cursor://file/private/project/file.py",
             "C:\\private\\project\\file.py",
             "\\\\server\\private\\file.py",
         )

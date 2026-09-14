@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,7 +74,9 @@ class RepositoryOverviewTestCase(unittest.TestCase):
             "def test_cli():\n    assert True\n", encoding="utf-8"
         )
         (self.root / "pyproject.toml").write_text(
-            "[project]\nname='fixture'\n[project.scripts]\nfixture='fixture.cli:run'\n",
+            "[project]\nname='fixture'\n"
+            "[tool.example]\nfixture='not-a-script'\n"
+            "[project.scripts]\nfixture='fixture.cli:run'\n",
             encoding="utf-8",
         )
         self.database = ensure_database(Settings.load(self.base / "agentnavi-home"))
@@ -198,6 +201,12 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         self.assertIn("src/fixture/cli.py", reading_paths)
         self.assertIn("src/fixture/__main__.py", reading_paths)
         self.assertIn("tests/test_cli.py", reading_paths)
+        manifest_entry = next(
+            item for item in core["readingOrder"] if item["path"] == "src/fixture/cli.py"
+        )
+        self.assertEqual(manifest_entry["evidence"][0]["line_start"], 6)
+        runtime = next(item for item in core["modules"] if item["name"] == "Runtime")
+        self.assertNotIn("line_start", runtime["evidence"][0])
 
     def test_results_are_deterministic_across_database_insertion_order(self) -> None:
         first = repository_overview_data(self.database, self._project())
@@ -344,6 +353,7 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         entry = next(item for item in core["readingOrder"] if item["path"] == "bin/start.js")
         self.assertIn("manifest", entry["reason"])
         self.assertEqual(entry["evidence"][0]["path"], "package.json")
+        self.assertNotIn("line_start", entry["evidence"][0])
 
     def test_workflow_accepts_five_and_seven_and_stably_truncates_eight(self) -> None:
         def set_steps(count: int, *, continuation: bool = False) -> dict[str, object]:
@@ -361,6 +371,8 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         five = set_steps(5, continuation=True)
         self.assertEqual(len(five["workflow"]), 5)
         self.assertIn("详细说明", five["workflow"][0]["detail"])
+        self.assertEqual(five["workflow"][0]["evidence"][0]["line_start"], 5)
+        self.assertEqual(five["workflow"][0]["evidence"][0]["line_end"], 6)
         seven = set_steps(7)
         self.assertEqual(len(seven["workflow"]), 7)
         eight = set_steps(8)
@@ -368,12 +380,97 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         self.assertEqual([item["step"] for item in eight["workflow"]], list(range(1, 8)))
         self.assertIn("WORKFLOW_TRUNCATED", {item["code"] for item in eight["warnings"]})
 
+    def test_large_document_digest_and_single_stream_read_are_authoritative(self) -> None:
+        prefix = "# Fixture\n\n## 一句话理解\n\n可信概览。\n"
+        original = (prefix + "A" * (64 * 1024)).encode()
+        readme = self.root / "README.md"
+        readme.write_bytes(original)
+        self._sync_file_state("README.md")
+
+        open_count = 0
+        real_open = Path.open
+
+        def counting_open(path: Path, *args, **kwargs):
+            nonlocal open_count
+            if path.resolve() == readme.resolve():
+                open_count += 1
+            return real_open(path, *args, **kwargs)
+
+        with patch("pathlib.Path.open", new=counting_open):
+            ready = repository_overview_data(self.database, self._project())
+        self.assertEqual(ready["sourceState"]["status"], "ready")
+        self.assertEqual(open_count, 1)
+        self.assertIn("可信概览", ready["purpose"]["summary"])
+
+        stat = readme.stat()
+        replacement = bytearray(original)
+        replacement[-1] = ord("B")
+        readme.write_bytes(replacement)
+        os.utime(readme, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        stale = repository_overview_data(self.database, self._project())
+        self.assertEqual(stale["sourceState"]["status"], "stale")
+        self.assertNotIn("可信概览", stale["purpose"]["summary"])
+
+        readme.write_bytes(original)
+        self._sync_file_state("README.md")
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE file_state SET digest='' WHERE project_id='fixture' AND path='README.md'"
+            )
+            connection.commit()
+        unverifiable = repository_overview_data(self.database, self._project())
+        self.assertEqual(unverifiable["sourceState"]["status"], "stale")
+        self.assertNotIn("可信概览", unverifiable["purpose"]["summary"])
+
+    def test_changed_final_output_paths_are_stale_and_removed(self) -> None:
+        cases = (
+            ("src/fixture/__main__.py", "modify"),
+            ("src/fixture/cli.py", "delete"),
+            ("tests/test_cli.py", "modify"),
+            ("pyproject.toml", "modify"),
+        )
+
+        for path, action in cases:
+            with self.subTest(path=path, action=action):
+                absolute = self.root / path
+                original = absolute.read_bytes()
+                if action == "delete":
+                    absolute.unlink()
+                else:
+                    absolute.write_bytes(original + b"\n# changed\n")
+
+                core = repository_overview_data(self.database, self._project())
+                self.assertEqual(core["sourceState"]["status"], "stale")
+                public_paths = {
+                    item_path
+                    for module in core["modules"]
+                    for item_path in module["paths"]
+                }
+                public_paths.update(item["path"] for item in core["readingOrder"])
+                evidence_paths = {
+                    evidence["path"]
+                    for item in [*core["modules"], *core["readingOrder"]]
+                    for evidence in item["evidence"]
+                    if "path" in evidence
+                }
+                self.assertNotIn(path, public_paths)
+                self.assertNotIn(path, evidence_paths)
+                self.assertIn(
+                    "SOURCE_SNAPSHOT_STALE",
+                    {warning["code"] for warning in core["warnings"]},
+                )
+
+                absolute.parent.mkdir(parents=True, exist_ok=True)
+                absolute.write_bytes(original)
+                self._sync_file_state(path)
+
     def test_code_fences_private_paths_and_outside_symlinks_never_leak(self) -> None:
         (self.root / "README.md").write_text(
             "# Fixture\n\n## 一句话理解\n\n"
-            "打开 vscode://file/Users/alice/private/project。\n\n"
-            "## 问题定义\n\n位置 file:/Users/alice/private/problem。\n\n"
-            "## 解决方式\n\n位置 vscode-insiders://file/Users/alice/private/solution。\n",
+            "打开 cursor://file/Users/alice/private/project。\n\n"
+            "## 问题定义\n\n位置 custom-editor://file/Users/alice/private/problem。\n\n"
+            "## 解决方式\n\n位置 vscode-insiders://file/Users/alice/private/solution "
+            "和 file:/Users/alice/private/solution。\n",
             encoding="utf-8",
         )
         self._sync_file_state("README.md")
@@ -406,6 +503,8 @@ class RepositoryOverviewTestCase(unittest.TestCase):
             "file:/",
             "vscode://file/",
             "vscode-insiders://file/",
+            "cursor://file/",
+            "custom-editor://file/",
             str(outside),
         ):
             self.assertNotIn(secret, wire)
@@ -420,6 +519,8 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         core["rawRows"] = [{"root": str(self.root), "sourceContent": "secret"}]
         core["events"] = [{"payload": "secret-event"}]
         core["project"]["privateExtension"] = str(self.root)
+        core["modules"][0]["summary"] = f"cursor://file{self.root}/secret.py"
+        core["modules"][1]["summary"] = "参考 https://example.com/modules"
 
         view = repo_overview_view(core).to_dict()
         wire = json.dumps(view, ensure_ascii=False)
@@ -427,6 +528,14 @@ class RepositoryOverviewTestCase(unittest.TestCase):
         self.assertIn("DOCUMENT_TRUNCATED", {warning["code"] for warning in core["warnings"]})
         for forbidden in ("rawRows", "sourceContent", "secret-event", "privateExtension", str(self.root)):
             self.assertNotIn(forbidden, wire)
+        self.assertEqual(
+            view["data"]["modules"][0]["summary"],
+            "[内容含路径，已隐藏]",
+        )
+        self.assertEqual(
+            view["data"]["modules"][1]["summary"],
+            "参考 https://example.com/modules",
+        )
 
     def test_text_and_view_are_independently_generated_and_core_is_read_only(self) -> None:
         def table_snapshot() -> dict[str, list[tuple[object, ...]]]:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import tomllib
@@ -26,6 +27,7 @@ MAX_DOCUMENT_LINES = 400
 MAX_TOTAL_DOCUMENT_BYTES = 128 * 1024
 MAX_MODULES = 8
 MAX_READING_ORDER = 7
+MAX_FRESHNESS_PATHS = 48
 
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
@@ -120,38 +122,76 @@ def _snapshot_revision(
     return stable_id(project_id, last_scan_at, *parts, prefix="snapshot_")
 
 
-def _digest_matches(path: Path, expected: str, size: int) -> bool:
-    if not expected or size > MAX_DOCUMENT_BYTES:
-        return True
+def _read_snapshot_file(
+    path: Path,
+    state: sqlite3.Row | None,
+    *,
+    cache_limit: int,
+) -> bytes | None:
+    """一次打开完成完整 digest 校验，并仅缓存调用方需要的前缀。"""
+
+    if state is None or not str(state["digest"]):
+        return None
     hasher = hashlib.blake2s()
     try:
         with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            cached = bytearray()
             for chunk in iter(lambda: handle.read(64 * 1024), b""):
                 hasher.update(chunk)
+                remaining = cache_limit + 1 - len(cached)
+                if remaining > 0:
+                    cached.extend(chunk[:remaining])
+            after = os.fstat(handle.fileno())
     except OSError:
-        return False
-    return hasher.hexdigest() == expected
+        return None
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ino != after.st_ino
+        or after.st_size != state["size"]
+        or after.st_mtime_ns != state["mtime_ns"]
+        or hasher.hexdigest() != str(state["digest"])
+    ):
+        return None
+    return bytes(cached)
 
 
-def _matches_snapshot(path: Path, state: sqlite3.Row | None) -> bool:
-    if state is None:
-        return False
+def _resolved_project_file(resolved_root: Path, relative: str) -> Path:
+    candidate = resolved_root.joinpath(*PurePosixPath(relative).parts)
+    resolved = candidate.resolve(strict=True)
+    resolved.relative_to(resolved_root)
+    if not resolved.is_file():
+        raise OSError
+    return resolved
+
+
+def _fresh_path(
+    resolved_root: Path,
+    relative: str,
+    states: dict[str, sqlite3.Row],
+    freshness: dict[str, bool],
+) -> bool:
+    if relative in freshness:
+        return freshness[relative]
     try:
-        stat = path.stat()
-    except OSError:
-        return False
-    return bool(
-        stat.st_size == state["size"]
-        and stat.st_mtime_ns == state["mtime_ns"]
-        and _digest_matches(path, str(state["digest"]), stat.st_size)
-    )
+        resolved = _resolved_project_file(resolved_root, relative)
+        fresh = _read_snapshot_file(
+            resolved,
+            states.get(relative),
+            cache_limit=0,
+        ) is not None
+    except (OSError, RuntimeError, ValueError):
+        fresh = False
+    freshness[relative] = fresh
+    return fresh
 
 
 def _read_documents(
     root: Path,
     candidates: list[str],
     states: dict[str, sqlite3.Row],
-) -> tuple[list[_Document], list[dict[str, Any]], bool]:
+) -> tuple[list[_Document], list[dict[str, Any]], bool, dict[str, bool]]:
     documents: list[_Document] = []
     warnings: list[dict[str, Any]] = []
     total_bytes = 0
@@ -164,7 +204,9 @@ def _read_documents(
                 "message": "项目目录当前不可读取，概览仅使用索引事实。",
                 "evidence": [],
             }
-        ], True
+        ], True, {}
+
+    freshness: dict[str, bool] = {}
 
     for relative in candidates:
         if total_bytes >= MAX_TOTAL_DOCUMENT_BYTES:
@@ -176,13 +218,16 @@ def _read_documents(
                 }
             )
             break
-        candidate = resolved_root.joinpath(*PurePosixPath(relative).parts)
         try:
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(resolved_root)
-            if not resolved.is_file():
-                raise OSError
-            if not _matches_snapshot(resolved, states.get(relative)):
+            resolved = _resolved_project_file(resolved_root, relative)
+            allowance = min(MAX_DOCUMENT_BYTES, MAX_TOTAL_DOCUMENT_BYTES - total_bytes)
+            payload = _read_snapshot_file(
+                resolved,
+                states.get(relative),
+                cache_limit=allowance,
+            )
+            if payload is None:
+                freshness[relative] = False
                 warnings.append(
                     {
                         "code": "SOURCE_SNAPSHOT_STALE",
@@ -191,10 +236,9 @@ def _read_documents(
                     }
                 )
                 continue
-            allowance = min(MAX_DOCUMENT_BYTES, MAX_TOTAL_DOCUMENT_BYTES - total_bytes)
-            with resolved.open("rb") as handle:
-                payload = handle.read(allowance + 1)
+            freshness[relative] = True
         except (RuntimeError, ValueError):
+            freshness[relative] = False
             warnings.append(
                 {
                     "code": "DOCUMENT_OUTSIDE_PROJECT",
@@ -204,6 +248,7 @@ def _read_documents(
             )
             continue
         except OSError:
+            freshness[relative] = False
             warnings.append(
                 {
                     "code": "SOURCE_SNAPSHOT_STALE",
@@ -252,10 +297,16 @@ def _read_documents(
     return documents, warnings, any(
         warning["code"] in {"SOURCE_SNAPSHOT_STALE", "DOCUMENT_OUTSIDE_PROJECT"}
         for warning in warnings
-    )
+    ), freshness
 
 
-def _evidence(document: _Document, line: int, summary: str) -> dict[str, Any]:
+def _evidence(
+    document: _Document,
+    line: int,
+    summary: str,
+    *,
+    line_end: int | None = None,
+) -> dict[str, Any]:
     return {
         "kind": "document",
         "summary": summary,
@@ -264,7 +315,7 @@ def _evidence(document: _Document, line: int, summary: str) -> dict[str, Any]:
         "confidence": 1.0,
         "path": document.path,
         "line_start": line,
-        "line_end": line,
+        "line_end": line_end or line,
     }
 
 
@@ -294,10 +345,10 @@ def _first_prose(
 
 
 def _workflow(documents: list[_Document]) -> tuple[list[dict[str, Any]], bool]:
-    groups: list[tuple[int, str, list[tuple[int, str, str]]]] = []
+    groups: list[tuple[int, str, list[tuple[int, int, str, str]]]] = []
     for doc_index, document in enumerate(documents):
         current_heading = ""
-        current: list[tuple[int, str, str]] = []
+        current: list[tuple[int, int, str, str]] = []
         for line_number, raw_line in document.lines:
             heading = _HEADING_RE.match(raw_line)
             if heading:
@@ -310,13 +361,18 @@ def _workflow(documents: list[_Document]) -> tuple[list[dict[str, Any]], bool]:
             if ordered:
                 prose = _safe_prose(ordered.group(1), limit=240)
                 if prose:
-                    current.append((line_number, prose, prose))
+                    current.append((line_number, line_number, prose, prose))
                 continue
             if current and raw_line.startswith(("  ", "\t")):
                 continuation = _safe_prose(raw_line, limit=240)
                 if continuation:
-                    line, title, detail = current[-1]
-                    current[-1] = (line, title, f"{detail} {continuation}"[:320])
+                    line, _, title, detail = current[-1]
+                    current[-1] = (
+                        line,
+                        line_number,
+                        title,
+                        f"{detail} {continuation}"[:320],
+                    )
                 continue
             if raw_line.strip() and current:
                 if len(current) >= 5:
@@ -342,9 +398,16 @@ def _workflow(documents: list[_Document]) -> tuple[list[dict[str, Any]], bool]:
             "step": index,
             "title": title,
             "detail": detail,
-            "evidence": [_evidence(document, line, "项目文档中的工作流步骤。")],
+            "evidence": [
+                _evidence(
+                    document,
+                    line,
+                    "项目文档中的工作流步骤。",
+                    line_end=line_end,
+                )
+            ],
         }
-        for index, (line, title, detail) in enumerate(selected[:7], start=1)
+        for index, (line, line_end, title, detail) in enumerate(selected[:7], start=1)
     ], len(selected) > 7
 
 
@@ -392,7 +455,6 @@ def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, 
                 "source": str(row["source"]),
                 "confidence": float(row["confidence"]),
                 **({"path": paths[0]} if paths else {}),
-                **({"line_start": 1, "line_end": 1} if paths else {}),
             }
         ]
         result.append(
@@ -410,23 +472,47 @@ def _modules(connection: sqlite3.Connection, project_id: str) -> list[dict[str, 
     return result
 
 
-def _file_evidence(path: str, summary: str, *, line: int = 1) -> dict[str, Any]:
-    return {
+def _file_evidence(
+    path: str,
+    summary: str,
+    *,
+    line: int | None = None,
+) -> dict[str, Any]:
+    evidence = {
         "kind": "repository-file",
         "summary": summary,
         "layer": "L1",
         "source": "repository-index",
         "confidence": 1.0,
         "path": path,
-        "line_start": line,
-        "line_end": line,
     }
+    if line is not None:
+        evidence.update({"line_start": line, "line_end": line})
+    return evidence
+
+
+def _project_script_line(text: str, key: str) -> int | None:
+    in_scripts = False
+    for number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_scripts = stripped == "[project.scripts]"
+            continue
+        if not in_scripts or not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        candidate = stripped.split("=", 1)[0].strip()
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {'"', "'"}:
+            candidate = candidate[1:-1]
+        if candidate == key:
+            return number
+    return None
 
 
 def _manifest_entry(
     root: Path,
     paths: list[str],
     states: dict[str, sqlite3.Row],
+    freshness: dict[str, bool],
 ) -> tuple[str | None, tuple[str, str, dict[str, Any]] | None]:
     def read_manifest(relative: str) -> tuple[bytes, Path] | None:
         candidate = root.joinpath(*PurePosixPath(relative).parts)
@@ -434,15 +520,20 @@ def _manifest_entry(
             resolved_root = root.resolve(strict=True)
             resolved = candidate.resolve(strict=True)
             resolved.relative_to(resolved_root)
-            if not resolved.is_file() or not _matches_snapshot(
-                resolved, states.get(relative)
-            ):
+            if not resolved.is_file():
                 return None
-            with resolved.open("rb") as handle:
-                payload = handle.read(MAX_DOCUMENT_BYTES + 1)
+            payload = _read_snapshot_file(
+                resolved,
+                states.get(relative),
+                cache_limit=MAX_DOCUMENT_BYTES,
+            )
         except (OSError, RuntimeError, ValueError):
+            freshness[relative] = False
             return None
-        return (payload, resolved) if len(payload) <= MAX_DOCUMENT_BYTES else None
+        freshness[relative] = payload is not None
+        if payload is None or len(payload) > MAX_DOCUMENT_BYTES:
+            return None
+        return payload, resolved
 
     path_set = set(paths)
     if "pyproject.toml" in path_set:
@@ -464,14 +555,7 @@ def _manifest_entry(
                         for candidate in candidates:
                             if candidate not in path_set:
                                 continue
-                            line = next(
-                                (
-                                    number
-                                    for number, source_line in enumerate(text.splitlines(), 1)
-                                    if name in source_line and "=" in source_line
-                                ),
-                                1,
-                            )
+                            line = _project_script_line(text, name)
                             return "pyproject.toml", (
                                 candidate,
                                 f"从 manifest 声明的公开命令 {name} 进入调用链。",
@@ -523,6 +607,7 @@ def _reading_order(
     root: Path,
     states: dict[str, sqlite3.Row],
     modules: list[dict[str, Any]],
+    freshness: dict[str, bool],
 ) -> list[dict[str, Any]]:
     rows = list(
         connection.execute(
@@ -564,7 +649,7 @@ def _reading_order(
     if architecture in read_documents:
         add(architecture, "理解项目架构与主流程。")
 
-    manifest, entry = _manifest_entry(root, paths, states)
+    manifest, entry = _manifest_entry(root, paths, states, freshness)
     if manifest is not None:
         add(manifest, "确认构建配置、依赖与公开命令。")
     if entry is not None:
@@ -627,6 +712,78 @@ def _reading_order(
     ]
 
 
+def _filter_fresh_output_paths(
+    root: Path,
+    states: dict[str, sqlite3.Row],
+    freshness: dict[str, bool],
+    modules: list[dict[str, Any]],
+    reading_order: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """只核对最终会展示的有界路径集合，并剔除失效路径证据。"""
+
+    references = {
+        path
+        for module in modules
+        for path in module["paths"]
+    }
+    references.update(item["path"] for item in reading_order)
+    for item in [*modules, *reading_order]:
+        references.update(
+            evidence["path"]
+            for evidence in item["evidence"]
+            if isinstance(evidence.get("path"), str)
+        )
+
+    ordered_references = sorted(references)
+    inspectable = set(ordered_references[:MAX_FRESHNESS_PATHS])
+    try:
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        resolved_root = root
+        inspectable = set()
+    for relative in ordered_references:
+        if relative not in inspectable:
+            freshness[relative] = False
+        else:
+            _fresh_path(resolved_root, relative, states, freshness)
+
+    stale_paths = [path for path in ordered_references if not freshness.get(path, False)]
+    filtered_modules: list[dict[str, Any]] = []
+    for module in modules:
+        item = dict(module)
+        item["paths"] = [path for path in module["paths"] if freshness.get(path, False)]
+        item["evidence"] = [
+            evidence
+            for evidence in module["evidence"]
+            if not isinstance(evidence.get("path"), str)
+            or freshness.get(evidence["path"], False)
+        ]
+        filtered_modules.append(item)
+
+    filtered_reading = [
+        dict(item)
+        for item in reading_order
+        if freshness.get(item["path"], False)
+        and all(
+            not isinstance(evidence.get("path"), str)
+            or freshness.get(evidence["path"], False)
+            for evidence in item["evidence"]
+        )
+    ]
+    for position, item in enumerate(filtered_reading, start=1):
+        item["position"] = position
+
+    warnings = [
+        {
+            "code": "SOURCE_SNAPSHOT_STALE",
+            "message": f"索引后输出路径已变化或不可验证，已剔除：{path}",
+            "evidence": [],
+        }
+        for path in stale_paths
+    ]
+    return filtered_modules, filtered_reading, warnings, bool(stale_paths)
+
+
 def repository_overview_data(
     database: Database,
     project: sqlite3.Row,
@@ -654,10 +811,11 @@ def repository_overview_data(
         document_paths = _document_candidates(connection, project_id)
         warnings: list[dict[str, Any]] = []
         snapshot_stale = False
+        freshness: dict[str, bool] = {}
         if last_scan_at is None:
             documents: list[_Document] = []
         else:
-            documents, document_warnings, snapshot_stale = _read_documents(
+            documents, document_warnings, snapshot_stale, freshness = _read_documents(
                 root,
                 document_paths,
                 states,
@@ -680,18 +838,6 @@ def repository_overview_data(
                         }
                     )
                     break
-            for manifest_path in ("pyproject.toml", "package.json"):
-                if manifest_path not in states:
-                    continue
-                if not _matches_snapshot(root / manifest_path, states[manifest_path]):
-                    snapshot_stale = True
-                    warnings.append(
-                        {
-                            "code": "SOURCE_SNAPSHOT_STALE",
-                            "message": "扫描后 manifest 已变化，入口阅读顺序可能过期。",
-                            "evidence": [],
-                        }
-                    )
 
         purpose = _first_prose(
             documents,
@@ -715,7 +861,20 @@ def repository_overview_data(
             root,
             states,
             modules,
+            freshness,
         )
+        if last_scan_at is not None:
+            modules, reading_order, path_warnings, paths_stale = (
+                _filter_fresh_output_paths(
+                    root,
+                    states,
+                    freshness,
+                    modules,
+                    reading_order,
+                )
+            )
+            warnings.extend(path_warnings)
+            snapshot_stale = snapshot_stale or paths_stale
         stats = {
             "files": connection.execute(
                 "SELECT COUNT(*) AS count FROM nodes WHERE project_id=? AND layer=1 AND kind='file'",

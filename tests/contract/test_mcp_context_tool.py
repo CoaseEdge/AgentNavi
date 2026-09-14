@@ -261,6 +261,8 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             "file:/Users/alice/short-url-secret.py",
             "vscode://file/Users/alice/editor-secret.py",
             "vscode-insiders://file/Users/alice/insiders-secret.py",
+            "cursor://file/Users/alice/cursor-secret.py",
+            "custom-editor://file/Users/alice/custom-secret.py",
         )
         cases = (
             ("agentnavi_context", None, "query"),
@@ -407,6 +409,10 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             "inspect file:/Users/alice/secret.py",
             "inspect vscode://file/Users/alice/secret.py",
             "inspect vscode-insiders://file/Users/alice/secret.py",
+            "inspect cursor://file/Users/alice/secret.py",
+            "inspect custom-editor://file/Users/alice/secret.py",
+            f"inspect cursor://file{self.project_root}/secret.py",
+            f"inspect custom-editor://file{self.project_root}/secret.py",
         )
         for query in cases:
             with self.subTest(query=query):
@@ -417,6 +423,11 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                 self.assertNotIn("query", result.structured_content["data"])
                 self.assertIn("查询含路径，已隐藏", result.content[0].text)
                 self.assertNotIn(f"当前查询：{query}", result.content[0].text)
+                self.assertNotIn(str(self.project_root), result.content[0].text)
+                self.assertNotIn(
+                    str(self.project_root),
+                    json.dumps(result.structured_content, ensure_ascii=False),
+                )
 
         url = "inspect https://example.com/api/users"
         url_result = asyncio.run(
@@ -425,6 +436,12 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertFalse(url_result.is_error)
         self.assertIn(url, url_result.content[0].text)
         self.assertNotIn("查询含路径，已隐藏", url_result.content[0].text)
+        http_file_host = "inspect https://file.example.com/api/users"
+        http_file_result = asyncio.run(
+            self._call({"query": http_file_host, "project_id": "fixture"})
+        )
+        self.assertFalse(http_file_result.is_error)
+        self.assertIn(http_file_host, http_file_result.content[0].text)
 
     def test_long_relative_paths_are_preserved_without_truncation(self) -> None:
         long_path = f"src/{'a' * 238}.py"

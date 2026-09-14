@@ -80,12 +80,18 @@ for (const query of [
   "inspect file:/private/file.py",
   "inspect vscode://file/private/file.py",
   "inspect vscode-insiders://file/private/file.py",
+  "inspect cursor://file/private/file.py",
+  "inspect custom-editor://file/private/file.py",
 ]) {
   assert(parseTaskQuery({ query }) === "[查询含路径，已隐藏]", "路径型 query 不应回显");
 }
 assert(
   parseTaskQuery({ query: "inspect https://example.com/api" }) === "inspect https://example.com/api",
   "HTTP URL 不应误判为本地路径",
+);
+assert(
+  parseTaskQuery({ query: "inspect https://file.example.com/api" }) === "inspect https://file.example.com/api",
+  "HTTP(S) 的 file host 仍应作为普通公网 URL",
 );
 assert(
   parsePublicError({ code: "INVALID_ARGUMENT", message: "/private/secret.py" })?.message ===
@@ -129,8 +135,8 @@ assert(parseRequestedView({ view: "repo-overview" }) === "repo-overview", "应�
 const unsafeOverview = structuredClone(overviewFixture);
 unsafeOverview.data.purpose.summary = "secret at /private/project";
 unsafeOverview.data.purpose.evidence[0]!.path = "../outside.md";
-unsafeOverview.data.need.problem.evidence[0]!.path = "vscode://file/private/problem.md";
-unsafeOverview.data.need.solution.evidence[0]!.path = "file:/private/solution.md";
+unsafeOverview.data.need.problem.evidence[0]!.path = "cursor://file/private/problem.md";
+unsafeOverview.data.need.solution.evidence[0]!.path = "custom-editor://file/private/solution.md";
 unsafeOverview.data.modules[0]!.paths = ["file:///private/source.py"];
 const sanitizedOverview = parseRepositoryOverviewView(unsafeOverview);
 assert(sanitizedOverview?.data.purpose.summary === "[内容含路径，已隐藏]", "应隐藏递归文本路径");
@@ -145,10 +151,15 @@ const duplicateSteps = overviewFixture.data.workflow.map((step, index) => ({
   ...step,
   step: index === 4 ? 4 : step.step,
 }));
+const fractionalSteps = overviewFixture.data.workflow.map((step, index) => ({
+  ...step,
+  step: index === 0 ? 1.9 : step.step,
+}));
 for (const invalidWorkflow of [
   overviewFixture.data.workflow.slice(0, 4),
   eightSteps,
   duplicateSteps,
+  fractionalSteps,
 ]) {
   const candidate = structuredClone(overviewFixture);
   candidate.data.workflow = structuredClone(invalidWorkflow);

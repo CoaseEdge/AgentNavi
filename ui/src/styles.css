@@ -8,6 +8,8 @@
   --danger: #8f342c;
   --danger-text: #8f342c;
   --muted: #4e5a53;
+  --rail-background: #101512;
+  --rail-foreground: #e7e2d6;
   --rail-muted: #abb5ae;
   --panel: #d9d5ca;
   --line: rgba(16, 21, 18, 0.2);
@@ -25,6 +27,9 @@
   --amber-text: #d6a85f;
   --danger: #ef8d83;
   --danger-text: #ef8d83;
+  --rail-background: #0a0e0c;
+  --rail-foreground: #f1ede4;
+  --rail-muted: #bcc6bf;
 }
 
 * {
@@ -62,12 +67,8 @@ select {
   flex-direction: column;
   padding: 22px 20px 18px;
   border-right: 1px solid var(--ink);
-  background: var(--ink);
-  color: var(--paper);
-}
-
-:root[data-theme="dark"] .status-rail {
-  background: #0a0e0c;
+  background: var(--rail-background);
+  color: var(--rail-foreground);
 }
 
 .brand-mark {
@@ -117,6 +118,11 @@ h1 {
   font-weight: 500;
   letter-spacing: -0.045em;
   writing-mode: vertical-rl;
+}
+
+.status-rail h1,
+.project-facts dd {
+  color: var(--rail-foreground);
 }
 
 .connection-state {

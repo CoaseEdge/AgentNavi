@@ -114,7 +114,7 @@ const PUBLIC_ERROR_MESSAGES: Record<string, string> = {
 };
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const WINDOWS_ABSOLUTE = /(?:^|[^A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/;
-const LOCAL_FILE_URI = /(?:file:|vscode(?:-insiders)?:\/\/file\/)/i;
+const URI_TOKEN = /(?:^|[^A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:[^\s<>"']*)/gi;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -185,8 +185,21 @@ function containsPosixAbsolute(value: string): boolean {
 }
 
 function containsPrivatePath(value: string): boolean {
+  URI_TOKEN.lastIndex = 0;
+  for (const match of value.matchAll(URI_TOKEN)) {
+    const token = match[1]?.replace(/[.,;!?)}\]，。；！？）】]+$/u, "");
+    if (!token) continue;
+    const separator = token.indexOf(":");
+    const scheme = token.slice(0, separator).toLowerCase();
+    if (scheme === "http" || scheme === "https") continue;
+    const remainder = token.slice(separator + 1);
+    if (/^\/\/file(?:[\\/]|$)/i.test(remainder)) return true;
+    if (
+      scheme === "file" &&
+      (/^(?:[\\/]|~\/|[A-Za-z]:[\\/])/.test(remainder))
+    ) return true;
+  }
   return (
-    LOCAL_FILE_URI.test(value) ||
     value.includes("~/") ||
     WINDOWS_ABSOLUTE.test(value) ||
     containsPosixAbsolute(value)
@@ -337,7 +350,8 @@ export function parseRepositoryOverviewView(value: unknown): RepositoryOverviewV
   const rawWorkflow = Array.isArray(data.workflow) ? data.workflow : [];
   const parsedWorkflow = rawWorkflow.flatMap((value) => {
       const item = record(value);
-      const step = count(item?.step);
+      const rawStep = item?.step;
+      const step = typeof rawStep === "number" && Number.isInteger(rawStep) ? rawStep : 0;
       const title = displayText(item?.title);
       if (!item || step < 1 || !title) return [];
       return [{ step, title, detail: displayText(item.detail), evidence: evidenceList(item.evidence) }];
