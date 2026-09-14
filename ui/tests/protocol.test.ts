@@ -164,7 +164,22 @@ assert(parseAgentNaviView(tourFixture)?.view === "repo-tour", "通用 parser 应
 assert(parseRequestedView({ view: "repo-tour" }) === "repo-tour", "应识别 Tour 请求");
 const unsafeTour = structuredClone(tourFixture);
 unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
-assert(parseRepositoryTourView(unsafeTour)?.data.tiers[0]?.stops.length === 0, "无有效证据的 Tour stop 应被丢弃");
+assert(parseRepositoryTourView(unsafeTour) === undefined, "无有效证据的 Tour stop 应使畸形视图被拒绝");
+const duplicateTour = structuredClone(tourFixture);
+duplicateTour.data.tiers[2]!.depth = "one-minute";
+assert(parseRepositoryTourView(duplicateTour) === undefined, "应拒绝重复或缺失的固定 depth");
+const extraTour = structuredClone(tourFixture);
+extraTour.data.tiers.push(structuredClone(extraTour.data.tiers[0]!));
+assert(parseRepositoryTourView(extraTour) === undefined, "应拒绝多于三档的原始 tiers");
+const oversizedTour = structuredClone(tourFixture);
+oversizedTour.data.tiers[0]!.stops = Array.from(
+  { length: 5 },
+  (_, index) => ({ ...structuredClone(tourStop), id: `purpose-${index}` }),
+);
+assert(parseRepositoryTourView(oversizedTour) === undefined, "应拒绝超过档位上限的 stops");
+const wrongKindTour = structuredClone(tourFixture);
+wrongKindTour.data.tiers[0]!.stops[0]!.kind = "symbol";
+assert(parseRepositoryTourView(wrongKindTour) === undefined, "应拒绝放入错误档位的 stop kind");
 
 const unsafeOverview = structuredClone(overviewFixture);
 unsafeOverview.data.purpose.summary = "secret at /private/project";

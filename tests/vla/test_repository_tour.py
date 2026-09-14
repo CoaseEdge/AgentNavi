@@ -10,7 +10,7 @@ from unittest.mock import patch
 from agentnavi.config import Settings
 from agentnavi.database import Database, ensure_database
 from agentnavi.mcp.adapters.repo_tour import repo_tour_text, repo_tour_view
-from agentnavi.repository_views import repository_tour_data
+from agentnavi.repository_views import _tour_graph_facts, repository_tour_data
 
 
 class RepositoryTourTestCase(unittest.TestCase):
@@ -99,6 +99,27 @@ class RepositoryTourTestCase(unittest.TestCase):
                     confidence=0.75,
                     source="semantic-heuristic",
                 )
+            docs_id = Database.upsert_node(
+                connection,
+                project_id="fixture",
+                layer=2,
+                kind="concept",
+                key="documentation",
+                label="Documentation",
+                data={"active": True},
+                confidence=0.78,
+                source="semantic-heuristic",
+            )
+            for relative in ("README.md", "docs/architecture.md"):
+                Database.upsert_edge(
+                    connection,
+                    project_id="fixture",
+                    layer=2,
+                    source_id=docs_id,
+                    relation="documented_by",
+                    target_id=file_ids[relative],
+                    source="semantic-heuristic",
+                )
             symbol_id = Database.upsert_node(
                 connection,
                 project_id="fixture",
@@ -184,6 +205,13 @@ class RepositoryTourTestCase(unittest.TestCase):
             {stop["kind"] for stop in first["tiers"][0]["stops"]},
             {"purpose", "why", "workflow", "module"},
         )
+        one_minute = {stop["kind"]: stop for stop in first["tiers"][0]["stops"]}
+        self.assertEqual(len(one_minute["workflow"]["evidence"]), 7)
+        self.assertIn("接收请求", one_minute["workflow"]["plainLanguage"])
+        self.assertIn("返回证据", one_minute["workflow"]["plainLanguage"])
+        self.assertIn("Runtime", one_minute["module"]["plainLanguage"])
+        self.assertIn("Documentation", one_minute["module"]["plainLanguage"])
+        self.assertEqual(one_minute["module"]["relations"], [])
         self.assertEqual(
             {stop["kind"] for stop in first["tiers"][1]["stops"]},
             {
@@ -202,6 +230,21 @@ class RepositoryTourTestCase(unittest.TestCase):
                 self.assertTrue(stop["technicalExplanation"])
                 self.assertTrue(stop["evidence"])
                 self.assertTrue(stop["entity"])
+        deep = first["tiers"][2]["stops"]
+        self.assertTrue(deep[0]["entity"]["path"].startswith("src/"))
+        with self.database.connect() as connection:
+            edges = {
+                row["id"]: row
+                for row in connection.execute("SELECT * FROM edges WHERE project_id='fixture'")
+            }
+        for relation in [edge for stop in deep for edge in stop["relations"]]:
+            row = edges[relation["id"]]
+            self.assertEqual(relation["sourceId"], row["source_id"])
+            self.assertEqual(relation["targetId"], row["target_id"])
+            self.assertEqual(relation["relation"], row["relation"])
+            self.assertEqual(relation["source"], row["source"])
+            self.assertEqual(relation["confidence"], row["confidence"])
+            self.assertTrue(relation["evidence"])
 
     def test_missing_evidence_omits_unsupported_stops_and_warns(self) -> None:
         for relative in ("README.md", "docs/architecture.md"):
@@ -226,6 +269,12 @@ class RepositoryTourTestCase(unittest.TestCase):
             )
         )
 
+        with self.database.connect() as connection:
+            connection.execute("UPDATE projects SET last_scan_at=NULL WHERE id='fixture'")
+            connection.commit()
+        partial = repository_tour_data(self.database, self._project())
+        self.assertIn("SOURCE_NOT_INDEXED", repo_tour_text(partial))
+
     def test_adapter_allowlists_fields_and_text_is_independent(self) -> None:
         core = repository_tour_data(self.database, self._project())
         core["rawRows"] = [{"root": str(self.root), "content": "secret"}]
@@ -247,6 +296,123 @@ class RepositoryTourTestCase(unittest.TestCase):
         self.assertIn("技术说明", text)
         self.assertIn("证据：", text)
         self.assertNotIn(str(self.root), text)
+
+    def test_adapter_rejects_invalid_tiers_confidence_and_empty_edge_evidence(self) -> None:
+        core = repository_tour_data(self.database, self._project())
+        invalid_cases = []
+        duplicate = json.loads(json.dumps(core))
+        duplicate["tiers"][2]["depth"] = "one-minute"
+        invalid_cases.append(duplicate)
+        over_limit = json.loads(json.dumps(core))
+        over_limit["tiers"][0]["stops"].append(over_limit["tiers"][0]["stops"][0])
+        invalid_cases.append(over_limit)
+        confidence = json.loads(json.dumps(core))
+        confidence["tiers"][0]["stops"][0]["entity"]["confidence"] = 1.1
+        invalid_cases.append(confidence)
+        empty_edge = json.loads(json.dumps(core))
+        relation = next(
+            edge
+            for tier in empty_edge["tiers"]
+            for stop in tier["stops"]
+            for edge in stop["relations"]
+        )
+        relation["evidence"] = []
+        invalid_cases.append(empty_edge)
+
+        for invalid in invalid_cases:
+            with self.subTest():
+                with self.assertRaises((TypeError, ValueError)):
+                    repo_tour_view(invalid)
+
+    def test_class_and_test_survive_large_other_categories(self) -> None:
+        with self.database.connect() as connection:
+            model_id = Database.node_id("fixture", 1, "file", "src/fixture/model.py")
+            for index in range(30):
+                symbol_id = Database.upsert_node(
+                    connection,
+                    project_id="fixture",
+                    layer=1,
+                    kind="symbol",
+                    key=f"src/fixture/model.py#symbol:function:f{index:02d}",
+                    label=f"f{index:02d}",
+                    data={"symbol_kind": "function"},
+                    source="extractor",
+                )
+                Database.upsert_edge(
+                    connection,
+                    project_id="fixture",
+                    layer=1,
+                    source_id=model_id,
+                    relation="contains",
+                    target_id=symbol_id,
+                    source="extractor",
+                )
+            paths = []
+            ids = []
+            for index in range(35):
+                path = f"src/generated/f{index:02d}.py"
+                paths.append(path)
+                ids.append(Database.upsert_node(
+                    connection,
+                    project_id="fixture",
+                    layer=1,
+                    kind="file",
+                    key=path,
+                    label=path,
+                    source="filesystem",
+                ))
+            for index in range(33):
+                Database.upsert_edge(
+                    connection,
+                    project_id="fixture",
+                    layer=1,
+                    source_id=ids[index],
+                    relation="imports",
+                    target_id=ids[index + 1],
+                    source="extractor",
+                )
+            Database.upsert_edge(
+                connection,
+                project_id="fixture",
+                layer=1,
+                source_id=ids[-1],
+                relation="tests",
+                target_id=ids[0],
+                source="extractor",
+            )
+            facts = _tour_graph_facts(
+                connection,
+                "fixture",
+                {"src/fixture/model.py", *paths},
+            )
+
+        self.assertEqual(facts["data_structures"][0]["label"], "PublicModel")
+        self.assertEqual(len(facts["dependencies"]), 4)
+        self.assertEqual(len(facts["tests"]), 1)
+
+    def test_unsafe_recent_tasks_do_not_crowd_out_safe_completed_task(self) -> None:
+        with self.database.connect() as connection:
+            for index in range(3):
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, project_id, title, status, summary,
+                           created_at, updated_at, closed_at
+                       ) VALUES (?, 'fixture', ?, 'completed', '不可显示', ?, ?, ?)""",
+                    (
+                        f"unsafe-{index}",
+                        f"/private/task-{index}",
+                        f"2026-09-15T11:0{index}:00+00:00",
+                        f"2026-09-15T11:0{index}:00+00:00",
+                        f"2026-09-15T11:0{index}:00+00:00",
+                    ),
+                )
+            connection.commit()
+
+        tour = repository_tour_data(self.database, self._project())
+        task_stop = next(
+            stop for stop in tour["tiers"][1]["stops"] if stop["kind"] == "task"
+        )
+        self.assertEqual(task_stop["plainLanguage"], "调整模型边界")
 
 
 if __name__ == "__main__":

@@ -362,6 +362,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         from agentnavi.mcp.runtime import (
             ContextViewOutput,
             RepositoryOverviewViewOutput,
+            RepositoryTourViewOutput,
             VisualizeViewOutput,
         )
 
@@ -383,6 +384,20 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         VisualizeViewOutput.model_validate(overview)
         with self.assertRaises(ValidationError):
             ContextViewOutput.model_validate(overview)
+
+        self._add_overview_documents()
+        tour = asyncio.run(
+            self._call(
+                {"view": "repo-tour", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        ).structured_content
+        RepositoryTourViewOutput.model_validate(tour)
+        VisualizeViewOutput.model_validate(tour)
+        invalid_tour = json.loads(json.dumps(tour))
+        invalid_tour["data"]["tiers"][0]["stops"][0]["entity"]["confidence"] = 1.1
+        with self.assertRaises(ValidationError):
+            RepositoryTourViewOutput.model_validate(invalid_tour)
 
         invalid_payloads = []
         for field, value in (

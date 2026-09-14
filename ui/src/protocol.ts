@@ -472,6 +472,20 @@ const TOUR_KINDS = new Set([
   "purpose", "why", "workflow", "module", "data-structure", "task", "file",
   "history", "symbol", "dependency", "test", "task-history", "evidence",
 ]);
+const TOUR_LIMITS: Record<TourDepth, number> = {
+  "one-minute": 4,
+  "five-minutes": 8,
+  "source-deep-dive": 12,
+};
+const TOUR_KINDS_BY_DEPTH: Record<TourDepth, Set<string>> = {
+  "one-minute": new Set(["purpose", "why", "workflow", "module"]),
+  "five-minutes": new Set([
+    "purpose", "why", "workflow", "module", "data-structure", "task", "file", "history",
+  ]),
+  "source-deep-dive": new Set([
+    "file", "symbol", "dependency", "test", "task-history", "evidence",
+  ]),
+};
 
 function tourEntity(value: unknown): TourStop["entity"] | undefined {
   const item = record(value);
@@ -537,16 +551,24 @@ export function parseRepositoryTourView(value: unknown): RepositoryTourView | un
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "repo-tour") return undefined;
   const stats = record(common.data.stats);
-  const rawTiers = Array.isArray(common.data.tiers) ? common.data.tiers.slice(0, 3) : [];
+  const rawTiers = Array.isArray(common.data.tiers) ? common.data.tiers : [];
   if (!stats || rawTiers.length !== 3) return undefined;
+  const rawDepths = rawTiers.map((tier) => record(tier)?.depth);
+  if (new Set(rawDepths).size !== 3 || !TOUR_DEPTHS.every((depth) => rawDepths.includes(depth))) {
+    return undefined;
+  }
   const tiers = TOUR_DEPTHS.map((depth) => {
     const tier = rawTiers.map(record).find((item) => item?.depth === depth);
     if (!tier) return undefined;
     const label = displayText(tier.label);
     if (!label) return undefined;
-    const stops = Array.isArray(tier.stops)
-      ? tier.stops.slice(0, 12).map(tourStop).filter((entry): entry is TourStop => Boolean(entry))
-      : [];
+    const rawStops = Array.isArray(tier.stops) ? tier.stops : [];
+    if (rawStops.length > TOUR_LIMITS[depth]) return undefined;
+    const stops = rawStops.map(tourStop).filter((entry): entry is TourStop => Boolean(entry));
+    if (
+      stops.length !== rawStops.length ||
+      stops.some((stop) => !TOUR_KINDS_BY_DEPTH[depth].has(stop.kind))
+    ) return undefined;
     return { depth, label, stops };
   });
   if (tiers.some((tier) => !tier)) return undefined;

@@ -229,51 +229,62 @@ class RepositoryOverviewViewOutput(_ExtensibleModel):
         return value
 
 
+class TourEvidenceOutput(_ExtensibleModel):
+    kind: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    layer: Literal["L1", "L2", "L3"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    path: str | None = None
+    line_start: int | None = Field(default=None, alias="lineStart", ge=1)
+    line_end: int | None = Field(default=None, alias="lineEnd", ge=1)
+
+
 class TourEntityOutput(_ExtensibleModel):
-    id: str
-    kind: str
-    label: str
+    id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    label: str = Field(min_length=1)
     path: str | None = None
     layer: Literal["L1", "L2", "L3"]
-    source: str
-    confidence: float
-    evidence: list[dict[str, Any]]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
 
 
 class TourRelationOutput(_ExtensibleModel):
-    id: str
-    source_id: str = Field(alias="sourceId")
-    target_id: str = Field(alias="targetId")
-    relation: str
+    id: str = Field(min_length=1)
+    source_id: str = Field(alias="sourceId", min_length=1)
+    target_id: str = Field(alias="targetId", min_length=1)
+    relation: str = Field(min_length=1)
     layer: Literal["L1", "L2", "L3"]
-    source: str
-    confidence: float
-    evidence: list[dict[str, Any]]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
 
 
 class TourStopOutput(_ExtensibleModel):
-    id: str
+    id: str = Field(min_length=1)
     kind: Literal[
         "purpose", "why", "workflow", "module", "data-structure", "task",
         "file", "history", "symbol", "dependency", "test", "task-history",
         "evidence",
     ]
-    title: str
-    plain_language: str = Field(alias="plainLanguage")
-    technical_explanation: str = Field(alias="technicalExplanation")
-    evidence: list[dict[str, Any]]
+    title: str = Field(min_length=1)
+    plain_language: str = Field(alias="plainLanguage", min_length=1)
+    technical_explanation: str = Field(alias="technicalExplanation", min_length=1)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
     entity: TourEntityOutput
-    relations: list[TourRelationOutput]
+    relations: list[TourRelationOutput] = Field(max_length=4)
 
 
 class TourTierOutput(_ExtensibleModel):
     depth: Literal["one-minute", "five-minutes", "source-deep-dive"]
-    label: str
-    stops: list[TourStopOutput]
+    label: str = Field(min_length=1)
+    stops: list[TourStopOutput] = Field(max_length=12)
 
 
 class RepositoryTourDataOutput(_ExtensibleModel):
-    tiers: list[TourTierOutput]
+    tiers: list[TourTierOutput] = Field(min_length=3, max_length=3)
     stats: OverviewStatsOutput
 
 

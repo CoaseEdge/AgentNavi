@@ -281,6 +281,21 @@ import agentnavi.mcp.server
                 overview_wire = str(overview.model_dump(by_alias=True))
                 self.assertNotIn(str(project_root.resolve()), overview_wire)
                 self.assertIn("README.md", overview.content[0].text)
+                tour = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "repo-tour", "project_id": "stdio-fixture"},
+                )
+                self.assertFalse(tour.is_error)
+                self.assertEqual(tour.structured_content["view"], "repo-tour")
+                self.assertEqual(
+                    [tier["depth"] for tier in tour.structured_content["data"]["tiers"]],
+                    ["one-minute", "five-minutes", "source-deep-dive"],
+                )
+                self.assertIn("技术说明", tour.content[0].text)
+                self.assertNotIn(
+                    str(project_root.resolve()),
+                    str(tour.model_dump(by_alias=True)),
+                )
                 context_result = await client.call_tool(
                     "agentnavi_visualize",
                     {"view": "context", "query": "会员入口"},
