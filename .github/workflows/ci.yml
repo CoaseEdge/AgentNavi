@@ -40,6 +40,42 @@ jobs:
           agentnavi init
           agentnavi doctor
 
+  mcp-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk: minimum-2.0.0
+            install_mode: minimum
+          - sdk: supported-range
+            install_mode: extra
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 MCP 最低支持版本
+        if: matrix.install_mode == 'minimum'
+        run: python -m pip install -e . 'mcp==2.0.0'
+
+      - name: 从 optional extra 解析 MCP 支持范围
+        if: matrix.install_mode == 'extra'
+        run: python -m pip install -e '.[mcp]'
+
+      - name: 检查依赖一致性
+        run: python -m pip check
+
+      - name: 运行 MCP 合同测试
+        run: |
+          python -m unittest tests.contract.test_mcp_server -v
+          python -m unittest tests.commands.test_mcp_cli tests.unit.test_project_resolver -v
+
   deepseek-harness-integration:
     runs-on: ubuntu-latest
 

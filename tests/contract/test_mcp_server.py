@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+def _mcp_sdk_available() -> bool:
+    try:
+        return importlib.util.find_spec("mcp.server") is not None
+    except ModuleNotFoundError:
+        return False
+
+
+MCP_AVAILABLE = _mcp_sdk_available()
+
+
+class MCPServerContractTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[2]
+
+    def _environment(self) -> dict[str, str]:
+        environment = os.environ.copy()
+        source_path = str(self.root / "src")
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            f"{source_path}{os.pathsep}{existing}" if existing else source_path
+        )
+        return environment
+
+    def test_core_modules_import_when_mcp_sdk_is_unavailable(self) -> None:
+        script = """
+import builtins
+
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "mcp" or name.startswith("mcp."):
+        raise AssertionError("MCP SDK must not be imported eagerly")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+import agentnavi.cli
+import agentnavi.mcp
+import agentnavi.mcp.errors
+import agentnavi.mcp.project_resolver
+import agentnavi.mcp.server
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=self.root,
+            env=self._environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    @unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
+    def test_in_process_client_initializes_and_discovers_empty_primitives(self) -> None:
+        from mcp import Client
+
+        from agentnavi.mcp.server import create_server
+
+        async def verify() -> None:
+            server = create_server()
+            async with Client(server, raise_exceptions=True) as client:
+                self.assertIsNotNone(client.server_info)
+                self.assertEqual(client.server_info.name, "AgentNavi")
+                self.assertEqual((await client.list_tools()).tools, [])
+                self.assertEqual((await client.list_resources()).resources, [])
+                self.assertEqual((await client.list_prompts()).prompts, [])
+
+        asyncio.run(verify())
+
+    @unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
+    def test_stdio_client_initializes_without_stdout_log_pollution(self) -> None:
+        from mcp import Client, StdioServerParameters, stdio_client
+
+        async def verify(home: Path) -> None:
+            server = StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "agentnavi", "--home", str(home), "mcp"],
+                env={"PYTHONPATH": str(self.root / "src")},
+            )
+            # v2.0 的 Client 尚不能直接接收 StdioServerParameters；显式使用
+            # 官方 transport API 可覆盖完整的 mcp>=2,<3 声明范围。
+            async with Client(stdio_client(server)) as client:
+                self.assertEqual(client.server_info.name, "AgentNavi")
+                self.assertEqual((await client.list_tools()).tools, [])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            asyncio.run(verify(Path(temporary_directory) / "agentnavi-home"))
+
+
+if __name__ == "__main__":
+    unittest.main()
