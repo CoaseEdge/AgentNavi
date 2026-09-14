@@ -356,9 +356,13 @@ class ImpactViewTestCase(unittest.TestCase):
             )
             focus_concept = Database.node_id("fixture", 2, "concept", "focus")
             plans = []
-            for index_name, endpoint in (("idx_edges_source", "source_id"), ("idx_edges_target", "target_id")):
+            for index_name, endpoint in (("idx_edges_source_semantic", "source_id"),
+                                         ("idx_edges_target_semantic", "target_id")):
                 plans.extend(connection.execute(
-                    f"EXPLAIN QUERY PLAN SELECT edge.rowid FROM edges edge INDEXED BY {index_name} WHERE edge.project_id=? AND edge.layer=2 AND edge.{endpoint}=? ORDER BY edge.rowid DESC LIMIT 25",
+                    f"""EXPLAIN QUERY PLAN SELECT edge.rowid FROM edges edge INDEXED BY {index_name}
+                        WHERE edge.project_id=? AND edge.layer=2 AND edge.{endpoint}=?
+                          AND edge.relation NOT IN ('implemented_by','configured_by','tested_by')
+                        ORDER BY edge.rowid DESC LIMIT 25""",
                     ("fixture", focus_concept),
                 ).fetchall())
             plans.extend(connection.execute(
@@ -380,8 +384,8 @@ class ImpactViewTestCase(unittest.TestCase):
             connection.set_progress_handler(None, 0)
             connection.commit()
         details = " ".join(str(row[3]).upper() for row in plans)
-        self.assertIn("IDX_EDGES_SOURCE", details)
-        self.assertIn("IDX_EDGES_TARGET", details)
+        self.assertIn("IDX_EDGES_SOURCE_SEMANTIC", details)
+        self.assertIn("IDX_EDGES_TARGET_SEMANTIC", details)
         self.assertIn("SQLITE_AUTOINDEX_EDGES_1", details)
         self.assertNotIn("TEMP B-TREE", details)
         self.assertLess(semantic_vm_steps, 1000)
@@ -543,12 +547,13 @@ class ImpactViewTestCase(unittest.TestCase):
             plans = [row for statement in statements if "impact-" in statement
                      for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()]
             connection.commit()
-        self.assertEqual([len(result) for result in results], [0, 24, 0, 0, 0, 0])
+        self.assertEqual([len(result) for result in results], [0, 0, 0, 0, 0, 0])
         self.assertTrue(all(result.raw_truncated for result in results))
         self.assertTrue(all(steps < 2000 for steps in step_counts), step_counts)
         detail = " ".join(str(row[3]).upper() for row in plans)
         self.assertIn("IDX_EDGES_TARGET", detail)
         self.assertIn("IDX_EDGES_SOURCE", detail)
+        self.assertIn("IDX_EDGES_SOURCE_SEMANTIC", detail)
         self.assertNotIn("TEMP B-TREE", detail)
         concept_data = impact_view_data(self.database, self.project, "Focus")
         file_data = impact_view_data(self.database, self.project, "src/focus.py")
@@ -607,9 +612,54 @@ class ImpactViewTestCase(unittest.TestCase):
         data = impact_view_data(self.database, self.project, "Focus")
         self.assertIn("src/focus.py", {item["entity"]["path"] for item in data["anchorFiles"]})
 
+    def test_mapping_categories_do_not_starve_bidirectional_semantic_edges(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        dependency = Database.node_id("fixture", 2, "concept", "dependency")
+        with self.database.connect() as connection:
+            for index in range(40):
+                mapping_file = self._add_file(connection, f"src/mapping_{index:02d}.py")
+                Database.upsert_edge(
+                    connection, project_id="fixture", layer=2, source_id=focus,
+                    relation="implemented_by", target_id=mapping_file,
+                    source="semantic-heuristic", confidence=.8,
+                )
+            for index in range(40):
+                mapping_source = Database.upsert_node(
+                    connection, project_id="fixture", layer=2, kind="concept",
+                    key=f"incoming-mapping-{index}", label=f"Incoming mapping {index}",
+                    source="semantic-heuristic", confidence=.8,
+                )
+                relation = "configured_by" if index % 2 == 0 else "tested_by"
+                Database.upsert_edge(
+                    connection, project_id="fixture", layer=2, source_id=mapping_source,
+                    relation=relation, target_id=focus,
+                    source="semantic-heuristic", confidence=.8,
+                )
+            Database.upsert_edge(
+                connection, project_id="fixture", layer=2, source_id=dependency,
+                relation="depends_on", target_id=focus,
+                source="human-overlay", confidence=1.0,
+            )
+            connection.commit()
+
+        data = impact_view_data(self.database, self.project, "Focus")
+        relations = {(item["direction"], item["relation"]["relation"], item["peer"]["label"])
+                     for item in data["semantic"]}
+        self.assertIn(("outgoing", "depends_on", "Dependency"), relations)
+        self.assertIn(("incoming", "depends_on", "Dependency"), relations)
+
+        with self.database.connect() as connection:
+            for direction in ("outgoing", "incoming"):
+                rows = _semantic_rows(connection, "fixture", focus, direction)
+                self.assertTrue(rows)
+                self.assertTrue(all(row["relation"] not in {
+                    "implemented_by", "configured_by", "tested_by"
+                } for row in rows))
+
     def test_new_category_indexes_are_created_for_an_existing_database(self) -> None:
         names = {"idx_edges_source_relation", "idx_edges_target_relation",
-                 "idx_edges_target_provenance"}
+                 "idx_edges_target_provenance", "idx_edges_source_semantic",
+                 "idx_edges_target_semantic"}
         with self.database.connect() as connection:
             for name in names:
                 connection.execute(f"DROP INDEX {name}")

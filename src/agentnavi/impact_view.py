@@ -36,28 +36,39 @@ class _BoundedRows(list[sqlite3.Row]):
 def _raw_edge_window(connection: sqlite3.Connection, project_id: str, *,
                      endpoint: str, endpoint_id: str, layer: int, limit: int,
                      comment: str, relation: str | None = None,
-                     source: str | None = None) -> _BoundedRows:
+                     source: str | None = None,
+                     semantic: bool = False) -> _BoundedRows:
     if endpoint not in {"source_id", "target_id"}:
         raise ValueError("unsupported edge endpoint")
-    if relation is not None and source is not None:
+    if sum(value is not None for value in (relation, source)) + int(semantic) > 1:
         raise ValueError("raw edge window supports one category discriminator")
-    if relation is not None:
+    if semantic:
+        if layer != 2:
+            raise ValueError("semantic window only supports layer 2")
+        index = "idx_edges_source_semantic" if endpoint == "source_id" else "idx_edges_target_semantic"
+        category_sql = " AND edge.relation NOT IN ('implemented_by','configured_by','tested_by')"
+        category_values = ()
+        layer_sql, layer_values = "edge.layer=2", ()
+    elif relation is not None:
         index = "idx_edges_source_relation" if endpoint == "source_id" else "idx_edges_target_relation"
         category_sql, category_values = " AND edge.relation=?", (relation,)
+        layer_sql, layer_values = "edge.layer=?", (layer,)
     elif source is not None:
         if endpoint != "target_id":
             raise ValueError("provenance window only supports target endpoint")
         index = "idx_edges_target_provenance"
         category_sql, category_values = " AND edge.source=?", (source,)
+        layer_sql, layer_values = "edge.layer=?", (layer,)
     else:
         index = "idx_edges_source" if endpoint == "source_id" else "idx_edges_target"
         category_sql, category_values = "", ()
+        layer_sql, layer_values = "edge.layer=?", (layer,)
     rows = connection.execute(
         f"""SELECT /* {comment} */ edge.id, edge.rowid AS recorded_order
             FROM edges edge INDEXED BY {index}
-            WHERE edge.project_id=? AND edge.layer=? AND edge.{endpoint}=?{category_sql}
+            WHERE edge.project_id=? AND {layer_sql} AND edge.{endpoint}=?{category_sql}
             ORDER BY edge.rowid DESC LIMIT ?""",
-        (project_id, layer, endpoint_id, *category_values, limit + 1),
+        (project_id, *layer_values, endpoint_id, *category_values, limit + 1),
     ).fetchall()
     return _BoundedRows(list(rows[:limit]), raw_truncated=len(rows) > limit)
 
@@ -212,7 +223,7 @@ def _semantic_rows(connection: sqlite3.Connection, project_id: str,
     endpoint = "source_id" if direction == "outgoing" else "target_id"
     raw = _raw_edge_window(connection, project_id, endpoint=endpoint, endpoint_id=concept_id,
                            layer=2, limit=IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT,
-                           comment=f"impact-semantic-{direction}-raw")
+                           comment=f"impact-semantic-{direction}-raw", semantic=True)
     if not raw:
         return raw
     marks = ",".join("?" for _ in raw)
