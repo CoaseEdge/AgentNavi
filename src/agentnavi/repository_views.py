@@ -504,6 +504,7 @@ def _execution_workflow(
                 ci_heading = (
                     re.search(r"\bci(?: cd)?\b", title) is not None
                     or re.search(r"\bc i(?: c d)?\b", title) is not None
+                    or re.search(r"\bcicd\b", title) is not None
                 )
                 accepted_heading = (
                     any(

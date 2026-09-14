@@ -445,6 +445,7 @@ class ArchitectureFlowTestCase(unittest.TestCase):
             "Migration Workflow", "CI Workflow", "事件生命周期",
             "安装工作流", "发布流程", "迁移清单", "持续集成流程",
             "CI/CD Workflow", "Continuous-Integration Workflow", "C.I. Workflow",
+            "CICD Workflow", "cIcD Workflow",
         )
         for heading in headings:
             with self.subTest(heading=heading):
