@@ -831,6 +831,17 @@ h1 {
 .impact-focus-group li { min-width: 0; overflow-wrap: anywhere; }
 .impact-focus-group li > span { display: block; color: var(--muted); }
 
+.history-view { display: grid; gap: 16px; min-width: 0; }
+.history-modes { display: flex; flex-wrap: wrap; gap: 8px; }
+.history-modes button { border: 1px solid var(--line); background: transparent; color: inherit; padding: 8px 12px; border-radius: 999px; }
+.history-modes button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.history-disclaimer { padding: 12px; border-left: 3px solid var(--accent); overflow-wrap: anywhere; }
+.history-list { display: grid; gap: 12px; padding-left: 20px; min-width: 0; }
+.history-list > li { border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; overflow-wrap: anywhere; }
+.history-list summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; }
+.history-list ul { padding-left: 16px; }
+@media (max-width: 390px) { .history-list summary { flex-direction: column; } }
+
 .warning-panel {
   margin-top: 26px;
   padding: 14px 16px;

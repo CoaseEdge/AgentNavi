@@ -788,6 +788,63 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                 self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
                 self.assertIsNotNone(result.structured_content)
 
+    def test_history_reasoning_and_visualize_are_equivalent_and_strict(self) -> None:
+        self._add_project()
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO tasks(id,project_id,title,status,summary,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                ("history-task", "fixture", "修改会员", "completed", "完成修改", now, now),
+            )
+            task = Database.upsert_node(connection, project_id="fixture", layer=3, kind="task",
+                                        key="history-task", label="修改会员", source="task-events")
+            target = Database.node_id("fixture", 1, "file", "src/membership.py")
+            Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task,
+                                 relation="modified", target_id=target, source="task-events")
+            connection.commit()
+        calls = (
+            ("agentnavi_history", {"project_id": "fixture", "mode": "timeline"}),
+            ("agentnavi_visualize", {"view": "history", "project_id": "fixture"}),
+        )
+        valid_wire = None
+        for tool_name, arguments in calls:
+            with self.subTest(tool=tool_name):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertFalse(result.is_error)
+                self.assertEqual(result.structured_content["view"], "history")
+                self.assertEqual(result.structured_content["data"]["timeline"][0]["taskId"], "history-task")
+                self.assertIn("修改会员", result.content[0].text)
+                self.assertIn("不是原始工具调用的无损还原", result.content[0].text)
+                self.assertNotIn(str(self.project_root), str(result.model_dump(by_alias=True)))
+                valid_wire = result.structured_content
+
+        from agentnavi.mcp.runtime import HistoryViewOutput
+        from pydantic import ValidationError
+        assert valid_wire is not None
+        HistoryViewOutput.model_validate(valid_wire)
+        for mutation in (
+            lambda value: value["data"]["timeline"][0]["evidence"][0].__setitem__("confidence", 2),
+            lambda value: value["data"]["timeline"][0].__setitem__("sortTime", "not-a-time"),
+            lambda value: value["data"]["stats"].__setitem__("tasks", True),
+        ):
+            invalid = json.loads(json.dumps(valid_wire)); mutation(invalid)
+            with self.assertRaises(ValidationError):
+                HistoryViewOutput.model_validate(invalid)
+
+        from agentnavi.history_view import history_view_data
+        with self.database.connect() as connection:
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        malformed = history_view_data(self.database, project)
+        malformed["timeline"][0]["relations"][0]["relation"]["targetId"] = "wrong"
+        for tool_name, arguments in calls:
+            with self.subTest(malformed=tool_name), patch(
+                "agentnavi.history_view.history_view_data", return_value=malformed
+            ):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                self.assertNotIn("wrong", str(result.model_dump(by_alias=True)))
+
     def test_multi_relation_semantic_peer_succeeds_for_both_impact_tools(self) -> None:
         self._add_project()
         relative = "src/dependency.py"

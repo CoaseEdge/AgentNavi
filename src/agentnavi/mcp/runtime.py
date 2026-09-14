@@ -1116,10 +1116,275 @@ class ImpactViewOutput(_ExtensibleModel):
         return value
 
 
+class HistoryTaskEntityOutput(TourEntityOutput):
+    kind: Literal["task"]
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "label")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("history task text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
+
+
+class HistoryTargetEntityOutput(TourEntityOutput):
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "kind", "label", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("history target text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "HistoryTargetEntityOutput":
+        if (self.kind, self.layer) not in {("file", "L1"), ("concept", "L2")}:
+            raise ValueError("history target kind/layer invalid")
+        if self.kind == "file" and not self.path:
+            raise ValueError("history file target requires path")
+        if self.kind == "concept" and self.path is not None:
+            raise ValueError("history concept target cannot have path")
+        return self
+
+
+class HistoryRelationOutput(TourRelationOutput):
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+    relation: Literal["read", "modified", "tested", "searched", "affects"]
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "source_id", "target_id")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("history relation text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
+
+
+class HistoryRelationItemOutput(_ExtensibleModel):
+    entity: HistoryTargetEntityOutput
+    relation: HistoryRelationOutput
+    recorded_order: int = Field(alias="recordedOrder", ge=1)
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> "HistoryRelationItemOutput":
+        if self.relation.target_id != self.entity.id or self.relation.evidence != self.evidence:
+            raise ValueError("history relation provenance invalid")
+        return self
+
+
+class HistoryTimelineItemOutput(_ExtensibleModel):
+    entity: HistoryTaskEntityOutput
+    task_id: str = Field(alias="taskId", min_length=1)
+    status: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    created_at: str = Field(alias="createdAt", min_length=1)
+    updated_at: str = Field(alias="updatedAt", min_length=1)
+    closed_at: str | None = Field(alias="closedAt")
+    sort_time: str = Field(alias="sortTime", min_length=1)
+    relations: list[HistoryRelationItemOutput] = Field(max_length=12)
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("task_id", "status", "summary", "created_at", "updated_at", "sort_time")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("history timeline text must not be blank")
+        return value
+
+    @field_validator("created_at", "updated_at", "closed_at", "sort_time")
+    @classmethod
+    def utc_timestamp(cls, value: str | None) -> str | None:
+        if value is None: return None
+        from datetime import datetime
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("history timestamp invalid") from exc
+        if parsed.tzinfo is None or not value.endswith("Z"):
+            raise ValueError("history timestamp must be UTC Z")
+        return value
+
+    @model_validator(mode="after")
+    def validate_task(self) -> "HistoryTimelineItemOutput":
+        if self.entity.evidence != self.evidence or any(
+            item.relation.source_id != self.entity.id for item in self.relations
+        ):
+            raise ValueError("history task provenance invalid")
+        return self
+
+
+class HistoryStoryGroupOutput(_ExtensibleModel):
+    relation: Literal["read", "modified", "tested", "searched", "affects"]
+    paths: list[str] = Field(max_length=12)
+    concepts: list[str] = Field(max_length=12)
+    evidence: list[ImpactTaskEvidenceOutput] = Field(max_length=3)
+
+    @field_validator("paths", "concepts")
+    @classmethod
+    def non_blank_items(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("history story targets must not be blank")
+        return value
+
+
+class HistoryStoryOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    sort_time: str = Field(alias="sortTime", min_length=1)
+    task: HistoryTaskEntityOutput
+    groups: list[HistoryStoryGroupOutput] = Field(max_length=5)
+    explanation_source: Literal["l3-aggregation"] = Field(alias="explanationSource")
+    disclaimer: str = Field(min_length=1)
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "title", "summary", "sort_time", "disclaimer")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("history story text must not be blank")
+        return value
+
+    @field_validator("sort_time")
+    @classmethod
+    def utc_timestamp(cls, value: str) -> str:
+        from datetime import datetime
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("history timestamp invalid") from exc
+        if parsed.tzinfo is None or not value.endswith("Z"):
+            raise ValueError("history timestamp must be UTC Z")
+        return value
+
+
+class HistoryStatsOutput(_ExtensibleModel):
+    files: int = Field(strict=True, ge=0)
+    tasks: int = Field(strict=True, ge=0)
+    displayed_tasks: int = Field(alias="displayedTasks", strict=True, ge=0)
+    displayed_relations: int = Field(alias="displayedRelations", strict=True, ge=0)
+
+
+class HistoryDataOutput(_ExtensibleModel):
+    layout: Literal["task-timeline-story"]
+    revision: str = Field(min_length=1)
+    selected_mode: Literal["timeline", "story"] = Field(alias="selectedMode")
+    disclaimer: str = Field(min_length=1)
+    timeline: list[HistoryTimelineItemOutput] = Field(max_length=20)
+    story: list[HistoryStoryOutput] = Field(max_length=12)
+    task_detail: HistoryTimelineItemOutput | None = Field(alias="taskDetail")
+    stats: HistoryStatsOutput
+
+    @field_validator("revision", "disclaimer")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("history data text must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def validate_registry_and_order(self) -> "HistoryDataOutput":
+        keys = [(item.sort_time, item.task_id) for item in self.timeline]
+        if keys != sorted(keys, reverse=True):
+            raise ValueError("history timeline order invalid")
+        task_by_entity = {item.entity.id: item for item in self.timeline}
+        if len(task_by_entity) != len(self.timeline):
+            raise ValueError("history task ids must be unique")
+        entity_registry: dict[str, str] = {}
+        edge_registry: dict[str, str] = {}
+        for timeline in self.timeline:
+            for entity in [timeline.entity, *(relation.entity for relation in timeline.relations)]:
+                signature = entity.model_dump_json(by_alias=True)
+                if entity.id in edge_registry or (
+                    entity.id in entity_registry and entity_registry[entity.id] != signature
+                ):
+                    raise ValueError("history entity registry conflict")
+                entity_registry[entity.id] = signature
+            for item in timeline.relations:
+                signature = item.relation.model_dump_json(by_alias=True)
+                if item.relation.id in entity_registry or (
+                    item.relation.id in edge_registry and edge_registry[item.relation.id] != signature
+                ):
+                    raise ValueError("history relation registry conflict")
+                edge_registry[item.relation.id] = signature
+        for story in self.story:
+            timeline = task_by_entity.get(story.task.id)
+            if timeline is None or story.task != timeline.entity or story.evidence != story.task.evidence:
+                raise ValueError("history story task mismatch")
+            if story.disclaimer != self.disclaimer:
+                raise ValueError("history disclaimer mismatch")
+            expected: dict[str, dict[str, Any]] = {}
+            for item in timeline.relations:
+                group = expected.setdefault(item.relation.relation, {"paths": [], "concepts": [], "evidence": []})
+                target = group["paths"] if item.entity.kind == "file" else group["concepts"]
+                value = item.entity.path if item.entity.kind == "file" else item.entity.label
+                if value not in target: target.append(value)
+                evidence = item.evidence[0]
+                if evidence not in group["evidence"] and len(group["evidence"]) < 3:
+                    group["evidence"].append(evidence)
+            for group in expected.values():
+                group["paths"].sort(key=lambda value: (value.lower(), value))
+                group["concepts"].sort(key=lambda value: (value.lower(), value))
+            actual = {group.relation: group for group in story.groups}
+            if set(actual) != set(expected) or any(
+                actual[name].paths != values["paths"]
+                or actual[name].concepts != values["concepts"]
+                or actual[name].evidence != values["evidence"]
+                for name, values in expected.items()
+            ):
+                raise ValueError("history story is not an exact L3 aggregation")
+        if self.task_detail is not None and self.task_detail.entity.id not in task_by_entity:
+            raise ValueError("history task detail must belong to timeline")
+        return self
+
+
+def _history_error_placeholder() -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION, "view": "history",
+        "project": {"id": "error", "name": "error", "kind": "internal"},
+        "sourceState": {"status": "partial"},
+        "data": {
+            "layout": "task-timeline-story", "revision": "error",
+            "selectedMode": "timeline", "disclaimer": "error", "timeline": [],
+            "story": [], "taskDetail": None,
+            "stats": {"files": 0, "tasks": 0, "displayedTasks": 0, "displayedRelations": 0},
+        }, "warnings": [],
+    }
+
+
+class HistoryViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["history"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: HistoryDataOutput
+    warnings: list[WarningOutput] = Field(max_length=MAX_CONTEXT_WARNINGS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        return _history_error_placeholder() if _is_public_error(value) else value
+
+
 class VisualizeViewOutput(
     RootModel[
         ContextViewOutput | RepositoryOverviewViewOutput | RepositoryTourViewOutput
-        | ArchitectureViewOutput | FlowViewOutput | ImpactViewOutput
+        | ArchitectureViewOutput | FlowViewOutput | ImpactViewOutput | HistoryViewOutput
     ]
 ):
     """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
@@ -1134,6 +1399,7 @@ class VisualizeViewOutput(
 
 CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
 IMPACT_TOOL_RESULT = Annotated[CallToolResult, ImpactViewOutput]
+HISTORY_TOOL_RESULT = Annotated[CallToolResult, HistoryViewOutput]
 VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 
 
@@ -1154,7 +1420,7 @@ class VisualizeImpactInput(_VisualizeInputBase):
 
 
 class VisualizeRepositoryInput(_VisualizeInputBase):
-    view: Literal["repo-overview", "repo-tour", "architecture", "flow"]
+    view: Literal["repo-overview", "repo-tour", "architecture", "flow", "history"]
     query: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
@@ -1175,7 +1441,7 @@ VISUALIZE_VIEW_INPUT = Annotated[
     WithJsonSchema(
         {
             "type": "string",
-            "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow", "impact"],
+            "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow", "impact", "history"],
         }
     ),
 ]
@@ -1191,6 +1457,10 @@ OPTIONAL_TEXT_INPUT = Annotated[
             "default": None,
         }
     ),
+]
+HISTORY_MODE_INPUT = Annotated[
+    Any,
+    WithJsonSchema({"type": "string", "enum": ["timeline", "story"], "default": "timeline"}),
 ]
 
 
@@ -1208,6 +1478,9 @@ __all__ = [
     "ArchitectureViewOutput",
     "FlowViewOutput",
     "IMPACT_TOOL_RESULT",
+    "HISTORY_TOOL_RESULT",
+    "HISTORY_MODE_INPUT",
+    "HistoryViewOutput",
     "ImpactViewOutput",
     "VISUALIZE_TOOL_RESULT",
     "VISUALIZE_INPUT_SCHEMA",

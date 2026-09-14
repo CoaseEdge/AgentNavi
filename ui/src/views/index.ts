@@ -4,6 +4,7 @@ import { renderRepositoryTour } from "./repo-tour.js";
 import { renderArchitecture } from "./architecture.js";
 import { renderFlow } from "./flow.js";
 import { renderImpact } from "./impact.js";
+import { renderHistory } from "./history.js";
 
 export function renderRegisteredView(
   view: AgentNaviView,
@@ -27,6 +28,9 @@ export function renderRegisteredView(
     },
     impact: (value) => {
       if (value.view === "impact") renderImpact(value);
+    },
+    history: (value) => {
+      if (value.view === "history") renderHistory(value);
     },
   };
   renderers[view.view](view);

@@ -81,7 +81,7 @@ import agentnavi.mcp.server
         async def call_next(ctx: FakeContext) -> dict[str, object]:
             return ctx.params
 
-        for tool_name in ("agentnavi_context", "agentnavi_impact", "agentnavi_visualize"):
+        for tool_name in ("agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"):
             with self.subTest(tool=tool_name):
                 result = asyncio.run(
                     _complete_required_tool_arguments(
@@ -122,10 +122,11 @@ import agentnavi.mcp.server
                 tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
                     set(tools_by_name),
-                    {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"},
+                    {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"},
                 )
                 context_tool = tools_by_name["agentnavi_context"]
                 impact_tool = tools_by_name["agentnavi_impact"]
+                history_tool = tools_by_name["agentnavi_history"]
                 visualize_tool = tools_by_name["agentnavi_visualize"]
                 self.assertEqual(context_tool.input_schema["required"], ["query"])
                 self.assertEqual(
@@ -145,6 +146,9 @@ import agentnavi.mcp.server
                     impact_tool.output_schema["properties"]["view"]["const"],
                     "impact",
                 )
+                self.assertEqual(history_tool.output_schema["properties"]["view"]["const"], "history")
+                self.assertEqual(history_tool.input_schema["properties"]["mode"]["enum"], ["timeline", "story"])
+                self.assertEqual(history_tool.output_schema["$defs"]["HistoryDataOutput"]["properties"]["timeline"]["maxItems"], 20)
                 impact_data = impact_tool.output_schema["$defs"]["ImpactDataOutput"]
                 self.assertEqual(impact_data["properties"]["incoming"]["maxItems"], 8)
                 self.assertEqual(impact_data["properties"]["outgoing"]["maxItems"], 8)
@@ -198,6 +202,7 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/ArchitectureViewOutput"},
                         {"$ref": "#/$defs/FlowViewOutput"},
                         {"$ref": "#/$defs/ImpactViewOutput"},
+                        {"$ref": "#/$defs/HistoryViewOutput"},
                     ],
                 )
                 self.assertEqual(visualize_tool.input_schema["discriminator"]["propertyName"], "view")
@@ -287,7 +292,7 @@ import agentnavi.mcp.server
                 tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
                     set(tools_by_name),
-                    {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"},
+                    {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"},
                 )
                 resources = (await client.list_resources()).resources
                 self.assertEqual(
@@ -335,6 +340,7 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/ArchitectureViewOutput"},
                         {"$ref": "#/$defs/FlowViewOutput"},
                         {"$ref": "#/$defs/ImpactViewOutput"},
+                        {"$ref": "#/$defs/HistoryViewOutput"},
                     ],
                 )
                 overview = await client.call_tool(
@@ -365,6 +371,21 @@ import agentnavi.mcp.server
                 )
                 self.assertFalse(visual_impact.is_error)
                 self.assertEqual(len(visual_impact.structured_content["data"]["history"]), 1)
+                history = await client.call_tool(
+                    "agentnavi_history",
+                    {"project_id": "stdio-fixture", "mode": "story"},
+                )
+                self.assertFalse(history.is_error)
+                self.assertEqual(history.structured_content["view"], "history")
+                self.assertEqual(history.structured_content["data"]["selectedMode"], "story")
+                self.assertIn("不是原始工具调用的无损还原", history.content[0].text)
+                self.assertNotIn(str(project_root.resolve()), str(history.model_dump(by_alias=True)))
+                visual_history = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "history", "project_id": "stdio-fixture"},
+                )
+                self.assertFalse(visual_history.is_error)
+                self.assertEqual(visual_history.structured_content["view"], "history")
                 tour = await client.call_tool(
                     "agentnavi_visualize",
                     {"view": "repo-tour", "project_id": "stdio-fixture"},

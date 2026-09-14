@@ -20,6 +20,8 @@ export function applyToolInput(shell: AgentNaviShell, toolArguments: unknown): v
               ? "任务主流程"
             : requestedView === "impact"
               ? "影响分析"
+            : requestedView === "history"
+              ? "项目历史"
           : undefined
     ),
     requestedView,
