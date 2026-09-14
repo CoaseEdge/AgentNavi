@@ -81,7 +81,7 @@ import agentnavi.mcp.server
         async def call_next(ctx: FakeContext) -> dict[str, object]:
             return ctx.params
 
-        for tool_name in ("agentnavi_context", "agentnavi_visualize"):
+        for tool_name in ("agentnavi_context", "agentnavi_impact", "agentnavi_visualize"):
             with self.subTest(tool=tool_name):
                 result = asyncio.run(
                     _complete_required_tool_arguments(
@@ -93,7 +93,10 @@ import agentnavi.mcp.server
                     )
                 )
                 arguments = result["arguments"]
-                self.assertEqual(arguments["query"], None)
+                if tool_name == "agentnavi_impact":
+                    self.assertEqual(arguments["selector"], None)
+                else:
+                    self.assertEqual(arguments["query"], None)
                 if tool_name == "agentnavi_visualize":
                     self.assertEqual(arguments["view"], None)
                 wire = str(result)
@@ -119,15 +122,29 @@ import agentnavi.mcp.server
                 tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
                     set(tools_by_name),
-                    {"agentnavi_context", "agentnavi_visualize"},
+                    {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"},
                 )
                 context_tool = tools_by_name["agentnavi_context"]
+                impact_tool = tools_by_name["agentnavi_impact"]
                 visualize_tool = tools_by_name["agentnavi_visualize"]
                 self.assertEqual(context_tool.input_schema["required"], ["query"])
                 self.assertEqual(
                     set(context_tool.input_schema["properties"]),
                     {"query", "project_id", "workspace"},
                 )
+                self.assertEqual(impact_tool.input_schema["required"], ["selector"])
+                self.assertEqual(
+                    set(impact_tool.input_schema["properties"]),
+                    {"selector", "project_id", "workspace"},
+                )
+                self.assertEqual(
+                    impact_tool.output_schema["properties"]["view"]["const"],
+                    "impact",
+                )
+                impact_data = impact_tool.output_schema["$defs"]["ImpactDataOutput"]
+                self.assertEqual(impact_data["properties"]["incoming"]["maxItems"], 8)
+                self.assertEqual(impact_data["properties"]["outgoing"]["maxItems"], 8)
+                self.assertEqual(impact_data["properties"]["history"]["maxItems"], 5)
                 self.assertEqual(
                     set(context_tool.output_schema["required"]),
                     {
@@ -176,12 +193,13 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/RepositoryTourViewOutput"},
                         {"$ref": "#/$defs/ArchitectureViewOutput"},
                         {"$ref": "#/$defs/FlowViewOutput"},
+                        {"$ref": "#/$defs/ImpactViewOutput"},
                     ],
                 )
                 self.assertEqual(
                     visualize_tool.input_schema["properties"]["view"],
                     {
-                        "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+                        "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow", "impact"],
                         "title": "View",
                         "type": "string",
                     },
@@ -244,7 +262,7 @@ import agentnavi.mcp.server
                 tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
                     set(tools_by_name),
-                    {"agentnavi_context", "agentnavi_visualize"},
+                    {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"},
                 )
                 resources = (await client.list_resources()).resources
                 self.assertEqual(
@@ -291,6 +309,7 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/RepositoryTourViewOutput"},
                         {"$ref": "#/$defs/ArchitectureViewOutput"},
                         {"$ref": "#/$defs/FlowViewOutput"},
+                        {"$ref": "#/$defs/ImpactViewOutput"},
                     ],
                 )
                 overview = await client.call_tool(
@@ -302,6 +321,18 @@ import agentnavi.mcp.server
                 overview_wire = str(overview.model_dump(by_alias=True))
                 self.assertNotIn(str(project_root.resolve()), overview_wire)
                 self.assertIn("README.md", overview.content[0].text)
+                impact = await client.call_tool(
+                    "agentnavi_impact",
+                    {"selector": "README.md", "project_id": "stdio-fixture"},
+                )
+                self.assertFalse(impact.is_error)
+                self.assertEqual(impact.structured_content["view"], "impact")
+                self.assertEqual(
+                    impact.structured_content["data"]["focus"]["entity"]["path"],
+                    "README.md",
+                )
+                self.assertNotIn(str(project_root.resolve()), str(impact.model_dump(by_alias=True)))
+                self.assertIn("Incoming → Focus → Outgoing", impact.content[0].text)
                 tour = await client.call_tool(
                     "agentnavi_visualize",
                     {"view": "repo-tour", "project_id": "stdio-fixture"},

@@ -18,6 +18,8 @@ export function applyToolInput(shell: AgentNaviShell, toolArguments: unknown): v
             ? "系统架构"
             : requestedView === "flow"
               ? "任务主流程"
+            : requestedView === "impact"
+              ? "影响分析"
           : undefined
     ),
     requestedView,

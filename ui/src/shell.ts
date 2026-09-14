@@ -6,6 +6,7 @@ import { clearRepositoryOverview } from "./views/repo-overview.js";
 import { clearRepositoryTour } from "./views/repo-tour.js";
 import { clearArchitecture } from "./views/architecture.js";
 import { clearFlow } from "./views/flow.js";
+import { clearImpact } from "./views/impact.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -173,6 +174,10 @@ export class AgentNaviShell {
       replaceText(element("view-title"), "Task Flow");
       replaceText(element("view-eyebrow"), "EVIDENCE-BACKED FLOW");
       replaceText(element("view-description"), "沿 5–7 个可展开步骤理解任务如何流经源码。");
+    } else if (view === "impact") {
+      replaceText(element("view-title"), "Impact");
+      replaceText(element("view-eyebrow"), "BOUNDED CHANGE IMPACT");
+      replaceText(element("view-description"), "从真实关系判断调用方、依赖、测试与风险位置。");
     } else {
       replaceText(element("view-title"), "ContextMap");
       replaceText(element("view-eyebrow"), "READING CONTEXT");
@@ -195,6 +200,8 @@ export class AgentNaviShell {
             ? "正在读取系统架构"
             : view === "flow"
               ? "正在生成任务流"
+            : view === "impact"
+              ? "正在分析影响"
           : "正在读取 Context",
     );
     replaceText(element("empty-message"), "新请求已收到，旧视图结果已清除。");
@@ -215,6 +222,7 @@ export class AgentNaviShell {
     clearRepositoryTour();
     clearArchitecture();
     clearFlow();
+    clearImpact();
     element("concept-list").replaceChildren();
     element("file-list").replaceChildren();
     element("warning-list").replaceChildren();

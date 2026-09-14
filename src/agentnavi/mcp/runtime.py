@@ -660,10 +660,129 @@ class FlowViewOutput(_ExtensibleModel):
         return value
 
 
+class ImpactFocusOutput(_ExtensibleModel):
+    entity: TourEntityOutput
+    anchor_file: ArchitectureEntryEntityOutput | None = Field(alias="anchorFile")
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactLaneOutput(_ExtensibleModel):
+    peer: ArchitectureEntryEntityOutput
+    relation: TourRelationOutput
+    via_path: str = Field(alias="viaPath", min_length=1)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactSemanticOutput(_ExtensibleModel):
+    direction: Literal["incoming", "outgoing"]
+    focus_concept: ArchitectureComponentEntityOutput = Field(alias="focusConcept")
+    peer: ArchitectureComponentEntityOutput
+    relation: ArchitectureConnectionOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> "ImpactSemanticOutput":
+        if self.focus_concept.id == self.peer.id:
+            raise ValueError("semantic endpoints must differ")
+        expected = (
+            (self.focus_concept.id, self.peer.id)
+            if self.direction == "outgoing" else (self.peer.id, self.focus_concept.id)
+        )
+        if (self.relation.source_id, self.relation.target_id) != expected:
+            raise ValueError("semantic endpoints mismatch")
+        return self
+
+
+class ImpactHistoryOutput(_ExtensibleModel):
+    entity: FlowTaskEntityOutput
+    status: str = Field(min_length=1)
+    relation: TourRelationOutput
+    recorded_order: int = Field(alias="recordedOrder", ge=1)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactTestOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    entity: ArchitectureEntryEntityOutput
+    relation: TourRelationOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactRiskOutput(_ExtensibleModel):
+    kind: str = Field(min_length=1)
+    severity: Literal["low", "medium", "high"]
+    summary: str = Field(min_length=1)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ImpactActionOutput(_ExtensibleModel):
+    kind: Literal["purpose", "callers", "dependencies", "change", "history"]
+    label: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    evidence: list[TourEvidenceOutput] = Field(max_length=3)
+
+
+class ImpactDataOutput(_ExtensibleModel):
+    layout: Literal["incoming-focus-outgoing"]
+    revision: str = Field(min_length=1)
+    focus: ImpactFocusOutput
+    incoming: list[ImpactLaneOutput] = Field(max_length=8)
+    outgoing: list[ImpactLaneOutput] = Field(max_length=8)
+    semantic: list[ImpactSemanticOutput] = Field(max_length=8)
+    history: list[ImpactHistoryOutput] = Field(max_length=5)
+    test_recommendations: list[ImpactTestOutput] = Field(alias="testRecommendations", max_length=5)
+    risks: list[ImpactRiskOutput] = Field(max_length=5)
+    actions: list[ImpactActionOutput] = Field(min_length=5, max_length=5)
+    stats: ContextStatsOutput
+
+    @model_validator(mode="after")
+    def validate_actions_and_edges(self) -> "ImpactDataOutput":
+        expected = (("purpose", "它做什么"), ("callers", "谁调用它"),
+                    ("dependencies", "它依赖谁"), ("change", "如果修改它"),
+                    ("history", "过去谁改过它"))
+        if tuple((item.kind, item.label) for item in self.actions) != expected:
+            raise ValueError("impact actions must use fixed semantics")
+        anchor_id = self.focus.anchor_file.id if self.focus.anchor_file else self.focus.entity.id
+        if any(item.relation.source_id != item.peer.id or item.relation.target_id != anchor_id for item in self.incoming):
+            raise ValueError("incoming endpoints mismatch")
+        if any(item.relation.source_id != anchor_id or item.relation.target_id != item.peer.id for item in self.outgoing):
+            raise ValueError("outgoing endpoints mismatch")
+        return self
+
+
+class ImpactViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["impact"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: ImpactDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION, "view": "impact",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "layout": "incoming-focus-outgoing", "revision": "error",
+                    "focus": {"entity": {"id": "error", "kind": "concept", "label": "error", "layer": "L2", "source": "internal", "confidence": 0, "evidence": [{"kind": "error", "summary": "error", "layer": "L2", "source": "internal", "confidence": 0}]}, "anchorFile": None, "evidence": [{"kind": "error", "summary": "error", "layer": "L2", "source": "internal", "confidence": 0}]},
+                    "incoming": [], "outgoing": [], "semantic": [], "history": [],
+                    "testRecommendations": [], "risks": [],
+                    "actions": [{"kind": kind, "label": label, "summary": "error", "evidence": []} for kind, label in (("purpose", "它做什么"), ("callers", "谁调用它"), ("dependencies", "它依赖谁"), ("change", "如果修改它"), ("history", "过去谁改过它"))],
+                    "stats": {"files": 0, "concepts": 0, "tasks": 0},
+                }, "warnings": [],
+            }
+        return value
+
+
 class VisualizeViewOutput(
     RootModel[
         ContextViewOutput | RepositoryOverviewViewOutput | RepositoryTourViewOutput
-        | ArchitectureViewOutput | FlowViewOutput
+        | ArchitectureViewOutput | FlowViewOutput | ImpactViewOutput
     ]
 ):
     """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
@@ -677,6 +796,7 @@ class VisualizeViewOutput(
 
 
 CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
+IMPACT_TOOL_RESULT = Annotated[CallToolResult, ImpactViewOutput]
 VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 
 # MCPServer 会在调用函数之前按类型注解验证输入。这里用 Any 接住原始值，
@@ -687,7 +807,7 @@ VISUALIZE_VIEW_INPUT = Annotated[
     WithJsonSchema(
         {
             "type": "string",
-            "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+            "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow", "impact"],
         }
     ),
 ]
@@ -719,6 +839,8 @@ __all__ = [
     "CONTEXT_TOOL_RESULT",
     "ArchitectureViewOutput",
     "FlowViewOutput",
+    "IMPACT_TOOL_RESULT",
+    "ImpactViewOutput",
     "VISUALIZE_TOOL_RESULT",
     "VISUALIZE_VIEW_INPUT",
     "OPTIONAL_TEXT_INPUT",

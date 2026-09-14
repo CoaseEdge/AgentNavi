@@ -791,6 +791,40 @@ h1 {
   font-size: 12px;
 }
 
+.impact-view {
+  display: grid;
+  gap: 14px;
+  padding-top: 30px;
+}
+
+.impact-semantic,
+.impact-history,
+.impact-lanes > section,
+.impact-followups > div {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.impact-lanes,
+.impact-followups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.impact-focus { border-top: 4px solid var(--amber) !important; text-align: center; }
+.impact-focus strong, .impact-focus code { display: block; margin-top: 10px; overflow-wrap: anywhere; }
+.impact-view h2 { margin: 4px 0 10px; font-size: 15px; }
+.impact-view ul { display: grid; gap: 8px; margin: 0; padding-left: 18px; }
+.impact-view li, .impact-view p { overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.impact-lanes li { display: grid; gap: 3px; }
+.impact-lanes small, .impact-lanes span { color: var(--muted); }
+#impact-actions { display: grid; gap: 6px; }
+#impact-actions details { border-top: 1px solid var(--line); padding-top: 6px; }
+#impact-actions summary { cursor: pointer; font-size: 12px; }
+
 .warning-panel {
   margin-top: 26px;
   padding: 14px 16px;
@@ -880,6 +914,11 @@ h1 {
   }
 
   .architecture-view {
+    grid-template-columns: 1fr;
+  }
+
+  .impact-lanes,
+  .impact-followups {
     grid-template-columns: 1fr;
   }
 

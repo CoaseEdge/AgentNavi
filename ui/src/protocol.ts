@@ -252,12 +252,41 @@ export interface FlowView {
   warnings: ContextWarning[];
 }
 
+export interface ImpactView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "impact";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "incoming-focus-outgoing";
+    revision: string;
+    focus: { entity: TourStop["entity"]; anchorFile: TourStop["entity"] | null; evidence: Evidence[] };
+    incoming: ImpactLane[];
+    outgoing: ImpactLane[];
+    semantic: Array<{ direction: "incoming" | "outgoing"; focusConcept: TourStop["entity"]; peer: TourStop["entity"]; relation: TourStop["relations"][number]; evidence: Evidence[] }>;
+    history: Array<{ entity: TourStop["entity"]; status: string; relation: TourStop["relations"][number]; recordedOrder: number; evidence: Evidence[] }>;
+    testRecommendations: Array<{ path: string; reason: string; entity: TourStop["entity"]; relation: TourStop["relations"][number]; evidence: Evidence[] }>;
+    risks: Array<{ kind: string; severity: "low" | "medium" | "high"; summary: string; evidence: Evidence[] }>;
+    actions: Array<{ kind: "purpose" | "callers" | "dependencies" | "change" | "history"; label: string; summary: string; evidence: Evidence[] }>;
+    stats: ContextView["data"]["stats"];
+  };
+  warnings: ContextWarning[];
+}
+
+export interface ImpactLane {
+  peer: TourStop["entity"];
+  relation: TourStop["relations"][number];
+  viaPath: string;
+  evidence: Evidence[];
+}
+
 export type AgentNaviView =
   | ContextView
   | RepositoryOverviewView
   | RepositoryTourView
   | ArchitectureView
-  | FlowView;
+  | FlowView
+  | ImpactView;
 
 export interface PublicError {
   code: string;
@@ -1077,9 +1106,97 @@ export function parseFlowView(value: unknown): FlowView | undefined {
   };
 }
 
+export function parseImpactView(value: unknown): ImpactView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "impact" || common.data.layout !== "incoming-focus-outgoing") return undefined;
+  const revision = displayText(common.data.revision);
+  const stats = record(common.data.stats);
+  const rawFocus = record(common.data.focus);
+  const focus = tourEntity(rawFocus?.entity);
+  const anchor = rawFocus?.anchorFile === null ? null : tourEntity(rawFocus?.anchorFile);
+  const focusEvidence = strictEvidence(rawFocus?.evidence);
+  if (!revision || !stats || !rawFocus || !focus || !completeEntity(focus) ||
+      !["file", "concept"].includes(focus.kind) || !["L1", "L2"].includes(focus.layer) ||
+      anchor === undefined || (anchor !== null && (!completeEntity(anchor) || anchor.kind !== "file" || anchor.layer !== "L1" || !anchor.path)) || !focusEvidence) return undefined;
+  const anchorId = anchor?.id ?? focus.id;
+  const parseLane = (value: unknown, direction: "incoming" | "outgoing"): ImpactLane | undefined => {
+    const item = record(value);
+    const peer = tourEntity(item?.peer);
+    const relation = tourRelation(item?.relation);
+    const viaPath = text(item?.viaPath);
+    const evidence = strictEvidence(item?.evidence);
+    if (!item || !peer || !completeEntity(peer) || peer.kind !== "file" || peer.layer !== "L1" || !peer.path ||
+        !relation || !completeRelation(relation) || relation.layer !== "L1" || !isCanonicalRelativePath(viaPath) || !evidence) return undefined;
+    if (direction === "incoming" ? relation.sourceId !== peer.id || relation.targetId !== anchorId : relation.sourceId !== anchorId || relation.targetId !== peer.id) return undefined;
+    return { peer, relation, viaPath, evidence };
+  };
+  const rawIncoming = Array.isArray(common.data.incoming) ? common.data.incoming : [];
+  const rawOutgoing = Array.isArray(common.data.outgoing) ? common.data.outgoing : [];
+  if (rawIncoming.length > 8 || rawOutgoing.length > 8) return undefined;
+  const incoming = rawIncoming.map((item) => parseLane(item, "incoming")).filter((item): item is ImpactLane => Boolean(item));
+  const outgoing = rawOutgoing.map((item) => parseLane(item, "outgoing")).filter((item): item is ImpactLane => Boolean(item));
+  if (incoming.length !== rawIncoming.length || outgoing.length !== rawOutgoing.length) return undefined;
+  const rawSemantic = Array.isArray(common.data.semantic) ? common.data.semantic : [];
+  if (rawSemantic.length > 8) return undefined;
+  const semantic: ImpactView["data"]["semantic"] = [];
+  for (const raw of rawSemantic) {
+    const item = record(raw); const direction = item?.direction;
+    const focusConcept = tourEntity(item?.focusConcept); const peer = tourEntity(item?.peer);
+    const relation = tourRelation(item?.relation); const evidence = strictEvidence(item?.evidence);
+    if (!item || (direction !== "incoming" && direction !== "outgoing") || !focusConcept || !peer ||
+        !completeEntity(focusConcept) || !completeEntity(peer) || focusConcept.kind !== "concept" || peer.kind !== "concept" ||
+        focusConcept.layer !== "L2" || peer.layer !== "L2" || focusConcept.id === peer.id || !relation || relation.layer !== "L2" || !completeRelation(relation) || !evidence) return undefined;
+    const expected = direction === "outgoing" ? [focusConcept.id, peer.id] : [peer.id, focusConcept.id];
+    if (relation.sourceId !== expected[0] || relation.targetId !== expected[1]) return undefined;
+    semantic.push({ direction, focusConcept, peer, relation, evidence });
+  }
+  const rawHistory = Array.isArray(common.data.history) ? common.data.history : [];
+  if (rawHistory.length > 5) return undefined;
+  const history: ImpactView["data"]["history"] = [];
+  for (const raw of rawHistory) {
+    const item = record(raw); const entity = tourEntity(item?.entity); const relation = tourRelation(item?.relation);
+    const status = displayText(item?.status); const recordedOrder = item?.recordedOrder; const evidence = strictEvidence(item?.evidence);
+    if (!item || !entity || !completeEntity(entity) || entity.kind !== "task" || entity.layer !== "L3" || !relation || relation.layer !== "L3" ||
+        !completeRelation(relation) || !status || typeof recordedOrder !== "number" || !Number.isInteger(recordedOrder) || recordedOrder < 1 || !evidence) return undefined;
+    history.push({ entity, status, relation, recordedOrder, evidence });
+  }
+  const rawTests = Array.isArray(common.data.testRecommendations) ? common.data.testRecommendations : [];
+  if (rawTests.length > 5) return undefined;
+  const laneIds = new Set([...incoming, ...outgoing].map((item) => item.relation.id));
+  const testRecommendations: ImpactView["data"]["testRecommendations"] = [];
+  for (const raw of rawTests) {
+    const item = record(raw); const path = text(item?.path); const reason = displayText(item?.reason);
+    const entity = tourEntity(item?.entity); const relation = tourRelation(item?.relation); const evidence = strictEvidence(item?.evidence);
+    if (!item || !isCanonicalRelativePath(path) || !reason || !entity || !completeEntity(entity) || entity.kind !== "file" || entity.layer !== "L1" || entity.path !== path ||
+        !relation || !completeRelation(relation) || !laneIds.has(relation.id) || !evidence) return undefined;
+    testRecommendations.push({ path, reason, entity, relation, evidence });
+  }
+  const rawRisks = Array.isArray(common.data.risks) ? common.data.risks : [];
+  if (rawRisks.length > 5) return undefined;
+  const risks: ImpactView["data"]["risks"] = [];
+  for (const raw of rawRisks) {
+    const item = record(raw); const kind = displayText(item?.kind); const summary = displayText(item?.summary); const severity = item?.severity; const evidence = strictEvidence(item?.evidence);
+    if (!item || !kind || !summary || (severity !== "low" && severity !== "medium" && severity !== "high") || !evidence) return undefined;
+    risks.push({ kind, summary, severity, evidence });
+  }
+  const expectedActions = [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]] as const;
+  const rawActions = Array.isArray(common.data.actions) ? common.data.actions : [];
+  if (rawActions.length !== 5) return undefined;
+  const actions: ImpactView["data"]["actions"] = [];
+  for (let index = 0; index < expectedActions.length; index += 1) {
+    const item = record(rawActions[index]); const [kind, label] = expectedActions[index]!; const summary = displayText(item?.summary);
+    const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : []; const evidence = evidenceList(rawEvidence);
+    if (!item || item.kind !== kind || item.label !== label || !summary || rawEvidence.length > 3 || evidence.length !== rawEvidence.length) return undefined;
+    actions.push({ kind, label, summary, evidence });
+  }
+  return { schemaVersion: SCHEMA_VERSION, view: "impact", project: common.project, sourceState: common.sourceState,
+    data: { layout: "incoming-focus-outgoing", revision, focus: { entity: focus, anchorFile: anchor, evidence: focusEvidence }, incoming, outgoing, semantic, history, testRecommendations, risks, actions,
+      stats: { files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks) } }, warnings: common.warnings };
+}
+
 export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
   return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value) ??
-    parseArchitectureView(value) ?? parseFlowView(value);
+    parseArchitectureView(value) ?? parseFlowView(value) ?? parseImpactView(value);
 }
 
 export function parseTaskQuery(value: unknown): string | undefined {
@@ -1091,7 +1208,7 @@ export function parseTaskQuery(value: unknown): string | undefined {
 export function parseRequestedView(value: unknown): AgentNaviView["view"] | undefined {
   const input = record(value);
   return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour" ||
-    input?.view === "architecture" || input?.view === "flow"
+    input?.view === "architecture" || input?.view === "flow" || input?.view === "impact"
     ? input.view
     : undefined;
 }

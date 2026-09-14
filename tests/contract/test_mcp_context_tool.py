@@ -591,6 +591,9 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         )
         cases = (
             ("agentnavi_context", None, "query"),
+            ("agentnavi_impact", None, "selector"),
+            ("agentnavi_impact", {"selector": "   "}, "selector"),
+            ("agentnavi_impact", {"selector": list(private_tokens)}, "selector"),
             (
                 "agentnavi_visualize",
                 {"query": private_tokens[0], "project_id": private_tokens[1]},

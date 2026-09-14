@@ -172,6 +172,16 @@ function flowFixture() {
   };
 }
 
+function impactFixture() {
+  const evidence = { kind: "physical-relation", summary: "imports", layer: "L1", source: "extractor", confidence: 1, path: "src/caller.py" };
+  const focus = { id: "file:focus", kind: "file", label: "focus.py <script>alert(1)</script>", path: "src/focus.py", layer: "L1", source: "repository", confidence: 1, evidence: [evidence] };
+  const caller = { id: "file:caller", kind: "file", label: "caller.py", path: "src/caller.py", layer: "L1", source: "repository", confidence: 1, evidence: [evidence] };
+  const relation = { id: "edge:imports", sourceId: caller.id, targetId: focus.id, relation: "imports", layer: "L1", source: "extractor", confidence: 1, evidence: [evidence] };
+  return { schemaVersion: "agentnavi.vla.v1", view: "impact", project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" },
+    data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: focus, anchorFile: focus, evidence: [evidence] }, incoming: [{ peer: caller, relation, viaPath: focus.path, evidence: [evidence] }], outgoing: [], semantic: [], history: [], testRecommendations: [],
+      risks: [{ kind: "incoming", severity: "medium", summary: "调用方可能受影响", evidence: [evidence] }], actions: [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]].map(([kind, label]) => ({ kind, label, summary: `${label}说明`, evidence: [] })), stats: { files: 2, concepts: 0, tasks: 0 } }, warnings: [] };
+}
+
 function setup() {
   const { document } = parseHTML(html);
   globalThis.document = document;
@@ -326,6 +336,21 @@ test("flow renders a local five-step expandable timeline and clears across views
   applyToolResult(shell, { structuredContent: fixture() });
   assert.equal(document.querySelector("#flow-view").hidden, true);
   assert.equal(document.querySelector("#flow-steps").children.length, 0);
+});
+
+test("impact renders fixed lanes, local actions, safe DOM, and clears across views", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "impact", query: "src/focus.py" });
+  assert.equal(document.querySelector("#view-title").textContent, "Impact");
+  applyToolResult(shell, { structuredContent: impactFixture() });
+  assert.equal(document.querySelector("#impact-view").hidden, false);
+  assert.equal(document.querySelector("#impact-incoming code").textContent, "src/caller.py");
+  assert.equal(document.querySelector("#impact-focus-label").textContent, "[内容含路径，已隐藏]");
+  assert.equal(document.querySelector("#impact-focus script"), null);
+  assert.equal(document.querySelectorAll("#impact-actions details").length, 5);
+  applyToolResult(shell, { structuredContent: flowFixture() });
+  assert.equal(document.querySelector("#impact-view").hidden, true);
+  assert.equal(document.querySelector("#impact-incoming").children.length, 0);
 });
 
 test("new input clears stale data before an error and keeps status perceivable", () => {

@@ -73,7 +73,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             self.assertIn("AgentNavi ContextMap", result.contents[0].text)
 
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-            self.assertEqual(set(tools), {"agentnavi_context", "agentnavi_visualize"})
+            self.assertEqual(set(tools), {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"})
             self.assertFalse(tools["agentnavi_context"].meta)
             self.assertEqual(tools["agentnavi_visualize"].meta, APP_TOOL_META)
             self.assertEqual(
@@ -82,7 +82,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             )
             self.assertEqual(
                 tools["agentnavi_visualize"].input_schema["properties"]["view"]["enum"],
-                ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+                ["context", "repo-overview", "repo-tour", "architecture", "flow", "impact"],
             )
             self.assertEqual(
                 tools["agentnavi_context"].output_schema["properties"]["view"]["const"],
@@ -96,6 +96,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
                     {"$ref": "#/$defs/RepositoryTourViewOutput"},
                     {"$ref": "#/$defs/ArchitectureViewOutput"},
                     {"$ref": "#/$defs/FlowViewOutput"},
+                    {"$ref": "#/$defs/ImpactViewOutput"},
                 ],
             )
 

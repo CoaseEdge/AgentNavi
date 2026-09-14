@@ -4,6 +4,7 @@ import {
   parseArchitectureView,
   parseContextView,
   parseFlowView,
+  parseImpactView,
   parsePublicError,
   parseRepositoryOverviewView,
   parseRepositoryTourView,
@@ -236,6 +237,26 @@ const tourFixture = {
 assert(parseRepositoryTourView(tourFixture)?.data.tiers.length === 3, "应解析固定三档 Tour");
 assert(parseAgentNaviView(tourFixture)?.view === "repo-tour", "通用 parser 应分派 Tour");
 assert(parseRequestedView({ view: "repo-tour" }) === "repo-tour", "应识别 Tour 请求");
+
+const impactEvidence = { kind: "physical-relation", summary: "caller.py imports focus.py", layer: "L1", source: "extractor", confidence: 1, path: "src/caller.py" };
+const impactFocus = { id: "file:focus", kind: "file", label: "focus.py", path: "src/focus.py", layer: "L1", source: "repository", confidence: 1, evidence: [impactEvidence] };
+const impactPeer = { id: "file:caller", kind: "file", label: "caller.py", path: "src/caller.py", layer: "L1", source: "repository", confidence: 1, evidence: [impactEvidence] };
+const impactRelation = { id: "edge:imports", sourceId: "file:caller", targetId: "file:focus", relation: "imports", layer: "L1", source: "extractor", confidence: 1, evidence: [impactEvidence] };
+const impactFixture = {
+  schemaVersion: "agentnavi.vla.v1", view: "impact",
+  project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" },
+  data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: impactFocus, anchorFile: impactFocus, evidence: [impactEvidence] },
+    incoming: [{ peer: impactPeer, relation: impactRelation, viaPath: "src/focus.py", evidence: [impactEvidence] }], outgoing: [], semantic: [], history: [],
+    testRecommendations: [], risks: [{ kind: "incoming", severity: "medium", summary: "一条入向关系", evidence: [impactEvidence] }],
+    actions: [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]].map(([kind, label]) => ({ kind, label, summary: `${label}说明`, evidence: [] })),
+    stats: { files: 2, concepts: 0, tasks: 0 } }, warnings: [],
+};
+assert(parseImpactView(impactFixture)?.data.incoming[0]?.peer.path === "src/caller.py", "应解析固定 Impact lanes");
+assert(parseAgentNaviView(impactFixture)?.view === "impact", "通用 parser 应分派 Impact");
+assert(parseRequestedView({ view: "impact" }) === "impact", "应识别 Impact 请求");
+const wrongImpact = structuredClone(impactFixture);
+wrongImpact.data.incoming[0]!.relation.sourceId = "file:focus";
+assert(parseImpactView(wrongImpact) === undefined, "应拒绝反向或伪造的物理端点");
 const unsafeTour = structuredClone(tourFixture);
 unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
 assert(parseRepositoryTourView(unsafeTour) === undefined, "无有效证据的 Tour stop 应使畸形视图被拒绝");
