@@ -181,6 +181,7 @@ def _concept_neighbors(connection: sqlite3.Connection, project_id: str, concept_
     for row in connection.execute(
         """
         SELECT e.id AS edge_id, e.relation, e.confidence, e.source,
+               e.data_json AS edge_data_json,
                n.id, n.label, n.key, n.confidence AS entity_confidence,
                n.source AS entity_source
         FROM edges e JOIN nodes n ON n.id=e.target_id
@@ -199,6 +200,7 @@ def _concept_neighbors(connection: sqlite3.Connection, project_id: str, concept_
                 "key": row["key"],
                 "confidence": row["confidence"],
                 "source": row["source"],
+                "data_json": row["edge_data_json"],
                 "entity_confidence": row["entity_confidence"],
                 "entity_source": row["entity_source"],
             }
@@ -206,6 +208,7 @@ def _concept_neighbors(connection: sqlite3.Connection, project_id: str, concept_
     for row in connection.execute(
         """
         SELECT e.id AS edge_id, e.relation, e.confidence, e.source,
+               e.data_json AS edge_data_json,
                n.id, n.label, n.key, n.confidence AS entity_confidence,
                n.source AS entity_source
         FROM edges e JOIN nodes n ON n.id=e.source_id
@@ -224,6 +227,7 @@ def _concept_neighbors(connection: sqlite3.Connection, project_id: str, concept_
                 "key": row["key"],
                 "confidence": row["confidence"],
                 "source": row["source"],
+                "data_json": row["edge_data_json"],
                 "entity_confidence": row["entity_confidence"],
                 "entity_source": row["entity_source"],
             }
@@ -284,9 +288,21 @@ _CONTEXT_ACTIONS = (
     ("history", "过去谁改过"),
     ("impact", "如果改它"),
 )
-_CONTEXT_HISTORY_SCAN_LIMIT = 120
+_CONTEXT_HISTORY_PER_FILE_LIMIT = 40
+_CONTEXT_HISTORY_SCAN_LIMIT = 12 * (_CONTEXT_HISTORY_PER_FILE_LIMIT + 1)
+_CONTEXT_DEPENDENCY_PER_FILE_LIMIT = 4
+_CONTEXT_RELATION_EVIDENCE_LIMIT = 64
 _CONTEXT_FRESHNESS_FILE_BYTES = 256 * 1024
 _CONTEXT_FRESHNESS_TOTAL_BYTES = 1024 * 1024
+
+
+def _context_path_has_symlink(root: Path, path: str) -> bool:
+    lexical = root
+    for segment in path.split("/"):
+        lexical = lexical / segment
+        if lexical.is_symlink():
+            return True
+    return False
 
 
 def _context_evidence(
@@ -421,16 +437,139 @@ def _context_chain(
         "fileRelation": file_relation,
         "file": file_entity,
         "evidence": concept_evidence,
+        **(
+            {"_conceptRelationData": str(neighbor["data_json"])}
+            if neighbor is not None else {}
+        ),
     }
+
+
+def _validated_context_chains(
+    connection: sqlite3.Connection,
+    project_id: str,
+    files: list[dict[str, Any]],
+    fresh_paths: set[str],
+) -> tuple[bool, bool]:
+    """移除没有真实 L1 支撑的自动一跳关系，不改变文件候选。"""
+
+    component_paths: dict[str, set[str]] = defaultdict(set)
+    for item in files:
+        path = str(item["path"])
+        if path not in fresh_paths:
+            continue
+        for chain in item.get("_chains", []):
+            component_paths[str(chain["fileRelation"]["sourceId"])].add(path)
+
+    physical_edges: dict[tuple[str, str, str], sqlite3.Row] = {}
+    if fresh_paths:
+        paths = sorted(fresh_paths, key=lambda value: (value.lower(), value))
+        placeholders = ",".join("?" for _ in paths)
+        for row in connection.execute(
+            f"""SELECT source.key AS source_path, target.key AS target_path,
+                       edge.relation, edge.source, edge.confidence
+                FROM edges edge
+                JOIN nodes source ON source.id=edge.source_id
+                  AND source.layer=1 AND source.kind='file'
+                JOIN nodes target ON target.id=edge.target_id
+                  AND target.layer=1 AND target.kind='file'
+                WHERE edge.project_id=? AND edge.layer=1
+                  AND source.key IN ({placeholders})
+                  AND target.key IN ({placeholders})
+                ORDER BY source.key COLLATE NOCASE, source.key,
+                         target.key COLLATE NOCASE, target.key,
+                         edge.relation, edge.id""",
+            (project_id, *paths, *paths),
+        ):
+            physical_edges.setdefault(
+                (str(row["source_path"]), str(row["target_path"]), str(row["relation"])),
+                row,
+            )
+
+    dropped = False
+    raw_truncated = False
+    for item in files:
+        validated: list[dict[str, Any]] = []
+        for chain in item.get("_chains", []):
+            relation = chain.get("conceptRelation")
+            if relation is None:
+                validated.append(chain)
+                continue
+            evidence: list[dict[str, Any]] = []
+            if str(relation["source"]) == "human-overlay":
+                evidence = [_context_evidence(
+                    kind="human-decision",
+                    summary="人工确认的概念关系。",
+                    layer="L2",
+                    source="human-overlay",
+                    confidence=float(relation["confidence"]),
+                )]
+            else:
+                raw = json_loads(str(chain.get("_conceptRelationData", "{}")), {}).get(
+                    "evidence", []
+                )
+                if not isinstance(raw, list):
+                    raw = []
+                raw_truncated = raw_truncated or len(raw) > _CONTEXT_RELATION_EVIDENCE_LIMIT
+                for candidate in raw[:_CONTEXT_RELATION_EVIDENCE_LIMIT]:
+                    if not isinstance(candidate, dict):
+                        continue
+                    source_path = candidate.get("source")
+                    target_path = candidate.get("target")
+                    physical_relation = candidate.get("physical_relation")
+                    if not all(
+                        isinstance(value, str)
+                        for value in (source_path, target_path, physical_relation)
+                    ):
+                        continue
+                    assert isinstance(source_path, str)
+                    assert isinstance(target_path, str)
+                    assert isinstance(physical_relation, str)
+                    physical = physical_edges.get(
+                        (source_path, target_path, physical_relation)
+                    )
+                    if (
+                        physical is None
+                        or source_path not in fresh_paths
+                        or target_path not in fresh_paths
+                        or source_path not in component_paths.get(
+                            str(relation["sourceId"]), set()
+                        )
+                        or target_path not in component_paths.get(
+                            str(relation["targetId"]), set()
+                        )
+                    ):
+                        continue
+                    evidence.append(_context_evidence(
+                        kind="physical-relation",
+                        summary=f"{source_path} {physical_relation} {target_path}",
+                        layer="L1",
+                        source=str(physical["source"]),
+                        confidence=float(physical["confidence"]),
+                        path=source_path,
+                    ))
+                    if len(evidence) >= 3:
+                        break
+            if not evidence:
+                dropped = True
+                continue
+            relation["evidence"] = evidence
+            chain["sourceConcept"]["evidence"] = evidence
+            assert chain["relatedConcept"] is not None
+            chain["relatedConcept"]["evidence"] = evidence
+            chain["evidence"] = [*evidence, *chain["fileRelation"]["evidence"]][:3]
+            chain.pop("_conceptRelationData", None)
+            validated.append(chain)
+        item["_chains"] = validated
+    return dropped, raw_truncated
 
 
 def _fresh_context_paths(
     connection: sqlite3.Connection,
     project: sqlite3.Row,
     paths: list[str],
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     if not paths:
-        return set(), set()
+        return set(), set(), set()
     placeholders = ",".join("?" for _ in paths)
     states = {
         str(row["path"]): row
@@ -442,16 +581,21 @@ def _fresh_context_paths(
     try:
         root = Path(str(project["root"])).resolve(strict=True)
     except (OSError, RuntimeError):
-        return set(), set(paths)
+        return set(), set(paths), set()
     fresh: set[str] = set()
     unverifiable: set[str] = set()
+    symlinks: set[str] = set()
     remaining = _CONTEXT_FRESHNESS_TOTAL_BYTES
     for path in paths:
         state = states.get(path)
         if state is None or not is_canonical_relative_path(path):
             continue
         try:
-            resolved = root.joinpath(*path.split("/")).resolve(strict=True)
+            if _context_path_has_symlink(root, path):
+                symlinks.add(path)
+                continue
+            lexical = root.joinpath(*path.split("/"))
+            resolved = lexical.resolve(strict=True)
             resolved.relative_to(root)
             with resolved.open("rb") as handle:
                 before = os.fstat(handle.fileno())
@@ -479,6 +623,9 @@ def _fresh_context_paths(
             current = resolved.stat()
         except (OSError, RuntimeError, ValueError):
             continue
+        if _context_path_has_symlink(root, path):
+            symlinks.add(path)
+            continue
         if (
             unread == 0
             and before.st_dev == after.st_dev
@@ -492,34 +639,58 @@ def _fresh_context_paths(
             and hasher.hexdigest() == str(state["digest"])
         ):
             fresh.add(path)
-    return fresh, unverifiable
+    return fresh, unverifiable, symlinks
 
 
 def _context_file_actions(
     connection: sqlite3.Connection,
     project_id: str,
-    files: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], bool]:
+    candidate_files: list[dict[str, Any]],
+    navigable_files: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, bool]]:
     """只为已选文件生成五个本地只读操作摘要。"""
 
-    paths = [str(item["path"]) for item in files]
-    if not paths:
-        return {}, False
-    placeholders = ",".join("?" for _ in paths)
+    source_paths = [str(item["path"]) for item in candidate_files]
+    target_paths = [str(item["path"]) for item in navigable_files]
+    if not target_paths:
+        return {}, {
+            "dependency_truncated": False,
+            "history_truncated": False,
+            "history_filtered": False,
+        }
+    source_placeholders = ",".join("?" for _ in source_paths)
+    target_placeholders = ",".join("?" for _ in target_paths)
     incoming: dict[str, list[dict[str, Any]]] = defaultdict(list)
     seen_incoming: set[tuple[str, str, str]] = set()
+    dependency_truncated = False
     for row in connection.execute(
-        f"""SELECT target.key AS target_path, source.key AS source_path,
-                   edge.id, edge.relation, edge.source, edge.confidence
-            FROM edges edge
-            JOIN nodes source ON source.id=edge.source_id AND source.layer=1 AND source.kind='file'
-            JOIN nodes target ON target.id=edge.target_id AND target.layer=1 AND target.kind='file'
-            WHERE edge.project_id=? AND edge.layer=1
-              AND source.key IN ({placeholders}) AND target.key IN ({placeholders})
-            ORDER BY target.key COLLATE NOCASE, target.key,
-                     source.key COLLATE NOCASE, source.key, edge.relation, edge.id""",
-        (project_id, *paths, *paths),
+        f"""WITH ranked AS (
+                SELECT target.key AS target_path, source.key AS source_path,
+                       edge.id, edge.relation, edge.source, edge.confidence,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY target.id
+                           ORDER BY source.key COLLATE NOCASE, source.key,
+                                    edge.relation, edge.id
+                       ) AS ordinal
+                FROM edges edge
+                JOIN nodes source ON source.id=edge.source_id
+                  AND source.layer=1 AND source.kind='file'
+                JOIN nodes target ON target.id=edge.target_id
+                  AND target.layer=1 AND target.kind='file'
+                WHERE edge.project_id=? AND edge.layer=1
+                  AND source.key IN ({source_placeholders})
+                  AND target.key IN ({target_placeholders})
+            )
+            SELECT * FROM ranked WHERE ordinal<=?
+            ORDER BY target_path COLLATE NOCASE, target_path, ordinal""",
+        (
+            project_id, *source_paths, *target_paths,
+            _CONTEXT_DEPENDENCY_PER_FILE_LIMIT + 1,
+        ),
     ):
+        if int(row["ordinal"]) > _CONTEXT_DEPENDENCY_PER_FILE_LIMIT:
+            dependency_truncated = True
+            continue
         incoming_key = (
             str(row["target_path"]), str(row["source_path"]), str(row["relation"]),
         )
@@ -542,27 +713,49 @@ def _context_file_actions(
     history: dict[str, list[dict[str, Any]]] = defaultdict(list)
     scanned = 0
     cursor = connection.execute(
-        f"""SELECT file.key AS path, task.id, task.title, task.status,
-                   task.created_at, edge.relation, edge.source, edge.confidence
-            FROM edges edge
-            JOIN nodes file ON file.id=edge.target_id AND file.layer=1 AND file.kind='file'
-            JOIN nodes task_node ON task_node.id=edge.source_id
-              AND task_node.layer=3 AND task_node.kind='task'
-            JOIN tasks task ON task.id=task_node.key
-            WHERE edge.project_id=? AND edge.layer=3 AND file.key IN ({placeholders})
-            ORDER BY COALESCE(task.closed_at, task.updated_at, task.created_at) DESC,
-                     task.id, file.key, edge.relation, edge.id""",
-        (project_id, *paths),
+        f"""WITH ranked AS (
+                SELECT file.key AS path, task.id, task.title, task.status,
+                       task.created_at, edge.relation, edge.source, edge.confidence,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY file.id
+                           ORDER BY COALESCE(
+                               task.closed_at, task.updated_at, task.created_at
+                           ) DESC, task.id, edge.relation, edge.id
+                       ) AS ordinal
+                FROM edges edge
+                JOIN nodes file ON file.id=edge.target_id
+                  AND file.layer=1 AND file.kind='file'
+                JOIN nodes task_node ON task_node.id=edge.source_id
+                  AND task_node.layer=3 AND task_node.kind='task'
+                JOIN tasks task ON task.id=task_node.key
+                WHERE edge.project_id=? AND edge.layer=3
+                  AND file.key IN ({target_placeholders})
+            )
+            SELECT * FROM ranked WHERE ordinal<=?
+            ORDER BY path COLLATE NOCASE, path, ordinal
+            LIMIT ?""",
+        (
+            project_id, *target_paths,
+            _CONTEXT_HISTORY_PER_FILE_LIMIT + 1,
+            _CONTEXT_HISTORY_SCAN_LIMIT + 1,
+        ),
     )
     history_truncated = False
+    history_filtered = False
     for row in cursor:
         scanned += 1
-        if scanned > _CONTEXT_HISTORY_SCAN_LIMIT:
+        if (
+            scanned > _CONTEXT_HISTORY_SCAN_LIMIT
+            or int(row["ordinal"]) > _CONTEXT_HISTORY_PER_FILE_LIMIT
+        ):
             history_truncated = True
-            break
+            continue
         path = str(row["path"])
         title = str(row["title"])
-        if len(history[path]) >= 3 or contains_private_path(title):
+        if contains_private_path(title):
+            history_filtered = True
+            continue
+        if len(history[path]) >= 3:
             continue
         history[path].append({
             "id": str(row["id"]),
@@ -581,7 +774,7 @@ def _context_file_actions(
         })
 
     result: dict[str, dict[str, Any]] = {}
-    for item in files:
+    for item in navigable_files:
         path = str(item["path"])
         chains = item.get("_chains", [])
         primary = chains[0] if chains else None
@@ -607,11 +800,11 @@ def _context_file_actions(
             "dependents": (
                 "已选候选中依赖它的文件：" + "、".join(
                     f"{entry['path']}（{entry['relation']}）" for entry in dependencies
-                ) if dependencies else "已选候选中未发现依赖它的文件。"
+                ) if dependencies else "当前有界候选结果中未展示依赖它的文件。"
             ),
             "history": (
                 "相关历史任务：" + "、".join(entry["title"] for entry in task_history)
-                if task_history else "未找到安全且可追溯的历史修改任务。"
+                if task_history else "当前有界结果中未展示安全且可追溯的历史修改任务。"
             ),
             "impact": (
                 f"修改前先核对 {len(dependencies)} 个已选依赖方与 "
@@ -642,7 +835,11 @@ def _context_file_actions(
                 for entry in task_history
             ],
         }
-    return result, history_truncated
+    return result, {
+        "dependency_truncated": dependency_truncated,
+        "history_truncated": history_truncated,
+        "history_filtered": history_filtered,
+    }
 
 
 def context_data(
@@ -797,8 +994,13 @@ def context_data(
             for item in selected_file_items
         ]
         candidate_paths = [str(item["path"]) for item in selected_file_items]
-        fresh_paths, unverifiable_paths = _fresh_context_paths(
+        fresh_paths, unverifiable_paths, symlink_paths = _fresh_context_paths(
             connection, project, candidate_paths
+        )
+        relation_evidence_dropped, relation_evidence_truncated = (
+            _validated_context_chains(
+                connection, project_id, selected_file_items, fresh_paths
+            )
         )
         navigable_files = [
             item for item in selected_file_items
@@ -815,8 +1017,11 @@ def context_data(
             relation_priority.get(item["_chains"][0]["fileRelation"]["relation"], 4),
             int(item["_rank"]), str(item["path"]).lower(), str(item["path"]),
         ))
-        action_data, history_truncated = _context_file_actions(
-            connection, project_id, navigable_files
+        action_data, action_state = _context_file_actions(
+            connection,
+            project_id,
+            [item for item in selected_file_items if item["path"] in fresh_paths],
+            navigable_files,
         )
         reading_order: list[dict[str, Any]] = []
         for index, item in enumerate(navigable_files, start=1):
@@ -824,15 +1029,24 @@ def context_data(
             related = chain["relatedConcept"]
             if related is None:
                 why = (
-                    f"概念 {chain['sourceConcept']['label']} 通过 "
-                    f"{chain['fileRelation']['relation']} 直接关联此文件。"
+                    f"图谱真实遍历：{chain['sourceConcept']['label']} "
+                    f"—{chain['fileRelation']['relation']}→ {item['path']}。"
                 )
             else:
-                direction = chain["conceptRelation"]
+                relation = chain["conceptRelation"]
+                if relation["sourceId"] == chain["sourceConcept"]["id"]:
+                    traversal = (
+                        f"{chain['sourceConcept']['label']} "
+                        f"—{relation['relation']}→ {related['label']}"
+                    )
+                else:
+                    traversal = (
+                        f"{chain['sourceConcept']['label']} "
+                        f"←{relation['relation']}— {related['label']}"
+                    )
                 why = (
-                    f"从 {chain['sourceConcept']['label']} 的一跳概念关系 "
-                    f"{direction['relation']} 到 {related['label']}，再通过 "
-                    f"{chain['fileRelation']['relation']} 定位此文件。"
+                    f"图谱真实遍历：{traversal} "
+                    f"—{chain['fileRelation']['relation']}→ {item['path']}。"
                 )
             next_path = (
                 str(navigable_files[index]["path"])
@@ -876,16 +1090,49 @@ def context_data(
                 "message": "部分候选文件超过单文件或总 freshness I/O 预算，已从阅读解释中跳过。",
                 "evidence": [],
             })
+        if symlink_paths:
+            navigation_warnings.append({
+                "code": "CONTEXT_NAVIGATION_SYMLINK_UNVERIFIABLE",
+                "message": "部分候选路径包含符号链接，已从阅读解释中跳过以避免 freshness 换靶。",
+                "evidence": [],
+            })
+        if relation_evidence_dropped:
+            navigation_warnings.append({
+                "code": "CONTEXT_NAVIGATION_RELATION_EVIDENCE_INSUFFICIENT",
+                "message": "部分自动一跳概念关系缺少方向一致的真实物理证据，已从解释链中跳过。",
+                "evidence": [],
+            })
+        if relation_evidence_truncated:
+            navigation_warnings.append({
+                "code": "CONTEXT_NAVIGATION_RELATION_EVIDENCE_TRUNCATED",
+                "message": f"一跳关系证据扫描达到每条 {_CONTEXT_RELATION_EVIDENCE_LIMIT} 项预算，局部解释可能不完整。",
+                "evidence": [],
+            })
         if unexplained_paths:
             navigation_warnings.append({
                 "code": "CONTEXT_NAVIGATION_EVIDENCE_INSUFFICIENT",
                 "message": "部分文件候选缺少可追溯的概念映射，未生成推测性解释。",
                 "evidence": [],
             })
-        if history_truncated:
+        if action_state["dependency_truncated"]:
+            navigation_warnings.append({
+                "code": "CONTEXT_NAVIGATION_DEPENDENCY_TRUNCATED",
+                "message": f"每个文件的依赖展示达到 {_CONTEXT_DEPENDENCY_PER_FILE_LIMIT} 项预算，局部结果可能不完整。",
+                "evidence": [],
+            })
+        if action_state["history_truncated"]:
             navigation_warnings.append({
                 "code": "CONTEXT_NAVIGATION_HISTORY_TRUNCATED",
-                "message": f"历史关系扫描达到 {_CONTEXT_HISTORY_SCAN_LIMIT} 项预算，局部历史可能不完整。",
+                "message": (
+                    f"历史关系扫描达到总 {_CONTEXT_HISTORY_SCAN_LIMIT} 项或每文件 "
+                    f"{_CONTEXT_HISTORY_PER_FILE_LIMIT} 项预算，局部历史可能不完整。"
+                ),
+                "evidence": [],
+            })
+        if action_state["history_filtered"]:
+            navigation_warnings.append({
+                "code": "CONTEXT_NAVIGATION_HISTORY_FILTERED",
+                "message": "部分历史任务包含私密路径形式，已过滤且未用于空结果断言。",
                 "evidence": [],
             })
 
@@ -998,6 +1245,12 @@ def format_context(
                 summary = summary[:117] + "..."
             suffix = f"：{summary}" if summary else ""
             lines.append(f"- {task['created_at'][:10]} · {task['title']} [{task['status']}]{suffix}")
+
+    warnings = data.get("warnings", [])
+    if warnings:
+        lines.append("\n证据与完整性提示：")
+        for warning in warnings:
+            lines.append(f"- [{warning['code']}] {warning['message']}")
 
     lines.extend(
         [

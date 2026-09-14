@@ -151,6 +151,19 @@ import agentnavi.mcp.server
                     "RepositoryOverviewDataOutput",
                     context_tool.output_schema["$defs"],
                 )
+                reading_schema = context_tool.output_schema["$defs"]["ContextReadingOutput"]
+                self.assertEqual(
+                    reading_schema["properties"]["position"]["type"], "integer"
+                )
+                self.assertEqual(reading_schema["properties"]["position"]["minimum"], 1)
+                self.assertEqual(reading_schema["properties"]["position"]["maximum"], 12)
+                self.assertEqual(reading_schema["properties"]["actions"]["minItems"], 5)
+                self.assertEqual(reading_schema["properties"]["actions"]["maxItems"], 5)
+                self.assertEqual(
+                    context_tool.output_schema["$defs"]["ContextActionOutput"]
+                    ["properties"]["kind"]["enum"],
+                    ["purpose", "relevance", "dependents", "history", "impact"],
+                )
                 self.assertEqual(
                     visualize_tool.output_schema["anyOf"],
                     [

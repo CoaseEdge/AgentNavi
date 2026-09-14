@@ -90,17 +90,15 @@ function fileNode(
   chainList.setAttribute("aria-label", `${file.path} 的可追溯关系链`);
   for (const chain of reading.chains) {
     const chainNode = document.createElement("li");
-    const labels = new Map([
-      [chain.sourceConcept.id, chain.sourceConcept.label],
-      ...(chain.relatedConcept ? [[chain.relatedConcept.id, chain.relatedConcept.label] as const] : []),
-    ]);
-    const conceptPart = chain.conceptRelation
-      ? `${labels.get(chain.conceptRelation.sourceId) ?? chain.conceptRelation.sourceId} —${chain.conceptRelation.relation}→ ${labels.get(chain.conceptRelation.targetId) ?? chain.conceptRelation.targetId} → `
-      : "";
-    const fileOwner = chain.relatedConcept ?? chain.sourceConcept;
+    let traversal = chain.sourceConcept.label;
+    if (chain.conceptRelation && chain.relatedConcept) {
+      traversal = chain.conceptRelation.sourceId === chain.sourceConcept.id
+        ? `${chain.sourceConcept.label} —${chain.conceptRelation.relation}→ ${chain.relatedConcept.label}`
+        : `${chain.sourceConcept.label} ←${chain.conceptRelation.relation}— ${chain.relatedConcept.label}`;
+    }
     replaceText(
       chainNode,
-      `${conceptPart}${fileOwner.label} —${chain.fileRelation.relation}→ ${chain.file.path}`,
+      `${traversal} —${chain.fileRelation.relation}→ ${chain.file.path}`,
     );
     chainList.append(chainNode);
   }

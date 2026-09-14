@@ -495,7 +495,7 @@ function contextChain(value: unknown, path: string): ContextNavigationChain | un
     sourceConcept.layer !== "L2" || !file || !completeEntity(file) || file.kind !== "file" ||
     file.layer !== "L1" || file.path !== path || !fileRelation ||
     !completeRelation(fileRelation) || fileRelation.layer !== "L2" ||
-    fileRelation.targetId !== file.id || !evidence
+    fileRelation.targetId !== file.id || file.id === sourceConcept.id || !evidence
   ) return undefined;
   if (relatedConcept === null || conceptRelation === null) {
     if (relatedConcept !== null || conceptRelation !== null || fileRelation.sourceId !== sourceConcept.id) {
@@ -503,7 +503,8 @@ function contextChain(value: unknown, path: string): ContextNavigationChain | un
     }
   } else if (
     !completeEntity(relatedConcept) || relatedConcept.kind !== "concept" ||
-    relatedConcept.layer !== "L2" || !completeRelation(conceptRelation) ||
+    relatedConcept.layer !== "L2" || relatedConcept.id === sourceConcept.id ||
+    file.id === relatedConcept.id || !completeRelation(conceptRelation) ||
     conceptRelation.layer !== "L2" ||
     new Set([conceptRelation.sourceId, conceptRelation.targetId]).size !== 2 ||
     ![conceptRelation.sourceId, conceptRelation.targetId].includes(sourceConcept.id) ||
@@ -525,7 +526,9 @@ function contextNavigation(
   const readingOrder: ContextReadingItem[] = [];
   for (let index = 0; index < rawReading.length; index += 1) {
     const raw = record(rawReading[index]);
-    const position = count(raw?.position);
+    const rawPosition = raw?.position;
+    const position = typeof rawPosition === "number" && Number.isInteger(rawPosition)
+      ? rawPosition : 0;
     const path = text(raw?.path);
     const language = displayText(raw?.language);
     const why = displayText(raw?.why);

@@ -78,6 +78,39 @@ assert(parseContextView(wrongNavigationEndpoint) === undefined, "应拒绝虚构
 const expandedDependent = structuredClone(fixture) as any;
 expandedDependent.data.navigation.readingOrder[0]!.dependents = [{ path: "src/not-a-candidate.py", relation: "imports" }];
 assert(parseContextView(expandedDependent) === undefined, "dependent 不得扩大 Context 候选集");
+for (const invalidPosition of [1.5, Number.NaN, true]) {
+  const invalid = structuredClone(fixture) as any;
+  invalid.data.navigation.readingOrder[0].position = invalidPosition;
+  assert(parseContextView(invalid) === undefined, "Context position 必须是严格整数");
+}
+const oneHop = structuredClone(fixture) as any;
+const oneHopChain = oneHop.data.navigation.readingOrder[0].chains[0];
+oneHopChain.relatedConcept = {
+  ...structuredClone(oneHopChain.sourceConcept),
+  id: "concept:payment",
+  label: "支付",
+};
+oneHopChain.conceptRelation = {
+  ...structuredClone(oneHopChain.fileRelation),
+  id: "edge:depends",
+  sourceId: oneHopChain.sourceConcept.id,
+  targetId: oneHopChain.relatedConcept.id,
+  relation: "depends_on",
+};
+oneHopChain.fileRelation.sourceId = oneHopChain.relatedConcept.id;
+assert(parseContextView(oneHop) !== undefined, "应接受端点真实且 ID 不重复的一跳链");
+const selfLoop = structuredClone(oneHop) as any;
+selfLoop.data.navigation.readingOrder[0].chains[0].relatedConcept.id = "concept:membership";
+selfLoop.data.navigation.readingOrder[0].chains[0].conceptRelation.targetId = "concept:membership";
+selfLoop.data.navigation.readingOrder[0].chains[0].fileRelation.sourceId = "concept:membership";
+assert(parseContextView(selfLoop) === undefined, "sourceConcept 与 relatedConcept 不得复用 ID");
+const crossKindId = structuredClone(fixture) as any;
+crossKindId.data.navigation.readingOrder[0].chains[0].file.id = "concept:membership";
+crossKindId.data.navigation.readingOrder[0].chains[0].fileRelation.targetId = "concept:membership";
+assert(parseContextView(crossKindId) === undefined, "concept 与 file 不得跨 kind 复用 ID");
+const wrongActions = structuredClone(fixture) as any;
+wrongActions.data.navigation.readingOrder[0].actions.reverse();
+assert(parseContextView(wrongActions) === undefined, "Context actions 必须保持固定顺序与标签");
 
 const rejectedPaths = [
   "/private/file.py",

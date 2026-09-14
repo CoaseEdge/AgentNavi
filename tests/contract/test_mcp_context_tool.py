@@ -199,19 +199,44 @@ class MCPContextToolContractTestCase(unittest.TestCase):
                 "SELECT * FROM projects WHERE id='fixture'"
             ).fetchone()
         assert project is not None
-        bad_core = context_data(self.database, project, "会员")
         private_message = f"bad endpoint at {self.database.settings.database_path}"
-        chain = bad_core["navigation"]["readingOrder"][0]["chains"][0]
-        chain["fileRelation"]["targetId"] = private_message
-        with patch("agentnavi.query.context_data", return_value=bad_core):
-            result = asyncio.run(
-                self._call({"query": "会员", "project_id": "fixture"})
+        cases = []
+        bad_endpoint = context_data(self.database, project, "会员")
+        bad_endpoint["navigation"]["readingOrder"][0]["chains"][0][
+            "fileRelation"
+        ]["targetId"] = private_message
+        cases.append(bad_endpoint)
+        self_relation = context_data(self.database, project, "会员")
+        chain = self_relation["navigation"]["readingOrder"][0]["chains"][0]
+        chain["relatedConcept"] = json.loads(json.dumps(chain["sourceConcept"]))
+        chain["conceptRelation"] = {
+            **json.loads(json.dumps(chain["fileRelation"])),
+            "id": "self-loop",
+            "sourceId": chain["sourceConcept"]["id"],
+            "targetId": chain["sourceConcept"]["id"],
+            "relation": "related_to",
+        }
+        cases.append(self_relation)
+        cross_kind = context_data(self.database, project, "会员")
+        chain = cross_kind["navigation"]["readingOrder"][0]["chains"][0]
+        chain["file"]["id"] = chain["sourceConcept"]["id"]
+        chain["fileRelation"]["targetId"] = chain["sourceConcept"]["id"]
+        cases.append(cross_kind)
+
+        for bad_core in cases:
+            with self.subTest(case=cases.index(bad_core)), patch(
+                "agentnavi.query.context_data", return_value=bad_core
+            ):
+                result = asyncio.run(
+                    self._call({"query": "会员", "project_id": "fixture"})
+                )
+            self.assertTrue(result.is_error)
+            self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+            wire = json.dumps(
+                result.model_dump(by_alias=True), ensure_ascii=False, default=str
             )
-        self.assertTrue(result.is_error)
-        self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
-        wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
-        self.assertNotIn(private_message, wire)
-        self.assertNotIn(str(self.database.settings.database_path), wire)
+            self.assertNotIn(private_message, wire)
+            self.assertNotIn(str(self.database.settings.database_path), wire)
 
     def test_visualize_tool_returns_repository_overview_without_query(self) -> None:
         self._add_project()
@@ -602,6 +627,40 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         ]["targetId"] = "wrong-file"
         with self.assertRaises(ValidationError):
             ContextViewOutput.model_validate(invalid_context)
+        invalid_contexts = []
+        fractional = json.loads(json.dumps(payload))
+        fractional["data"]["navigation"]["readingOrder"][0]["position"] = 1.5
+        invalid_contexts.append(fractional)
+        wrong_action = json.loads(json.dumps(payload))
+        wrong_action["data"]["navigation"]["readingOrder"][0]["actions"].reverse()
+        invalid_contexts.append(wrong_action)
+        wrong_next = json.loads(json.dumps(payload))
+        wrong_next["data"]["navigation"]["readingOrder"][0]["nextStep"] = {
+            "path": wrong_next["data"]["files"][0]["path"], "reason": "循环"
+        }
+        invalid_contexts.append(wrong_next)
+        outside_dependent = json.loads(json.dumps(payload))
+        outside_dependent["data"]["navigation"]["readingOrder"][0][
+            "dependents"
+        ] = [{"path": "src/not-candidate.py", "relation": "imports"}]
+        invalid_contexts.append(outside_dependent)
+        cross_kind = json.loads(json.dumps(payload))
+        cross_chain = cross_kind["data"]["navigation"]["readingOrder"][0]["chains"][0]
+        cross_chain["file"]["id"] = cross_chain["sourceConcept"]["id"]
+        cross_chain["fileRelation"]["targetId"] = cross_chain["sourceConcept"]["id"]
+        invalid_contexts.append(cross_kind)
+        self_relation = json.loads(json.dumps(payload))
+        self_chain = self_relation["data"]["navigation"]["readingOrder"][0]["chains"][0]
+        self_chain["relatedConcept"] = json.loads(json.dumps(self_chain["sourceConcept"]))
+        self_chain["conceptRelation"] = {
+            **json.loads(json.dumps(self_chain["fileRelation"])),
+            "id": "self-loop", "sourceId": self_chain["sourceConcept"]["id"],
+            "targetId": self_chain["sourceConcept"]["id"], "relation": "related_to",
+        }
+        invalid_contexts.append(self_relation)
+        for invalid in invalid_contexts:
+            with self.assertRaises(ValidationError):
+                ContextViewOutput.model_validate(invalid)
 
         overview = asyncio.run(
             self._call(

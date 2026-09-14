@@ -151,6 +151,7 @@ def _chain_entry(value: Any, path: str) -> dict[str, Any]:
         file_entity["kind"] != "file" or file_entity["layer"] != "L1"
         or file_entity.get("path") != path or file_relation["layer"] != "L2"
         or file_relation["targetId"] != file_entity["id"] or not evidence
+        or file_entity["id"] == source["id"]
     ):
         raise ValueError("chain file provenance 无效。")
     if related is None or concept_relation is None:
@@ -159,7 +160,11 @@ def _chain_entry(value: Any, path: str) -> dict[str, Any]:
         if file_relation["sourceId"] != source["id"]:
             raise ValueError("direct chain endpoint 无效。")
     else:
-        if related["kind"] != "concept" or related["layer"] != "L2":
+        if (
+            related["kind"] != "concept" or related["layer"] != "L2"
+            or related["id"] == source["id"]
+            or file_entity["id"] == related["id"]
+        ):
             raise ValueError("chain.relatedConcept 必须是 L2 concept。")
         if concept_relation["layer"] != "L2" or {
             concept_relation["sourceId"], concept_relation["targetId"]
@@ -328,6 +333,7 @@ def _source_state(core_data: Mapping[str, Any]) -> tuple[SourceState, tuple[Warn
             warning.code in {
                 "CONTEXT_NAVIGATION_STALE_FILES",
                 "CONTEXT_NAVIGATION_FRESHNESS_BUDGET",
+                "CONTEXT_NAVIGATION_SYMLINK_UNVERIFIABLE",
             }
             for warning in warnings
         )
@@ -371,6 +377,7 @@ def context_text(core_data: Mapping[str, Any]) -> str:
     """独立生成模型文本，不从 AgentNaviView 或 JSON 反向解析。"""
 
     raw_project = _mapping(core_data.get("project"), "context.project")
+    _, warnings = _source_state(core_data)
     text_data = _context_payload(core_data)
     text_data["query"] = _query_text(core_data.get("query", ""))
     text_data["project"] = {
@@ -378,10 +385,8 @@ def context_text(core_data: Mapping[str, Any]) -> str:
         "name": _text(raw_project.get("name"), "context.project.name"),
         "kind": _text(raw_project.get("kind"), "context.project.kind", limit=80),
     }
-    text = format_context(text_data, include_project_root=False)
-    if raw_project.get("last_scan_at") is None:
-        text += f"\n\n提示：{_NOT_INDEXED_MESSAGE}"
-    return text
+    text_data["warnings"] = [warning.to_dict() for warning in warnings]
+    return format_context(text_data, include_project_root=False)
 
 
 __all__ = ["context_text", "context_view"]

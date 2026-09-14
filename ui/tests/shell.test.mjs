@@ -198,7 +198,10 @@ test("bridge renders a successful result as text and preserves concept-file evid
   explain.click();
   assert.equal(explain.getAttribute("aria-expanded"), "true");
   assert.match(document.querySelector(".file-why").textContent, /Why/);
-  assert.match(document.querySelector(".context-chains").textContent, /implemented_by/);
+  assert.equal(
+    document.querySelector(".context-chains li").textContent,
+    "会员 <img onerror=alert(1)> —implemented_by→ src/membership.py",
+  );
   assert.equal(document.querySelector(".file-explanation script"), null);
   const impact = [...document.querySelectorAll(".context-actions button")].find(
     (button) => button.textContent === "如果改它",
@@ -208,6 +211,34 @@ test("bridge renders a successful result as text and preserves concept-file evid
   assert.equal(document.querySelector(".context-action-summary").textContent, "[内容含路径，已隐藏]");
   assert.match(document.querySelector(".context-next-step").textContent, /Next Step/);
   assert.equal(document.querySelector("#connection-label").textContent, "已连接");
+});
+
+test("context chain renders outgoing and incoming traversal without repeating the neighbor", () => {
+  for (const direction of ["outgoing", "incoming"]) {
+    const payload = fixture();
+    const chain = payload.data.navigation.readingOrder[0].chains[0];
+    chain.sourceConcept.label = "会员";
+    chain.relatedConcept = {
+      ...structuredClone(chain.sourceConcept), id: "concept:payment", label: "支付",
+    };
+    chain.conceptRelation = {
+      ...structuredClone(chain.fileRelation),
+      id: "edge:depends",
+      sourceId: direction === "outgoing" ? chain.sourceConcept.id : chain.relatedConcept.id,
+      targetId: direction === "outgoing" ? chain.relatedConcept.id : chain.sourceConcept.id,
+      relation: "depends_on",
+    };
+    chain.fileRelation.sourceId = chain.relatedConcept.id;
+    const { document, shell } = setup();
+    applyToolResult(shell, { structuredContent: payload });
+    document.querySelector(".file-explain-trigger").click();
+    assert.equal(
+      document.querySelector(".context-chains li").textContent,
+      direction === "outgoing"
+        ? "会员 —depends_on→ 支付 —implemented_by→ src/membership.py"
+        : "会员 ←depends_on— 支付 —implemented_by→ src/membership.py",
+    );
+  }
 });
 
 test("renderer registry shows repository overview with safe DOM and evidence", () => {

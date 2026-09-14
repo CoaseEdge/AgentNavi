@@ -124,11 +124,18 @@ class ContextChainOutput(_ExtensibleModel):
             raise ValueError("concept relation and entity must be paired")
         if self.file_relation.target_id != self.file.id:
             raise ValueError("file relation target mismatch")
+        if self.file.id == self.source_concept.id:
+            raise ValueError("concept and file ids must differ")
         if self.related_concept is None:
             if self.file_relation.source_id != self.source_concept.id:
                 raise ValueError("direct file relation source mismatch")
         else:
             assert self.concept_relation is not None
+            if (
+                self.related_concept.id == self.source_concept.id
+                or self.file.id == self.related_concept.id
+            ):
+                raise ValueError("chain entity ids must be unique across kinds")
             if {
                 self.concept_relation.source_id, self.concept_relation.target_id
             } != {self.source_concept.id, self.related_concept.id}:
@@ -164,7 +171,7 @@ class ContextNextStepOutput(_ExtensibleModel):
 
 
 class ContextReadingOutput(_ExtensibleModel):
-    position: int = Field(ge=1, le=12)
+    position: int = Field(strict=True, ge=1, le=12)
     path: str = Field(min_length=1)
     language: str = Field(min_length=1)
     why: str = Field(min_length=1)
@@ -175,10 +182,40 @@ class ContextReadingOutput(_ExtensibleModel):
     dependents: list[ContextDependentOutput] = Field(max_length=4)
     history: list[ContextHistoryOutput] = Field(max_length=3)
 
+    @model_validator(mode="after")
+    def validate_actions(self) -> "ContextReadingOutput":
+        expected = (
+            ("purpose", "它做什么"),
+            ("relevance", "为什么相关"),
+            ("dependents", "谁依赖它"),
+            ("history", "过去谁改过"),
+            ("impact", "如果改它"),
+        )
+        actual = tuple((item.kind, item.label) for item in self.actions)
+        if actual != expected:
+            raise ValueError("context actions must use the fixed order and labels")
+        if any(chain.file.path != self.path for chain in self.chains):
+            raise ValueError("context chain file path must match its reading item")
+        return self
+
 
 class ContextNavigationOutput(_ExtensibleModel):
     revision: str = Field(min_length=1)
     reading_order: list[ContextReadingOutput] = Field(alias="readingOrder", max_length=12)
+
+    @model_validator(mode="after")
+    def validate_reading_order(self) -> "ContextNavigationOutput":
+        paths = [item.path for item in self.reading_order]
+        if len(paths) != len(set(paths)):
+            raise ValueError("context reading paths must be unique")
+        for index, item in enumerate(self.reading_order):
+            if item.position != index + 1:
+                raise ValueError("context reading positions must be consecutive")
+            expected = paths[index + 1] if index + 1 < len(paths) else None
+            actual = item.next_step.path if item.next_step is not None else None
+            if actual != expected:
+                raise ValueError("context next step must target the adjacent item")
+        return self
 
 
 class ContextDataOutput(_ExtensibleModel):
@@ -187,6 +224,16 @@ class ContextDataOutput(_ExtensibleModel):
     files: list[ContextFileOutput]
     tasks: list[ContextTaskOutput]
     navigation: ContextNavigationOutput
+
+    @model_validator(mode="after")
+    def validate_navigation_candidates(self) -> "ContextDataOutput":
+        candidate_paths = {item.path for item in self.files}
+        for item in self.navigation.reading_order:
+            if item.path not in candidate_paths:
+                raise ValueError("context reading path must belong to candidate files")
+            if any(dependent.path not in candidate_paths for dependent in item.dependents):
+                raise ValueError("context dependent must belong to candidate files")
+        return self
 
 
 class WarningOutput(_ExtensibleModel):
