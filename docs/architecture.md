@@ -94,7 +94,7 @@ SQLite 负责高效查询，不再承担 L3 历史和人工判断的唯一副本
 
 每次扫描会重建自动 L2，但不会删除外部校正日志。拒绝规则会持续压制错误推断；接受、重命名、合并和映射会在每次重建后恢复。
 
-SQLite schema v4 维护一张可重建的 `l2_concept_edges` 查询表。触发器按真实端点类型投影所有 concept→concept 关系，关系名称不参与分类，因此人工 Overlay 和外部提供器可使用与 concept→file 映射同名的关系。初始化会从 `nodes` 与 `edges` 全量恢复该表；它不是新的事实来源。
+SQLite schema v4 维护一张可重建的 `l2_concept_edges` 查询表。触发器按真实端点类型投影所有 concept→concept 关系，关系名称不参与分类，因此人工 Overlay 和外部提供器可使用与 concept→file 映射同名的关系。升级或投影表缺失时会从 `nodes` 与 `edges` 全量恢复；健康的 v4 数据库重复启动只读检查，不重写该表。它不是新的事实来源。
 
 ### L3：任务图
 

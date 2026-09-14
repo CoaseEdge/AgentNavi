@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -784,6 +785,90 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertTrue(impact_view_data(
             self.database, self.project, "Focus"
         )["semantic"])
+
+    def test_concept_edge_lookup_tracks_node_identity_updates(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        dependency = Database.node_id("fixture", 2, "concept", "dependency")
+        edge_id = Database.edge_id("fixture", 2, focus, "depends_on", dependency)
+        with self.database.connect() as connection:
+            def projected() -> bool:
+                return connection.execute(
+                    "SELECT 1 FROM l2_concept_edges WHERE edge_id=?", (edge_id,),
+                ).fetchone() is not None
+
+            self.assertTrue(projected())
+            connection.execute("UPDATE nodes SET kind='file' WHERE id=?", (dependency,))
+            self.assertFalse(projected())
+            connection.execute("UPDATE nodes SET kind='concept' WHERE id=?", (dependency,))
+            self.assertTrue(projected())
+            connection.execute("UPDATE nodes SET layer=1 WHERE id=?", (dependency,))
+            self.assertFalse(projected())
+            connection.execute("UPDATE nodes SET layer=2 WHERE id=?", (dependency,))
+            self.assertTrue(projected())
+            connection.execute(
+                """INSERT INTO projects(id,name,root,kind,created_at,updated_at)
+                   VALUES ('other','Other',?,'software',?,?)""",
+                (str((self.base / "other").resolve()),
+                 "2026-09-15T10:00:00+00:00", "2026-09-15T10:00:00+00:00"),
+            )
+            connection.execute("UPDATE nodes SET project_id='other' WHERE id=?", (dependency,))
+            self.assertFalse(projected())
+            connection.execute("UPDATE nodes SET project_id='fixture' WHERE id=?", (dependency,))
+            self.assertTrue(projected())
+            connection.rollback()
+
+    def test_healthy_v4_initialize_is_read_only_even_during_another_writer(self) -> None:
+        with self.database.connect() as connection:
+            before = [tuple(row) for row in connection.execute(
+                "SELECT * FROM l2_concept_edges ORDER BY edge_id"
+            )]
+        before_mtime = self.database.settings.database_path.stat().st_mtime_ns
+        with self.database.connect() as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(ensure_database, self.database.settings).result(timeout=3)
+            writer.rollback()
+        after_mtime = self.database.settings.database_path.stat().st_mtime_ns
+        with self.database.connect() as connection:
+            after = [tuple(row) for row in connection.execute(
+                "SELECT * FROM l2_concept_edges ORDER BY edge_id"
+            )]
+        self.assertEqual(after, before)
+        self.assertEqual(after_mtime, before_mtime)
+
+    def test_schema_v4_lookup_migration_is_concurrent_and_idempotent(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_insert")
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_update")
+            connection.execute("DROP TRIGGER trg_l2_concept_edges_node_identity")
+            connection.execute("DROP TABLE l2_concept_edges")
+            connection.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+            connection.commit()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(ensure_database, self.database.settings) for _ in range(2)]
+            databases = [future.result(timeout=10) for future in futures]
+        self.assertEqual(len(databases), 2)
+        with self.database.connect() as connection:
+            count, distinct_count = connection.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT edge_id) FROM l2_concept_edges"
+            ).fetchone()
+            expected = connection.execute(
+                """SELECT COUNT(*) FROM edges edge
+                   JOIN nodes source ON source.id=edge.source_id
+                     AND source.project_id=edge.project_id
+                     AND source.layer=2 AND source.kind='concept'
+                   JOIN nodes target ON target.id=edge.target_id
+                     AND target.project_id=edge.project_id
+                     AND target.layer=2 AND target.kind='concept'
+                   WHERE edge.layer=2"""
+            ).fetchone()[0]
+            version = int(connection.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()[0])
+        self.assertEqual(count, expected)
+        self.assertEqual(distinct_count, expected)
+        self.assertEqual(version, SCHEMA_VERSION)
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")

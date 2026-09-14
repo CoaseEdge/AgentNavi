@@ -101,10 +101,12 @@ BEGIN
     SELECT NEW.id, NEW.project_id, NEW.source_id, NEW.target_id, NEW.rowid
     WHERE EXISTS (
         SELECT 1 FROM nodes source
-        WHERE source.id=NEW.source_id AND source.layer=2 AND source.kind='concept'
+        WHERE source.id=NEW.source_id AND source.project_id=NEW.project_id
+          AND source.layer=2 AND source.kind='concept'
     ) AND EXISTS (
         SELECT 1 FROM nodes target
-        WHERE target.id=NEW.target_id AND target.layer=2 AND target.kind='concept'
+        WHERE target.id=NEW.target_id AND target.project_id=NEW.project_id
+          AND target.layer=2 AND target.kind='concept'
     );
 END;
 
@@ -118,11 +120,34 @@ BEGIN
     SELECT NEW.id, NEW.project_id, NEW.source_id, NEW.target_id, NEW.rowid
     WHERE NEW.layer=2 AND EXISTS (
         SELECT 1 FROM nodes source
-        WHERE source.id=NEW.source_id AND source.layer=2 AND source.kind='concept'
+        WHERE source.id=NEW.source_id AND source.project_id=NEW.project_id
+          AND source.layer=2 AND source.kind='concept'
     ) AND EXISTS (
         SELECT 1 FROM nodes target
-        WHERE target.id=NEW.target_id AND target.layer=2 AND target.kind='concept'
+        WHERE target.id=NEW.target_id AND target.project_id=NEW.project_id
+          AND target.layer=2 AND target.kind='concept'
     );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_l2_concept_edges_node_identity
+AFTER UPDATE OF project_id, layer, kind ON nodes
+BEGIN
+    DELETE FROM l2_concept_edges
+    WHERE source_id=OLD.id OR target_id=OLD.id;
+    INSERT OR REPLACE INTO l2_concept_edges(
+        edge_id, project_id, source_id, target_id, recorded_order
+    )
+    SELECT edge.id, edge.project_id, edge.source_id,
+           edge.target_id, edge.rowid
+    FROM edges edge
+    JOIN nodes source ON source.id=edge.source_id
+      AND source.project_id=edge.project_id
+      AND source.layer=2 AND source.kind='concept'
+    JOIN nodes target ON target.id=edge.target_id
+      AND target.project_id=edge.project_id
+      AND target.layer=2 AND target.kind='concept'
+    WHERE edge.layer=2
+      AND (edge.source_id=NEW.id OR edge.target_id=NEW.id);
 END;
 
 CREATE TABLE IF NOT EXISTS file_state (
@@ -246,36 +271,79 @@ class Database:
     def initialize(self) -> None:
         self.settings.ensure_layout()
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
-            row = connection.execute(
-                "SELECT value FROM meta WHERE key='schema_version'"
-            ).fetchone()
-            if row is not None and int(row["value"]) > SCHEMA_VERSION:
+            objects = {str(row[0]) for row in connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE name IN (
+                     'meta', 'l2_concept_edges',
+                     'idx_edges_source_relation', 'idx_edges_target_relation',
+                     'idx_edges_target_provenance',
+                     'idx_edges_source_semantic_v2', 'idx_edges_target_semantic_v2',
+                     'idx_l2_concept_edges_source', 'idx_l2_concept_edges_target',
+                     'trg_l2_concept_edges_insert', 'trg_l2_concept_edges_update',
+                     'trg_l2_concept_edges_node_identity'
+                   )"""
+            )}
+            old_version: int | None = None
+            if "meta" in objects:
+                row = connection.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                ).fetchone()
+                if row is not None:
+                    old_version = int(row["value"])
+            if old_version is not None and old_version > SCHEMA_VERSION:
                 raise RuntimeError(
-                    f"数据库 schema 版本 {row['value']} 高于当前程序支持的 {SCHEMA_VERSION}"
+                    f"数据库 schema 版本 {old_version} 高于当前程序支持的 {SCHEMA_VERSION}"
                 )
-            # This lookup is derived solely from edges/nodes. Rebuilding it here
-            # repairs upgrades and deliberate deletion without touching graph facts.
-            connection.execute("DELETE FROM l2_concept_edges")
-            connection.execute(
-                """INSERT INTO l2_concept_edges(
-                       edge_id, project_id, source_id, target_id, recorded_order
-                   )
-                   SELECT edge.id, edge.project_id, edge.source_id,
-                          edge.target_id, edge.rowid
-                   FROM edges edge
-                   JOIN nodes source ON source.id=edge.source_id
-                     AND source.layer=2 AND source.kind='concept'
-                   JOIN nodes target ON target.id=edge.target_id
-                     AND target.layer=2 AND target.kind='concept'
-                   WHERE edge.layer=2"""
-            )
-            connection.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
-            connection.commit()
+            required = {
+                "meta", "l2_concept_edges",
+                "idx_edges_source_relation", "idx_edges_target_relation",
+                "idx_edges_target_provenance",
+                "idx_edges_source_semantic_v2", "idx_edges_target_semantic_v2",
+                "idx_l2_concept_edges_source", "idx_l2_concept_edges_target",
+                "trg_l2_concept_edges_insert", "trg_l2_concept_edges_update",
+                "trg_l2_concept_edges_node_identity",
+            }
+            if old_version == SCHEMA_VERSION and required <= objects:
+                return
+
+            lookup_was_missing = "l2_concept_edges" not in objects
+            connection.executescript(SCHEMA)
+            if old_version is None or old_version < SCHEMA_VERSION or lookup_was_missing:
+                connection.execute("BEGIN IMMEDIATE")
+                current_row = connection.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                ).fetchone()
+                current_version = int(current_row["value"]) if current_row is not None else None
+                lookup_has_rows = connection.execute(
+                    "SELECT 1 FROM l2_concept_edges LIMIT 1"
+                ).fetchone() is not None
+                should_rebuild = (
+                    current_version is None or current_version < SCHEMA_VERSION
+                    or (lookup_was_missing and not lookup_has_rows)
+                )
+                if should_rebuild:
+                    connection.execute("DELETE FROM l2_concept_edges")
+                    connection.execute(
+                        """INSERT INTO l2_concept_edges(
+                               edge_id, project_id, source_id, target_id, recorded_order
+                           )
+                           SELECT edge.id, edge.project_id, edge.source_id,
+                                  edge.target_id, edge.rowid
+                           FROM edges edge
+                           JOIN nodes source ON source.id=edge.source_id
+                             AND source.project_id=edge.project_id
+                             AND source.layer=2 AND source.kind='concept'
+                           JOIN nodes target ON target.id=edge.target_id
+                             AND target.project_id=edge.project_id
+                             AND target.layer=2 AND target.kind='concept'
+                           WHERE edge.layer=2"""
+                    )
+                    connection.execute(
+                        "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(SCHEMA_VERSION),),
+                    )
+                connection.commit()
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
