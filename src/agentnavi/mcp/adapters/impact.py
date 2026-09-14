@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
-from ..protocol import AgentNaviView
+from ..protocol import AgentNaviView, EntityRef, Evidence, GraphEdge
 from .repo_overview import _evidence_list, _mapping, _path, _project, _sequence, _source_state, _text
-from .repo_tour import _entity, _relation
 
 _ACTIONS = (("purpose", "它做什么"), ("callers", "谁调用它"),
             ("dependencies", "它依赖谁"), ("change", "如果修改它"),
@@ -37,6 +37,37 @@ def _sig(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _impact_evidence(value: Any, field: str, *, limit: int) -> list[dict[str, Any]]:
+    raw_items = _sequence(value, field)
+    if not raw_items or len(raw_items) > limit:
+        raise ValueError(f"{field} 无效。")
+    result: list[dict[str, Any]] = []
+    for raw in raw_items:
+        item = _mapping(raw, f"{field}[]")
+        confidence = item.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or \
+                not math.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
+            raise ValueError(f"{field}.confidence 无效。")
+        line_start = item.get("lineStart", item.get("line_start"))
+        line_end = item.get("lineEnd", item.get("line_end"))
+        for line, name in ((line_start, "lineStart"), (line_end, "lineEnd")):
+            if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line < 1):
+                raise ValueError(f"{field}.{name} 无效。")
+        if line_end is not None and (line_start is None or line_end < line_start):
+            raise ValueError(f"{field}.lineEnd 无效。")
+        evidence = Evidence(
+            kind=_required(item.get("kind"), f"{field}.kind", 80),
+            summary=_required(item.get("summary"), f"{field}.summary"),
+            layer=_required(item.get("layer"), f"{field}.layer", 2),  # type: ignore[arg-type]
+            source=_required(item.get("source"), f"{field}.source", 120),
+            confidence=float(confidence),
+            path=_path(item.get("path"), f"{field}.path") if item.get("path") is not None else None,
+            line_start=line_start, line_end=line_end,
+        )
+        result.append(evidence.to_dict())
+    return result
+
+
 def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
     if core_data.get("layout") != "incoming-focus-outgoing":
         raise ValueError("impact.layout 无效。")
@@ -46,10 +77,27 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
 
     def entity(value: Any, field: str) -> dict[str, Any]:
         raw = _mapping(value, field)
-        raw_evidence = _sequence(raw.get("evidence", []), f"{field}.evidence")
-        if not raw_evidence or len(raw_evidence) > 8:
-            raise ValueError(f"{field}.evidence 无效。")
-        parsed = _entity(value, field)
+        parsed_evidence = _impact_evidence(raw.get("evidence", []), f"{field}.evidence", limit=8)
+        confidence = raw.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or \
+                not math.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
+            raise ValueError(f"{field}.confidence 无效。")
+        kind = _required(raw.get("kind"), f"{field}.kind", 80)
+        path = raw.get("path")
+        parsed = EntityRef(
+            id=_required(raw.get("id"), f"{field}.id", 240), kind=kind,
+            label=_required(raw.get("label"), f"{field}.label", 240),
+            path=_path(path, f"{field}.path") if path is not None else None,
+            layer=_required(raw.get("layer"), f"{field}.layer", 2),  # type: ignore[arg-type]
+            source=_required(raw.get("source"), f"{field}.source", 120),
+            confidence=float(confidence),
+            evidence=tuple(Evidence(**{
+                "kind": item["kind"], "summary": item["summary"], "layer": item["layer"],
+                "source": item["source"], "confidence": item["confidence"],
+                "path": item.get("path"), "line_start": item.get("lineStart"),
+                "line_end": item.get("lineEnd"),
+            }) for item in parsed_evidence),
+        ).to_dict()
         signature = _sig({key: parsed.get(key) for key in
                           ("kind", "label", "path", "layer", "source", "confidence", "evidence")})
         if entities.setdefault(parsed["id"], signature) != signature or parsed["id"] in edges:
@@ -59,8 +107,25 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
 
     def edge(value: Any, field: str) -> dict[str, Any]:
         raw = _mapping(value, field)
-        _evidence3(raw.get("evidence", []), f"{field}.evidence")
-        parsed = _relation(raw, field)
+        parsed_evidence = _impact_evidence(raw.get("evidence", []), f"{field}.evidence", limit=3)
+        confidence = raw.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)):
+            raise ValueError(f"{field}.confidence 无效。")
+        parsed = GraphEdge(
+            id=_required(raw.get("id"), f"{field}.id", 240),
+            source_id=_required(raw.get("sourceId"), f"{field}.sourceId", 240),
+            target_id=_required(raw.get("targetId"), f"{field}.targetId", 240),
+            relation=_required(raw.get("relation"), f"{field}.relation", 120),
+            layer=_required(raw.get("layer"), f"{field}.layer", 2),  # type: ignore[arg-type]
+            source=_required(raw.get("source"), f"{field}.source", 120),
+            confidence=float(confidence),
+            evidence=tuple(Evidence(**{
+                "kind": item["kind"], "summary": item["summary"], "layer": item["layer"],
+                "source": item["source"], "confidence": item["confidence"],
+                "path": item.get("path"), "line_start": item.get("lineStart"),
+                "line_end": item.get("lineEnd"),
+            }) for item in parsed_evidence),
+        ).to_dict()
         signature = _sig(parsed)
         if edges.setdefault(parsed["id"], signature) != signature or parsed["id"] in entities:
             raise ValueError("impact edge id 冲突。")
@@ -69,7 +134,9 @@ def _impact_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
 
     def evidence(value: Any, field: str, relation: dict[str, Any] | None = None,
                  required: bool = True) -> list[dict[str, Any]]:
-        parsed = _evidence3(value, field, required)
+        if not required and not _sequence(value, field):
+            return []
+        parsed = _impact_evidence(value, field, limit=3)
         if relation is not None and parsed != relation["evidence"]:
             raise ValueError(f"{field} 与 relation evidence 不一致。")
         return parsed

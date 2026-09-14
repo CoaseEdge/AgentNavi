@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from mcp.types import CallToolResult, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, RootModel, WithJsonSchema, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, WithJsonSchema, field_validator, model_validator
 
 from .protocol import MAX_CONTEXT_WARNINGS, SCHEMA_VERSION
 
@@ -660,14 +661,65 @@ class FlowViewOutput(_ExtensibleModel):
         return value
 
 
+class ImpactEvidenceOutput(TourEvidenceOutput):
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError("impact confidence must be a finite number")
+        return value
+
+    @field_validator("line_start", "line_end", mode="before")
+    @classmethod
+    def strict_line(cls, value: Any) -> Any:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("impact evidence line must be an integer")
+        return value
+
+    @field_validator("kind", "summary", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact evidence text must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def validate_lines(self) -> "ImpactEvidenceOutput":
+        if self.line_end is not None and (self.line_start is None or self.line_end < self.line_start):
+            raise ValueError("impact evidence line range invalid")
+        return self
+
+
 class ImpactFileEntityOutput(ArchitectureEntryEntityOutput):
     path: str = Field(min_length=1)
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=8)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=8)
+
+    @field_validator("id", "label", "source", "path")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact entity text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 class ImpactConceptEntityOutput(ArchitectureComponentEntityOutput):
     kind: Literal["concept"]
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=8)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=8)
+
+    @field_validator("id", "label", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact entity text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 ImpactFocusEntityOutput = Annotated[
@@ -678,29 +730,51 @@ ImpactFocusEntityOutput = Annotated[
 
 class ImpactFocusOutput(_ExtensibleModel):
     entity: ImpactFocusEntityOutput
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactAnchorRelationOutput(ArchitectureConnectionOutput):
     relation: Literal["implemented_by", "configured_by"]
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "source_id", "target_id", "relation", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact relation text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 class ImpactOwnershipRelationOutput(ArchitectureConnectionOutput):
     relation: Literal["implemented_by", "configured_by", "tested_by"]
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "source_id", "target_id", "relation", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact relation text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 class ImpactAnchorOutput(_ExtensibleModel):
     entity: ImpactFileEntityOutput
     mapping: ImpactAnchorRelationOutput | None
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactFocusConceptOutput(_ExtensibleModel):
     entity: ImpactConceptEntityOutput
     mapping: ImpactOwnershipRelationOutput | None
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactLaneOutput(_ExtensibleModel):
@@ -708,7 +782,7 @@ class ImpactLaneOutput(_ExtensibleModel):
     relation: "ImpactL1RelationOutput"
     via_path: str = Field(alias="viaPath", min_length=1)
     recorded_order: int = Field(alias="recordedOrder", ge=1)
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
 
 
 class ImpactSemanticOutput(_ExtensibleModel):
@@ -716,7 +790,7 @@ class ImpactSemanticOutput(_ExtensibleModel):
     focus_concept_id: str = Field(alias="focusConceptId", min_length=1)
     peer: ImpactConceptEntityOutput
     relation: "ImpactL2RelationOutput"
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def validate_endpoints(self) -> "ImpactSemanticOutput":
@@ -731,7 +805,7 @@ class ImpactSemanticOutput(_ExtensibleModel):
         return self
 
 
-class ImpactTaskEvidenceOutput(TourEvidenceOutput):
+class ImpactTaskEvidenceOutput(ImpactEvidenceOutput):
     layer: Literal["L3"]
     source: Literal["task-events"]
 
@@ -739,28 +813,79 @@ class ImpactTaskEvidenceOutput(TourEvidenceOutput):
 class ImpactTaskEntityOutput(FlowTaskEntityOutput):
     evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
 
+    @field_validator("id", "label", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact task text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
+
 
 class ImpactHistoryOutput(_ExtensibleModel):
     entity: ImpactTaskEntityOutput
     status: str = Field(min_length=1)
     relation: "ImpactL3RelationOutput"
     recorded_order: int = Field(alias="recordedOrder", ge=1)
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("status")
+    @classmethod
+    def non_blank_status(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact history status must not be blank")
+        return value
 
 
 class ImpactL1RelationOutput(TourRelationOutput):
     layer: Literal["L1"]
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "source_id", "target_id", "relation", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact relation text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 class ImpactL2RelationOutput(ArchitectureConnectionOutput):
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "source_id", "target_id", "relation", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact relation text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 class ImpactL3RelationOutput(TourRelationOutput):
     layer: Literal["L3"]
     source: Literal["task-events"]
     evidence: list[ImpactTaskEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("id", "source_id", "target_id", "relation", "source")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip(): raise ValueError("impact relation text must not be blank")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def strict_confidence(cls, value: Any) -> Any:
+        return ImpactEvidenceOutput.strict_confidence(value)
 
 
 class ImpactPhysicalTestOutput(_ExtensibleModel):
@@ -770,7 +895,14 @@ class ImpactPhysicalTestOutput(_ExtensibleModel):
     source_concept: None = Field(alias="sourceConcept")
     entity: ImpactFileEntityOutput
     relation: "ImpactPhysicalTestRelationOutput"
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("reason")
+    @classmethod
+    def non_blank_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact test reason must not be blank")
+        return value
 
 
 class ImpactSemanticTestOutput(_ExtensibleModel):
@@ -780,7 +912,14 @@ class ImpactSemanticTestOutput(_ExtensibleModel):
     source_concept: ImpactConceptEntityOutput = Field(alias="sourceConcept")
     entity: ImpactFileEntityOutput
     relation: "ImpactSemanticTestRelationOutput"
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("reason")
+    @classmethod
+    def non_blank_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact test reason must not be blank")
+        return value
 
 
 ImpactTestOutput = Annotated[
@@ -801,14 +940,28 @@ class ImpactRiskOutput(_ExtensibleModel):
     kind: str = Field(min_length=1)
     severity: Literal["low", "medium", "high"]
     summary: str = Field(min_length=1)
-    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(min_length=1, max_length=3)
+
+    @field_validator("kind", "summary")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact risk text must not be blank")
+        return value
 
 
 class ImpactActionOutput(_ExtensibleModel):
     kind: Literal["purpose", "callers", "dependencies", "change", "history"]
     label: str = Field(min_length=1)
     summary: str = Field(min_length=1)
-    evidence: list[TourEvidenceOutput] = Field(max_length=3)
+    evidence: list[ImpactEvidenceOutput] = Field(max_length=3)
+
+    @field_validator("label", "summary")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact action text must not be blank")
+        return value
 
 
 class ImpactDataOutput(_ExtensibleModel):
@@ -825,6 +978,13 @@ class ImpactDataOutput(_ExtensibleModel):
     risks: list[ImpactRiskOutput] = Field(max_length=5)
     actions: list[ImpactActionOutput] = Field(min_length=5, max_length=5)
     stats: ContextStatsOutput
+
+    @field_validator("revision")
+    @classmethod
+    def non_blank_revision(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("impact revision must not be blank")
+        return value
 
     @model_validator(mode="after")
     def validate_actions_and_edges(self) -> "ImpactDataOutput":

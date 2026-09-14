@@ -288,6 +288,35 @@ const badHistoryImpact: any = structuredClone(historyImpact);
 badHistoryImpact.data.history[0].entity.evidence = structuredClone(badHistoryImpact.data.history[0].entity.evidence);
 badHistoryImpact.data.history[0].entity.evidence[0].summary = "different";
 assert(parseImpactView(badHistoryImpact) === undefined, "History entity/relation/wrapper Evidence 必须一致");
+for (const field of ["revision", "history.status", "test.reason", "risk.kind", "risk.summary", "action.summary"] as const) {
+  const blankImpact: any = structuredClone(field === "history.status" ? historyImpact : impactFixture);
+  if (field === "revision") blankImpact.data.revision = "   ";
+  if (field === "history.status") blankImpact.data.history[0].status = "   ";
+  if (field === "test.reason") {
+    blankImpact.data.testRecommendations = [{ basis: "physical-tests", path: impactPeer.path, reason: "   ", sourceConcept: null,
+      entity: impactPeer, relation: impactRelation, evidence: [impactEvidence] }];
+  }
+  if (field === "risk.kind") blankImpact.data.risks[0].kind = "   ";
+  if (field === "risk.summary") blankImpact.data.risks[0].summary = "   ";
+  if (field === "action.summary") blankImpact.data.actions[0].summary = "   ";
+  assert(parseImpactView(blankImpact) === undefined, `Impact 应拒绝空白字段 ${field}`);
+}
+for (const badConfidence of [true, Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.1]) {
+  const badScalar: any = structuredClone(impactFixture);
+  badScalar.data.focus.entity.confidence = badConfidence;
+  assert(parseImpactView(badScalar) === undefined, "Impact confidence 必须为 0..1 finite number");
+}
+for (const badLine of [true, 1.5, 0, -1]) {
+  const badScalar: any = structuredClone(impactFixture);
+  badScalar.data.focus.evidence[0].lineStart = badLine;
+  assert(parseImpactView(badScalar) === undefined, "Impact Evidence 行号必须为正整数");
+}
+const badLineRange: any = structuredClone(impactFixture);
+badLineRange.data.focus.evidence[0].lineEnd = 2;
+assert(parseImpactView(badLineRange) === undefined, "Impact lineEnd 必须依赖 lineStart");
+const blankEvidence: any = structuredClone(impactFixture);
+blankEvidence.data.focus.evidence[0].summary = "   ";
+assert(parseImpactView(blankEvidence) === undefined, "Impact Evidence 文本不得为空白");
 const unsafeTour = structuredClone(tourFixture);
 unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
 assert(parseRepositoryTourView(unsafeTour) === undefined, "无有效证据的 Tour stop 应使畸形视图被拒绝");

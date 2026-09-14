@@ -21,6 +21,7 @@ IMPACT_SEMANTIC_MERGE_LIMIT = 64
 IMPACT_HISTORY_LIMIT = 5
 IMPACT_HISTORY_PER_TARGET_SCAN_LIMIT = 40
 IMPACT_TEST_LIMIT = 5
+IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT = 24
 IMPACT_RAW_EVIDENCE_LIMIT = 64
 IMPACT_FRESHNESS_PATH_LIMIT = 256
 IMPACT_PHYSICAL_LOOKUP_LIMIT = 256
@@ -35,6 +36,12 @@ def _evidence(*, kind: str, summary: str, layer: str, source: str,
 def _file_evidence(path: str) -> dict[str, Any]:
     return _evidence(kind="repository-file", summary="索引中的仓库文件。", layer="L1",
                      source="repository-index", confidence=1.0, path=path)
+
+
+def _concept_evidence(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    """Return node provenance, which is stable across all relations of a concept."""
+    return _evidence(kind="semantic-node", summary="索引中的概念节点。", layer="L2",
+                     source=str(row["source"]), confidence=float(row["confidence"]))
 
 
 def _entity(row: sqlite3.Row | dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
@@ -52,31 +59,29 @@ def _edge(row: sqlite3.Row, evidence: list[dict[str, Any]]) -> dict[str, Any]:
             "confidence": float(row["confidence"]), "evidence": evidence}
 
 
-def _escape_like(value: str) -> str:
-    return value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-
-
 def _resolve_focus(connection: sqlite3.Connection, project_id: str, selector: str) -> sqlite3.Row:
     normalized = selector.replace("\\", "/").strip()
     if not normalized or contains_private_path(normalized):
         raise ValueError("impact selector 无效。")
-    exact = connection.execute(
-        """SELECT * FROM nodes WHERE project_id=? AND
-             ((layer=1 AND kind='file' AND key=?) OR
-              (layer=2 AND kind='concept' AND (key=? OR label=?)))
-             ORDER BY layer, id LIMIT 2""",
-        (project_id, normalized, normalized, normalized),
-    ).fetchall()
-    if exact:
-        return exact[0]
-    pattern = f"%{_escape_like(normalized.lower())}%"
+    file_row = connection.execute(
+        """SELECT /* impact-resolve-file-key */ * FROM nodes
+           WHERE project_id=? AND layer=1 AND kind='file' AND key=? LIMIT 1""",
+        (project_id, normalized),
+    ).fetchone()
+    if file_row is not None:
+        return file_row
+    concept_row = connection.execute(
+        """SELECT /* impact-resolve-concept-key */ * FROM nodes
+           WHERE project_id=? AND layer=2 AND kind='concept' AND key=? LIMIT 1""",
+        (project_id, normalized),
+    ).fetchone()
+    if concept_row is not None:
+        return concept_row
+    # Label lookup uses idx_nodes_label and only succeeds when it is unambiguous.
     matches = connection.execute(
-        """SELECT * FROM nodes WHERE project_id=? AND
-             ((layer=1 AND kind='file') OR (layer=2 AND kind='concept')) AND
-             (lower(key) LIKE ? ESCAPE '!' OR lower(label) LIKE ? ESCAPE '!')
-             ORDER BY CASE WHEN layer=1 THEN 0 ELSE 1 END,
-                      length(key), key COLLATE NOCASE, key, id LIMIT 11""",
-        (project_id, pattern, pattern),
+        """SELECT /* impact-resolve-concept-label */ * FROM nodes INDEXED BY idx_nodes_label
+           WHERE project_id=? AND label=? AND layer=2 AND kind='concept' LIMIT 2""",
+        (project_id, normalized),
     ).fetchall()
     if len(matches) != 1:
         raise LookupError("找不到唯一的影响分析目标。")
@@ -163,6 +168,23 @@ def _semantic_rows(connection: sqlite3.Connection, project_id: str,
             WHERE edge.project_id=? AND edge.layer=2 AND edge.{endpoint}=?
             ORDER BY edge.rowid DESC LIMIT ?""",
         (project_id, concept_id, IMPACT_SEMANTIC_PER_DIRECTION_SCAN_LIMIT + 1),
+    ).fetchall()
+
+
+def _tested_by_rows(connection: sqlite3.Connection, project_id: str,
+                    concept_id: str) -> list[sqlite3.Row]:
+    return connection.execute(
+        """SELECT /* impact-tested-by */ edge.*, edge.rowid AS recorded_order,
+                  test.id AS test_id, test.key AS test_path,
+                  test.label AS test_label, test.source AS test_source,
+                  test.confidence AS test_confidence
+           FROM edges edge INDEXED BY idx_edges_source
+           JOIN nodes test ON test.id=edge.target_id
+             AND test.layer=1 AND test.kind='file'
+           WHERE edge.project_id=? AND edge.layer=2 AND edge.source_id=?
+             AND edge.relation='tested_by'
+           ORDER BY edge.rowid DESC LIMIT ?""",
+        (project_id, concept_id, IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT + 1),
     ).fetchall()
 
 
@@ -259,21 +281,23 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
         if len(semantic_rows) > IMPACT_SEMANTIC_MERGE_LIMIT:
             warnings.append({"code": "IMPACT_SEMANTIC_MERGE_TRUNCATED", "message": f"Semantic 合并候选最多保留 {IMPACT_SEMANTIC_MERGE_LIMIT} 项。", "evidence": []})
         semantic_rows = semantic_rows[:IMPACT_SEMANTIC_MERGE_LIMIT]
+        tested_by_candidates: list[sqlite3.Row] = []
+        tested_by_scan_truncated = False
+        for concept_id in sorted(focus_concept_ids):
+            rows = _tested_by_rows(connection, project_id, concept_id)
+            tested_by_scan_truncated = tested_by_scan_truncated or (
+                len(rows) > IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT
+            )
+            tested_by_candidates.extend(rows[:IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT])
         tested_by_rows: list[sqlite3.Row] = []
-        if focus_concept_ids:
-            marks = ",".join("?" for _ in focus_concept_ids)
-            tested_by_rows = connection.execute(
-                f"""SELECT /* impact-tested-by */ edge.*,
-                           test.id AS test_id, test.key AS test_path,
-                           test.label AS test_label, test.source AS test_source,
-                           test.confidence AS test_confidence
-                    FROM edges edge JOIN nodes test ON test.id=edge.target_id
-                    WHERE edge.project_id=? AND edge.layer=2
-                      AND edge.relation='tested_by' AND edge.source_id IN ({marks})
-                      AND test.layer=1 AND test.kind='file'
-                    ORDER BY edge.rowid DESC LIMIT ?""",
-                (project_id, *focus_concept_ids, IMPACT_TEST_LIMIT + 1),
-            ).fetchall()
+        seen_tested_by: set[str] = set()
+        for row in sorted(tested_by_candidates,
+                          key=lambda item: (-int(item["recorded_order"]), str(item["id"]))):
+            if str(row["id"]) not in seen_tested_by:
+                seen_tested_by.add(str(row["id"]))
+                tested_by_rows.append(row)
+        if tested_by_scan_truncated:
+            warnings.append({"code": "IMPACT_TESTED_BY_SCAN_TRUNCATED", "message": f"每个焦点概念最多扫描 {IMPACT_TESTED_BY_PER_CONCEPT_SCAN_LIMIT} 条 tested_by 记录。", "evidence": []})
 
         anchor_freshness_paths = [str(row["key"]) for row in safe_candidates]
         freshness_paths = list(anchor_freshness_paths)
@@ -371,31 +395,33 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
             warnings.append({"code": "IMPACT_PHYSICAL_TRUNCATED", "message": "物理影响按固定展示上限截断。", "evidence": []})
 
         focus_evidence = ([_file_evidence(str(focus["key"]))] if int(focus["layer"]) == 1 else
-                          [_evidence(kind="semantic-node", summary="索引中的概念节点。", layer="L2",
-                                     source=str(focus["source"]), confidence=float(focus["confidence"]))])
+                          [_concept_evidence(focus)])
         focus_entity = _entity(focus, focus_evidence)
         focus_concepts = []
         focus_concept_by_id: dict[str, dict[str, Any]] = {}
         for row, mapping_row in focus_concept_rows:
+            concept_ev = [_concept_evidence(row)]
             if mapping_row is None:
-                concept_ev = focus_evidence
                 mapping = None
             else:
                 mapping_data = {"relation": mapping_row["mapping_relation"],
                                 "source": mapping_row["mapping_source"],
                                 "confidence": mapping_row["mapping_confidence"]}
-                concept_ev = _mapping_evidence(mapping_data, str(focus["key"]))
+                mapping_ev = _mapping_evidence(mapping_data, str(focus["key"]))
                 mapping = {"id": str(mapping_row["mapping_id"]),
                            "sourceId": str(mapping_row["mapping_source_id"]),
                            "targetId": str(mapping_row["mapping_target_id"]),
                            "relation": str(mapping_row["mapping_relation"]), "layer": "L2",
                            "source": str(mapping_row["mapping_source"]),
                            "confidence": float(mapping_row["mapping_confidence"]),
-                           "evidence": concept_ev}
+                           "evidence": mapping_ev}
             entry = {"entity": _entity(row, concept_ev), "mapping": mapping,
-                     "evidence": concept_ev}
+                     "evidence": mapping["evidence"] if mapping is not None else concept_ev}
             focus_concepts.append(entry)
             focus_concept_by_id[str(row["id"])] = entry
+        concept_entity_cache = {
+            concept_id: entry["entity"] for concept_id, entry in focus_concept_by_id.items()
+        }
 
         component_paths: dict[str, set[str]] = defaultdict(set)
         component_file_ids: dict[tuple[str, str], str] = {}
@@ -498,11 +524,16 @@ def impact_view_data(database: Database, project: sqlite3.Row, selector: str) ->
             if not ev:
                 semantic_evidence_dropped = True
                 continue
-            peer = {"id": str(row["target_id"] if outgoing else row["source_id"]),
-                    "kind": "concept", "label": str(row["target_label"] if outgoing else row["source_label"]),
-                    "layer": "L2", "source": str(row["target_node_source"] if outgoing else row["source_node_source"]),
-                    "confidence": float(row["target_node_confidence"] if outgoing else row["source_node_confidence"]),
-                    "evidence": ev}
+            peer_row = {
+                "id": str(row["target_id"] if outgoing else row["source_id"]),
+                "kind": "concept", "label": str(row["target_label"] if outgoing else row["source_label"]),
+                "layer": 2, "source": str(row["target_node_source"] if outgoing else row["source_node_source"]),
+                "confidence": float(row["target_node_confidence"] if outgoing else row["source_node_confidence"]),
+            }
+            peer_id = str(peer_row["id"])
+            peer = concept_entity_cache.setdefault(
+                peer_id, _entity(peer_row, [_concept_evidence(peer_row)])
+            )
             semantic.append({"direction": "outgoing" if outgoing else "incoming",
                              "focusConceptId": focus_id, "peer": peer,
                              "relation": _edge(row, ev), "evidence": ev})

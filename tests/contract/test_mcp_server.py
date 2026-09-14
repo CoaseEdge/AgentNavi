@@ -236,7 +236,7 @@ import agentnavi.mcp.server
 
         async def verify(home: Path) -> None:
             from agentnavi.config import Settings
-            from agentnavi.database import ensure_database
+            from agentnavi.database import Database, ensure_database
             from agentnavi.engine import scan_project
             from agentnavi.registry import add_project
 
@@ -256,6 +256,20 @@ import agentnavi.mcp.server
             database = ensure_database(Settings.load(home))
             project = add_project(database, project_root, project_id="stdio-fixture")
             scan_project(database, project, full=True)
+            now = "2026-09-15T10:00:00+00:00"
+            with database.connect() as connection:
+                connection.execute(
+                    "INSERT INTO tasks(id,project_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                    ("stdio-task", "stdio-fixture", "更新说明", "completed", now, now),
+                )
+                task_node = Database.upsert_node(connection, project_id="stdio-fixture", layer=3,
+                                                 kind="task", key="stdio-task", label="更新说明",
+                                                 source="task-events")
+                readme = Database.node_id("stdio-fixture", 1, "file", "README.md")
+                Database.upsert_edge(connection, project_id="stdio-fixture", layer=3,
+                                     source_id=task_node, relation="modified", target_id=readme,
+                                     source="task-events")
+                connection.commit()
             server = StdioServerParameters(
                 command=sys.executable,
                 args=["-m", "agentnavi", "--home", str(home), "mcp"],
@@ -344,6 +358,13 @@ import agentnavi.mcp.server
                 )
                 self.assertNotIn(str(project_root.resolve()), str(impact.model_dump(by_alias=True)))
                 self.assertIn("Incoming → Focus → Outgoing", impact.content[0].text)
+                self.assertEqual(len(impact.structured_content["data"]["history"]), 1)
+                visual_impact = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "impact", "query": "README.md", "project_id": "stdio-fixture"},
+                )
+                self.assertFalse(visual_impact.is_error)
+                self.assertEqual(len(visual_impact.structured_content["data"]["history"]), 1)
                 tour = await client.call_tool(
                     "agentnavi_visualize",
                     {"view": "repo-tour", "project_id": "stdio-fixture"},

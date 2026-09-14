@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from agentnavi.config import Settings
 from agentnavi.database import Database, ensure_database
-from agentnavi.impact_view import _semantic_rows, impact_view_data
+from agentnavi.impact_view import _resolve_focus, _semantic_rows, _tested_by_rows, impact_view_data
 from agentnavi.mcp.adapters.impact import impact_text, impact_to_view
 
 
@@ -109,6 +109,31 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertEqual(data["outgoing"], [])
         self.assertEqual(data["semantic"], [])
         self.assertTrue(any(item["code"] == "IMPACT_SEMANTIC_EVIDENCE_INSUFFICIENT" for item in data["warnings"]))
+
+    def test_semantic_peer_reuses_canonical_node_evidence_across_relations_and_directions(self) -> None:
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        dependency = Database.node_id("fixture", 2, "concept", "dependency")
+        focus_file = Database.node_id("fixture", 1, "file", "src/focus.py")
+        dependency_file = Database.node_id("fixture", 1, "file", "src/dependency.py")
+        with self.database.connect() as connection:
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus,
+                                 relation="related_to", target_id=dependency,
+                                 source="semantic-heuristic", confidence=.6,
+                                 data={"evidence": [{"source": "src/focus.py", "target": "src/dependency.py", "physical_relation": "imports"}]})
+            Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=dependency_file,
+                                 relation="imports", target_id=focus_file, source="extractor")
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=dependency,
+                                 relation="related_to", target_id=focus,
+                                 source="semantic-heuristic", confidence=.65,
+                                 data={"evidence": [{"source": "src/dependency.py", "target": "src/focus.py", "physical_relation": "imports"}]})
+            connection.commit()
+        core = impact_view_data(self.database, self.project, "Focus")
+        peers = [item["peer"] for item in core["semantic"] if item["peer"]["id"] == dependency]
+        self.assertEqual(len(peers), 3)
+        self.assertTrue(all(peer["evidence"] == peers[0]["evidence"] for peer in peers))
+        self.assertTrue(all(peer["evidence"] != item["evidence"] for peer, item in
+                            ((entry["peer"], entry) for entry in core["semantic"])))
+        impact_to_view(core)
 
     def test_adapter_and_text_are_independent_strict_projections(self) -> None:
         core = impact_view_data(self.database, self.project, "Focus")
@@ -260,6 +285,17 @@ class ImpactViewTestCase(unittest.TestCase):
         history["entity"] = task
         with self.assertRaises(ValueError):
             impact_to_view({**core, "history": [history]})
+        for value in (True, float("nan"), 1.25):
+            broken_evidence = {**core["focus"]["evidence"][0], "lineStart": value}
+            with self.subTest(line=value), self.assertRaises((TypeError, ValueError)):
+                impact_to_view({**core, "focus": {**core["focus"], "evidence": [broken_evidence]}})
+        for value in (True, float("nan"), 1.1, -0.1):
+            broken_entity = {**core["focus"]["entity"], "confidence": value}
+            with self.subTest(confidence=value), self.assertRaises((TypeError, ValueError)):
+                impact_to_view({**core, "focus": {**core["focus"], "entity": broken_entity}})
+        blank = {**core, "revision": "   "}
+        with self.assertRaises(ValueError):
+            impact_to_view(blank)
 
     def test_large_lane_population_uses_endpoint_index_and_constant_scan_budget(self) -> None:
         focus_id = Database.node_id("fixture", 1, "file", "src/focus.py")
@@ -358,6 +394,78 @@ class ImpactViewTestCase(unittest.TestCase):
         self.assertEqual(sum("impact-semantic-outgoing" in sql for sql in statements), 1)
         self.assertEqual(sum("impact-physical-lookup-exact" in sql for sql in statements), 1)
         self.assertEqual(data["semantic"][0]["peer"]["label"], "Dependency")
+
+    def test_focus_resolution_uses_exact_indexes_with_large_unrelated_population(self) -> None:
+        now = "2026-09-15T10:00:00+00:00"
+        with self.database.connect() as connection:
+            connection.executemany(
+                "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"resolve-bulk-{index}", "fixture", 2, "concept", f"resolve-{index}",
+                  f"Resolve {index}", "{}", .8, "semantic-heuristic", now, now)
+                 for index in range(10000)],
+            )
+            plans = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM nodes INDEXED BY idx_nodes_label WHERE project_id=? AND label=? AND layer=2 AND kind='concept' LIMIT 2",
+                ("fixture", "Focus"),
+            ).fetchall()
+            vm_steps = 0
+            def count_vm() -> int:
+                nonlocal vm_steps
+                vm_steps += 1
+                return 0
+            connection.set_progress_handler(count_vm, 1)
+            resolved = _resolve_focus(connection, "fixture", "Focus")
+            connection.set_progress_handler(None, 0)
+            connection.commit()
+        detail = " ".join(str(row[3]).upper() for row in plans)
+        self.assertIn("IDX_NODES_LABEL", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+        self.assertLess(vm_steps, 300)
+        self.assertEqual(resolved["key"], "focus")
+        data = impact_view_data(self.database, self.project, "src/focus.py")
+        self.assertEqual(data["focus"]["entity"]["path"], "src/focus.py")
+
+    def test_tested_by_lookup_is_per_concept_index_bounded_and_warns(self) -> None:
+        now = "2026-09-15T10:00:00+00:00"
+        focus = Database.node_id("fixture", 2, "concept", "focus")
+        with self.database.connect() as connection:
+            target = Database.node_id("fixture", 1, "file", "tests/test_focus.py")
+            connection.executemany(
+                "INSERT INTO nodes(id,project_id,layer,kind,key,label,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"tested-bulk-{index}", "fixture", 2, "concept", f"tested-bulk-{index}",
+                  f"Tested bulk {index}", "{}", .8, "semantic-heuristic", now, now)
+                 for index in range(5000)],
+            )
+            connection.executemany(
+                "INSERT INTO edges(id,project_id,layer,source_id,relation,target_id,data_json,confidence,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"tested-edge-{index}", "fixture", 2, f"tested-bulk-{index}", "tested_by",
+                  target, "{}", .8, "semantic-heuristic", now, now) for index in range(5000)],
+            )
+            for index in range(25):
+                test_file = self._add_file(connection, f"checks/tested_{index:02d}.py")
+                Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus,
+                                     relation="tested_by", target_id=test_file,
+                                     source="semantic-heuristic", confidence=.8)
+            plan = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT edge.rowid FROM edges edge INDEXED BY idx_edges_source WHERE edge.project_id=? AND edge.layer=2 AND edge.source_id=? AND edge.relation='tested_by' ORDER BY edge.rowid DESC LIMIT 25",
+                ("fixture", focus),
+            ).fetchall()
+            vm_steps = 0
+            def count_vm() -> int:
+                nonlocal vm_steps
+                vm_steps += 1
+                return 0
+            connection.set_progress_handler(count_vm, 1)
+            rows = _tested_by_rows(connection, "fixture", focus)
+            connection.set_progress_handler(None, 0)
+            connection.commit()
+        detail = " ".join(str(row[3]).upper() for row in plan)
+        self.assertIn("IDX_EDGES_SOURCE", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+        self.assertLess(vm_steps, 1500)
+        self.assertEqual(len(rows), 25)
+        data = impact_view_data(self.database, self.project, "Focus")
+        self.assertIn("IMPACT_TESTED_BY_SCAN_TRUNCATED", {item["code"] for item in data["warnings"]})
 
     def test_semantic_per_concept_scan_budget_is_visible(self) -> None:
         focus = Database.node_id("fixture", 2, "concept", "focus")
