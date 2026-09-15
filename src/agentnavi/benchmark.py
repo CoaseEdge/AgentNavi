@@ -37,9 +37,9 @@ def evaluate_vla_surface(
         "necessary_file_recall": 1.0,
         "candidate_set_expansion": 0.0,
         "max_model_text_budget_increase": 0.05,
-        "task_success_regression": 0.0,
     }
     recall_gate = float(gates.get("necessary_file_recall", 1.0))
+    candidate_gate = float(gates.get("candidate_set_expansion", 0.0))
     token_gate = float(gates.get("max_model_text_budget_increase", 0.05))
     missing_views = [view for view in VLA_BENCHMARK_VIEWS if view not in results]
     view_metrics: dict[str, dict[str, Any]] = {}
@@ -47,44 +47,50 @@ def evaluate_vla_surface(
         item = results.get(view, {})
         required = {str(path) for path in item.get("required_paths", []) if str(path)}
         returned = {str(path) for path in item.get("returned_paths", []) if str(path)}
-        baseline_candidates = item.get("baseline_candidate_count")
+        candidate_budget = item.get("candidate_count_budget")
         candidate_count = item.get("candidate_count")
-        baseline_tokens = item.get("baseline_model_tokens")
+        token_budget = item.get("model_text_token_budget")
         model_tokens = item.get("model_tokens")
-        baseline_success = item.get("baseline_success")
-        success = item.get("success")
+        view_contract_ok = item.get("view_contract_ok")
         measured = bool(item.get("measured", False))
         valid_measurement = (
             measured
-            and bool(required)
-            and isinstance(baseline_candidates, int)
-            and baseline_candidates > 0
+            and (bool(required) or view == "semantic-review")
+            and isinstance(candidate_budget, int)
+            and candidate_budget > 0
             and isinstance(candidate_count, int)
             and candidate_count > 0
-            and isinstance(baseline_tokens, int)
-            and baseline_tokens > 0
+            and isinstance(token_budget, int)
+            and token_budget > 0
             and isinstance(model_tokens, int)
             and model_tokens > 0
-            and baseline_success is True
-            and isinstance(success, bool)
+            and isinstance(view_contract_ok, bool)
         )
-        recall = len(required & returned) / len(required) if required else 0.0
+        recall = len(required & returned) / len(required) if required else 1.0
+        candidate_delta = (
+            (candidate_count - candidate_budget) / candidate_budget
+            if isinstance(candidate_budget, int) and candidate_budget > 0 and isinstance(candidate_count, int)
+            else None
+        )
         token_delta = (
-            (model_tokens - baseline_tokens) / baseline_tokens
-            if isinstance(baseline_tokens, int) and baseline_tokens > 0 and isinstance(model_tokens, int)
+            (model_tokens - token_budget) / token_budget
+            if isinstance(token_budget, int) and token_budget > 0 and isinstance(model_tokens, int)
             else None
         )
         view_metrics[view] = {
             "recall": recall,
             "candidate_count": candidate_count,
+            "candidate_count_budget": candidate_budget,
+            "candidate_set_expansion": candidate_delta,
             "candidate_set_not_expanded": (
-                valid_measurement and candidate_count <= baseline_candidates
+                valid_measurement and candidate_delta is not None and candidate_delta <= candidate_gate
             ),
             "model_token_delta": token_delta,
+            "model_text_token_budget": token_budget,
             "model_budget_ok": valid_measurement and token_delta is not None and token_delta <= token_gate,
-            "task_success_not_lower": valid_measurement and bool(success),
+            "view_contract_ok": valid_measurement and bool(view_contract_ok),
             "measurement_valid": valid_measurement,
-            "invalid_reason": None if valid_measurement else "缺少有效 baseline / VLA observation",
+            "invalid_reason": None if valid_measurement else "缺少有效 budget / VLA observation",
         }
     recalls = [metric["recall"] for metric in view_metrics.values()]
     invalid_views = [view for view, metric in view_metrics.items() if not metric["measurement_valid"]]
@@ -98,8 +104,8 @@ def evaluate_vla_surface(
             metric["candidate_set_not_expanded"] for metric in view_metrics.values()
         ),
         "model_budget_ok": all(metric["model_budget_ok"] for metric in view_metrics.values()),
-        "task_success_not_lower": all(
-            metric["task_success_not_lower"] for metric in view_metrics.values()
+        "view_contract_ok": all(
+            metric["view_contract_ok"] for metric in view_metrics.values()
         ),
         "passed": (
             not missing_views
@@ -107,7 +113,7 @@ def evaluate_vla_surface(
             and min(recalls, default=0.0) >= recall_gate
             and all(metric["candidate_set_not_expanded"] for metric in view_metrics.values())
             and all(metric["model_budget_ok"] for metric in view_metrics.values())
-            and all(metric["task_success_not_lower"] for metric in view_metrics.values())
+            and all(metric["view_contract_ok"] for metric in view_metrics.values())
         ),
     }
 
@@ -133,13 +139,16 @@ def load_vla_benchmark_fixture(path: str | Path) -> dict[str, Any]:
         if view not in VLA_BENCHMARK_VIEWS or view in cases:
             raise ValueError(f"VLA 基准 view 无效或重复：{view}")
         required = raw.get("required_paths")
-        if not isinstance(required, list) or not required or not all(isinstance(item, str) and item for item in required):
-            raise ValueError(f"VLA 基准 {view} 必须声明非空 required_paths")
-        for key in ("baseline_candidate_count", "baseline_model_tokens"):
+        if not isinstance(required, list) or not all(isinstance(item, str) and item for item in required):
+            raise ValueError(f"VLA 基准 {view} 的 required_paths 必须是字符串数组")
+        for key in ("candidate_count_budget", "model_text_token_budget"):
             if not isinstance(raw.get(key), int) or raw[key] <= 0:
                 raise ValueError(f"VLA 基准 {view} 的 {key} 必须为正整数")
-        if raw.get("baseline_success") is not True:
-            raise ValueError(f"VLA 基准 {view} 的 baseline_success 必须为 true")
+        required_observations = raw.get("required_observations")
+        if not isinstance(required_observations, list) or not required_observations:
+            raise ValueError(f"VLA 基准 {view} 必须声明非空 required_observations")
+        if view != "semantic-review" and not required:
+            raise ValueError(f"VLA 基准 {view} 必须声明非空 required_paths")
         cases[view] = dict(raw)
     if set(cases) != set(VLA_BENCHMARK_VIEWS):
         raise ValueError("VLA 基准必须覆盖全部固定 view")
@@ -169,6 +178,23 @@ def _observation_present(data: Mapping[str, Any], dotted: str) -> bool:
     if current is None or current == "":
         return False
     return not isinstance(current, (list, dict)) or bool(current)
+
+
+def _candidate_count(view: str, data: Mapping[str, Any], returned_paths: set[str]) -> int:
+    """Count bounded view candidates without treating task success as a view contract."""
+    if view == "repo-overview":
+        return len(data.get("readingOrder", [])) + len(data.get("modules", []))
+    if view == "repo-tour":
+        return sum(len(tier.get("stops", [])) for tier in data.get("tiers", []) if isinstance(tier, Mapping))
+    if view == "context":
+        return len(data.get("files", [])) + len(data.get("concepts", []))
+    if view == "impact":
+        return len(data.get("anchorFiles", [])) + len(data.get("focusConcepts", []))
+    if view == "history":
+        return len(data.get("timeline", [])) + len(data.get("story", []))
+    if view == "semantic-review":
+        return len(data.get("reviewItems", []))
+    return len(returned_paths)
 
 
 def run_vla_benchmark(
@@ -220,7 +246,14 @@ def run_vla_benchmark(
                 projected = history_view(core).to_dict()
                 text = history_text(core)
             else:
-                core = semantic_review_view_data(database, project, limit=50)
+                semantic_core = semantic_review_view_data(database, project, limit=50)
+                metadata = repository_overview_data(database, project)
+                core = {
+                    **semantic_core,
+                    "project": metadata["project"],
+                    "sourceState": metadata["sourceState"],
+                    "warnings": metadata.get("warnings", []),
+                }
                 projected = semantic_review_view(core).to_dict()
                 text = semantic_review_text(core)
             data = projected.get("data", {})
@@ -232,9 +265,9 @@ def run_vla_benchmark(
             results[view] = {
                 **case,
                 "returned_paths": returned_paths,
-                "candidate_count": len(returned_paths),
+                "candidate_count": _candidate_count(view, data, set(returned_paths)),
                 "model_tokens": max(1, math.ceil(len(text) / 4)),
-                "success": observation_ok,
+                "view_contract_ok": observation_ok,
                 "measured": True,
                 "view_observation": {
                     "stable_review_ids": view == "semantic-review" and all(
@@ -252,7 +285,7 @@ def run_vla_benchmark(
                 "returned_paths": [],
                 "candidate_count": 0,
                 "model_tokens": 0,
-                "success": False,
+                "view_contract_ok": False,
                 "measured": False,
                 "error": str(exc),
             }

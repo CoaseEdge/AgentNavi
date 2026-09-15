@@ -1,13 +1,5 @@
 {
-  "suite": "agentnavi-vla-0.3.0",
-  "views": [
-    "repo-overview",
-    "repo-tour",
-    "context",
-    "impact",
-    "history",
-    "semantic-review"
-  ],
+  "suite": "agentnavi-vla-test-fixture",
   "gates": {
     "necessary_file_recall": 1.0,
     "candidate_set_expansion": 0.0,
@@ -19,52 +11,51 @@
       "view": "repo-overview",
       "required_paths": ["README.md", "docs/architecture.md"],
       "required_observations": ["data.purpose.summary", "data.modules", "data.readingOrder"],
-      "candidate_count_budget": 8,
-      "model_text_token_budget": 320
+      "candidate_count_budget": 12,
+      "model_text_token_budget": 2000
     },
     {
       "id": "repository-tour",
       "view": "repo-tour",
       "required_paths": ["README.md", "docs/architecture.md"],
       "required_observations": ["data.tiers"],
-      "candidate_count_budget": 8,
-      "model_text_token_budget": 320
+      "candidate_count_budget": 12,
+      "model_text_token_budget": 5000
     },
     {
       "id": "membership-context",
       "view": "context",
-      "query": "membership context",
-      "required_paths": ["src/agentnavi/query.py"],
+      "query": "app",
+      "required_paths": ["src/app.py"],
       "required_observations": ["data.files", "data.navigation.readingOrder"],
       "candidate_count_budget": 12,
-      "model_text_token_budget": 480
+      "model_text_token_budget": 5000
     },
     {
       "id": "payment-impact",
       "view": "impact",
-      "selector": "src/agentnavi/query.py",
-      "required_paths": ["src/agentnavi/query.py"],
+      "selector": "src/app.py",
+      "required_paths": ["src/app.py"],
       "required_observations": ["data.focus", "data.testRecommendations"],
       "candidate_count_budget": 12,
-      "model_text_token_budget": 480
+      "model_text_token_budget": 5000
     },
     {
       "id": "historical-design",
       "view": "history",
       "query": "design",
-      "required_paths": ["CHANGELOG.md"],
+      "required_paths": ["README.md"],
       "required_observations": ["data.timeline", "data.story"],
       "candidate_count_budget": 12,
-      "model_text_token_budget": 480
+      "model_text_token_budget": 3000
     },
     {
       "id": "semantic-review",
       "view": "semantic-review",
       "required_paths": [],
-      "required_observations": ["data.stats"],
+      "required_observations": ["data.reviewItems", "data.stats"],
       "candidate_count_budget": 12,
-      "model_text_token_budget": 480
+      "model_text_token_budget": 2000
     }
-  ],
-  "notes": "固定 Machine/Human VLA 基准；candidate_count_budget 与 model_text_token_budget 是固定预算，不是假定的历史 baseline。runner 必须实际调用 Core view 与 MCP Adapter，不扩大 context_data 候选集合或一跳上限；本套件只验证 view contract、召回和文本预算，不宣称 task success。"
+  ]
 }

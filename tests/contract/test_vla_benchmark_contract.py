@@ -14,7 +14,9 @@ class VLABenchmarkContractTest(unittest.TestCase):
         self.assertEqual({case["view"] for case in data["cases"]}, {
             "repo-overview", "repo-tour", "context", "impact", "history", "semantic-review"
         })
-        self.assertTrue(all(case["baseline_success"] for case in data["cases"]))
+        self.assertTrue(all(case["candidate_count_budget"] > 0 for case in data["cases"]))
+        self.assertTrue(all(case["model_text_token_budget"] > 0 for case in data["cases"]))
+        self.assertTrue(all(case["required_observations"] for case in data["cases"]))
 
 
 if __name__ == "__main__":

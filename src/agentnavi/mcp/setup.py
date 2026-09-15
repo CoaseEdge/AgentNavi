@@ -30,11 +30,24 @@ def build_setup_config(*, target: str, home: str | Path | None = None) -> dict[s
     if target == "claude":
         return {"mcpServers": {"agentnavi": server}}
     if target == "vscode":
-        return {"servers": {"agentnavi": server}}
-    return {"servers": {"agentnavi": server}}
+        return {"servers": {"agentnavi": {"type": "stdio", **server}}}
+    # The public renderer emits TOML for Codex; this mapping remains useful to
+    # callers that need to inspect the same semantic configuration.
+    return {"mcp_servers": {"agentnavi": server}}
 
 
 def render_setup_config(*, target: str, home: str | Path | None = None) -> str:
+    if target == "codex":
+        server = build_setup_config(target=target, home=home)["mcp_servers"]["agentnavi"]
+        command = json.dumps(server["command"], ensure_ascii=False)
+        args = ",\n  ".join(json.dumps(value, ensure_ascii=False) for value in server["args"])
+        return (
+            "[mcp_servers.agentnavi]\n"
+            f"command = {command}\n"
+            "args = [\n"
+            f"  {args}\n"
+            "]\n"
+        )
     return json.dumps(build_setup_config(target=target, home=home), ensure_ascii=False, indent=2)
 
 
