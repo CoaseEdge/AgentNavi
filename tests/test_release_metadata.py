@@ -30,6 +30,11 @@ class ReleaseMetadataTestCase(unittest.TestCase):
         changelog = (self.root / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(f"## {version} —", changelog)
 
+    def test_vla_skill_source_and_packaged_copy_stay_identical(self) -> None:
+        source = (self.root / "integrations" / "vla" / "SKILL.md").read_text(encoding="utf-8")
+        packaged = (self.root / "src" / "agentnavi" / "resources" / "skills" / "vla" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(source, packaged)
+
     def test_vla_release_metadata_is_current_and_builds_artifacts(self) -> None:
         readme = (self.root / "README.md").read_text(encoding="utf-8")
         self.assertIn("version-0.3.0", readme)
