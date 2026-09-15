@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+import ipaddress
 import json
 import shutil
 import sqlite3
@@ -720,12 +721,31 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 
 def command_mcp(args: argparse.Namespace) -> int:
-    """启动本地 MCP stdio Server；SDK 保持可选且延迟导入。"""
+    """启动本地 MCP Server；SDK 保持可选且延迟导入。"""
 
-    from .mcp.server import run_stdio
+    if getattr(args, "mcp_command", None) == "setup":
+        from .mcp.setup import render_setup_config
+
+        print(render_setup_config(target=args.target, home=args.home))
+        return 0
+
+    from .mcp.server import run_http, run_stdio
 
     try:
-        run_stdio(home=args.home)
+        if args.transport == "http":
+            try:
+                is_loopback = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
+            except ValueError:
+                is_loopback = False
+            if not is_loopback and not args.allow_remote:
+                print(
+                    "为安全起见，HTTP 默认只允许 loopback；使用 --allow-remote 显式确认非本机暴露。",
+                    file=sys.stderr,
+                )
+                return 2
+            run_http(home=args.home, host=args.host, port=args.port)
+        else:
+            run_stdio(home=args.home)
     except ModuleNotFoundError as exc:
         if exc.name != "mcp":
             raise
@@ -748,7 +768,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    mcp_parser = subparsers.add_parser("mcp", help="通过 stdio 启动 MCP Server")
+    mcp_parser = subparsers.add_parser("mcp", help="启动 MCP Server")
+    mcp_parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+    mcp_parser.add_argument("--host", default="127.0.0.1", help="HTTP 监听地址；默认仅绑定本机")
+    mcp_parser.add_argument("--port", type=int, default=8000)
+    mcp_parser.add_argument("--allow-remote", action="store_true", help="允许 HTTP 绑定非 loopback 地址")
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
+    setup_parser = mcp_sub.add_parser("setup", help="生成 Host 配置示例，不修改第三方配置")
+    setup_parser.add_argument("--target", choices=["claude", "vscode", "codex", "generic"], required=True)
     mcp_parser.set_defaults(func=command_mcp)
 
     init_parser = subparsers.add_parser("init", help="初始化外部工作区和 SQLite 数据库")

@@ -17,11 +17,13 @@ class MCPCLIContractTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[2]
 
-    def test_parser_exposes_stdio_mcp_command_without_transport_options(self) -> None:
+    def test_parser_defaults_to_stdio_and_exposes_http_options(self) -> None:
         args = build_parser().parse_args(["mcp"])
 
         self.assertEqual(args.command, "mcp")
-        self.assertFalse(hasattr(args, "transport"))
+        self.assertEqual(args.transport, "stdio")
+        self.assertEqual(args.host, "127.0.0.1")
+        self.assertEqual(args.port, 8000)
 
     def test_missing_optional_extra_writes_only_a_safe_stderr_hint(self) -> None:
         missing_sdk = ModuleNotFoundError("No module named 'mcp'", name="mcp")
@@ -100,6 +102,30 @@ class MCPCLIContractTestCase(unittest.TestCase):
 
         self.assertEqual(result, 0)
         run_stdio.assert_called_once_with(home=temporary_directory)
+
+    def test_http_transport_is_loopback_by_default(self) -> None:
+        with patch("agentnavi.mcp.server.run_http") as run_http:
+            result = main(["mcp", "--transport", "http"])
+
+        self.assertEqual(result, 0)
+        run_http.assert_called_once_with(home=None, host="127.0.0.1", port=8000)
+
+    def test_non_loopback_http_requires_explicit_opt_in(self) -> None:
+        stderr = io.StringIO()
+        with patch("agentnavi.mcp.server.run_http") as run_http:
+            with contextlib.redirect_stderr(stderr):
+                result = main(["mcp", "--transport", "http", "--host", "0.0.0.0"])
+
+        self.assertEqual(result, 2)
+        run_http.assert_not_called()
+        self.assertIn("--allow-remote", stderr.getvalue())
+
+    def test_non_loopback_http_can_be_explicitly_enabled(self) -> None:
+        with patch("agentnavi.mcp.server.run_http") as run_http:
+            result = main(["mcp", "--transport", "http", "--host", "0.0.0.0", "--allow-remote"])
+
+        self.assertEqual(result, 0)
+        run_http.assert_called_once_with(home=None, host="0.0.0.0", port=8000)
 
 
 if __name__ == "__main__":
