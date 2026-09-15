@@ -4,6 +4,7 @@ import {
   parseArchitectureView,
   parseContextView,
   parseFlowView,
+  parseImpactView,
   parsePublicError,
   parseRepositoryOverviewView,
   parseRepositoryTourView,
@@ -236,6 +237,91 @@ const tourFixture = {
 assert(parseRepositoryTourView(tourFixture)?.data.tiers.length === 3, "应解析固定三档 Tour");
 assert(parseAgentNaviView(tourFixture)?.view === "repo-tour", "通用 parser 应分派 Tour");
 assert(parseRequestedView({ view: "repo-tour" }) === "repo-tour", "应识别 Tour 请求");
+
+const impactEvidence = { kind: "physical-relation", summary: "caller.py imports focus.py", layer: "L1", source: "extractor", confidence: 1, path: "src/caller.py" };
+const impactFocus = { id: "file:focus", kind: "file", label: "focus.py", path: "src/focus.py", layer: "L1", source: "repository", confidence: 1, evidence: [impactEvidence] };
+const impactPeer = { id: "file:caller", kind: "file", label: "caller.py", path: "src/caller.py", layer: "L1", source: "repository", confidence: 1, evidence: [impactEvidence] };
+const impactRelation = { id: "edge:imports", sourceId: "file:caller", targetId: "file:focus", relation: "imports", layer: "L1", source: "extractor", confidence: 1, evidence: [impactEvidence] };
+const impactFixture = {
+  schemaVersion: "agentnavi.vla.v1", view: "impact",
+  project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" },
+  data: { layout: "incoming-focus-outgoing", revision: "impact-1", focus: { entity: impactFocus, evidence: [impactEvidence] },
+    anchorFiles: [{ entity: impactFocus, mapping: null, evidence: [impactEvidence] }], focusConcepts: [],
+    incoming: [{ peer: impactPeer, relation: impactRelation, viaPath: "src/focus.py", recordedOrder: 1, evidence: [impactEvidence] }], outgoing: [], semantic: [], history: [],
+    testRecommendations: [], risks: [{ kind: "incoming", severity: "medium", summary: "一条入向关系", evidence: [impactEvidence] }],
+    actions: [["purpose", "它做什么"], ["callers", "谁调用它"], ["dependencies", "它依赖谁"], ["change", "如果修改它"], ["history", "过去谁改过它"]].map(([kind, label]) => ({ kind, label, summary: `${label}说明`, evidence: [] })),
+    stats: { files: 2, concepts: 0, tasks: 0 } }, warnings: [],
+};
+assert(parseImpactView(impactFixture)?.data.incoming[0]?.peer.path === "src/caller.py", "应解析固定 Impact lanes");
+assert(parseAgentNaviView(impactFixture)?.view === "impact", "通用 parser 应分派 Impact");
+assert(parseRequestedView({ view: "impact" }) === "impact", "应识别 Impact 请求");
+const wrongImpact = structuredClone(impactFixture);
+wrongImpact.data.incoming[0]!.relation.sourceId = "file:focus";
+assert(parseImpactView(wrongImpact) === undefined, "应拒绝反向或伪造的物理端点");
+const overflowImpact = structuredClone(impactFixture);
+overflowImpact.data.risks[0]!.evidence = Array.from({ length: 4 }, () => impactEvidence);
+assert(parseImpactView(overflowImpact) === undefined, "应拒绝 Impact Evidence 超过三项");
+const wrongAnchorImpact = structuredClone(impactFixture);
+wrongAnchorImpact.data.incoming[0]!.viaPath = "src/not-visible.py";
+assert(parseImpactView(wrongAnchorImpact) === undefined, "lane viaPath 必须绑定可见 anchor");
+const collidingImpact = structuredClone(impactFixture);
+collidingImpact.data.incoming[0]!.peer.id = collidingImpact.data.focus.entity.id;
+assert(parseImpactView(collidingImpact) === undefined, "可见实体 ID 不得跨路径复用");
+const evidenceCollision = structuredClone(impactFixture);
+evidenceCollision.data.anchorFiles[0]!.entity = structuredClone(evidenceCollision.data.anchorFiles[0]!.entity);
+evidenceCollision.data.anchorFiles[0]!.entity.evidence[0]!.summary = "different evidence";
+assert(parseImpactView(evidenceCollision) === undefined, "同一实体 ID 的 Evidence 差异必须拒绝");
+const testedByImpact: any = structuredClone(impactFixture);
+const testedConcept = { id: "concept:focus", kind: "concept", label: "Focus", layer: "L2", source: "semantic", confidence: .8, evidence: [impactEvidence] };
+const testedMapping = { id: "edge:tested", sourceId: testedConcept.id, targetId: impactFocus.id, relation: "tested_by", layer: "L2", source: "semantic", confidence: .8, evidence: [impactEvidence] };
+testedByImpact.data.focusConcepts = [{ entity: testedConcept, mapping: testedMapping, evidence: [impactEvidence] }];
+assert(parseImpactView(testedByImpact)?.data.focusConcepts[0]?.mapping?.relation === "tested_by", "file focus 应接受真实 tested_by ownership");
+const ownsImpact = structuredClone(testedByImpact); ownsImpact.data.focusConcepts[0]!.mapping!.relation = "owns";
+assert(parseImpactView(ownsImpact) === undefined, "UI 必须拒绝未声明的 owns mapping");
+const historyImpact: any = structuredClone(impactFixture);
+const impactTaskEvidence = { kind: "task-relation", summary: "recorded", layer: "L3", source: "task-events", confidence: 1 };
+const taskEntity = { id: "task:one", kind: "task", label: "Task", layer: "L3", source: "task-events", confidence: 1, evidence: [impactTaskEvidence] };
+const taskRelation = { id: "edge:task", sourceId: taskEntity.id, targetId: impactFocus.id, relation: "modified", layer: "L3", source: "task-events", confidence: 1, evidence: [impactTaskEvidence] };
+historyImpact.data.history = [{ entity: taskEntity, status: "completed", relation: taskRelation, recordedOrder: 1, evidence: [impactTaskEvidence] }];
+assert(parseImpactView(historyImpact)?.data.history.length === 1, "应接受一致的 L3 task-events History");
+const badHistoryImpact: any = structuredClone(historyImpact);
+badHistoryImpact.data.history[0].entity.evidence = structuredClone(badHistoryImpact.data.history[0].entity.evidence);
+badHistoryImpact.data.history[0].entity.evidence[0].summary = "different";
+assert(parseImpactView(badHistoryImpact) === undefined, "History entity/relation/wrapper Evidence 必须一致");
+for (const field of ["revision", "history.status", "test.reason", "risk.kind", "risk.summary", "action.summary"] as const) {
+  const blankImpact: any = structuredClone(field === "history.status" ? historyImpact : impactFixture);
+  if (field === "revision") blankImpact.data.revision = "   ";
+  if (field === "history.status") blankImpact.data.history[0].status = "   ";
+  if (field === "test.reason") {
+    blankImpact.data.testRecommendations = [{ basis: "physical-tests", path: impactPeer.path, reason: "   ", sourceConcept: null,
+      entity: impactPeer, relation: impactRelation, evidence: [impactEvidence] }];
+  }
+  if (field === "risk.kind") blankImpact.data.risks[0].kind = "   ";
+  if (field === "risk.summary") blankImpact.data.risks[0].summary = "   ";
+  if (field === "action.summary") blankImpact.data.actions[0].summary = "   ";
+  assert(parseImpactView(blankImpact) === undefined, `Impact 应拒绝空白字段 ${field}`);
+}
+for (const badConfidence of [true, Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.1]) {
+  const badScalar: any = structuredClone(impactFixture);
+  badScalar.data.focus.entity.confidence = badConfidence;
+  assert(parseImpactView(badScalar) === undefined, "Impact confidence 必须为 0..1 finite number");
+}
+for (const badStat of [true, 1.5, "1", -1]) {
+  const badStats: any = structuredClone(impactFixture);
+  badStats.data.stats.files = badStat;
+  assert(parseImpactView(badStats) === undefined, "Impact stats 必须为非负整数");
+}
+for (const badLine of [true, 1.5, 0, -1]) {
+  const badScalar: any = structuredClone(impactFixture);
+  badScalar.data.focus.evidence[0].lineStart = badLine;
+  assert(parseImpactView(badScalar) === undefined, "Impact Evidence 行号必须为正整数");
+}
+const badLineRange: any = structuredClone(impactFixture);
+badLineRange.data.focus.evidence[0].lineEnd = 2;
+assert(parseImpactView(badLineRange) === undefined, "Impact lineEnd 必须依赖 lineStart");
+const blankEvidence: any = structuredClone(impactFixture);
+blankEvidence.data.focus.evidence[0].summary = "   ";
+assert(parseImpactView(blankEvidence) === undefined, "Impact Evidence 文本不得为空白");
 const unsafeTour = structuredClone(tourFixture);
 unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
 assert(parseRepositoryTourView(unsafeTour) === undefined, "无有效证据的 Tour stop 应使畸形视图被拒绝");

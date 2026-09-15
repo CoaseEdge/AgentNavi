@@ -50,6 +50,12 @@ L2 常见关系：`contains`、`implemented_by`、`tested_by`、`documented_by`�
 
 L3 常见关系：`read`、`modified`、`tested`、`searched`、`affects`。
 
+### `l2_concept_edges`
+
+schema v4 增加的有界查询投影，只保存真实 source/target 都是 L2 `concept` 的 edge ID、端点与记录顺序。它不按 relation 名分类，因此人工 Overlay 和外部提供器可合法使用与 concept→file 映射同名的关系。
+
+`edges` 插入或身份字段更新、`nodes` 的 `project_id/layer/kind` 更新时，SQLite trigger 会同步该投影。升级自 v3，或投影表、索引、任一维护 trigger、完成 marker 缺失时，初始化会在 `BEGIN IMMEDIATE` 锁内重读状态，再将 DDL、全量回填、schema version 和完成 marker 原子提交。健康的 v4 数据库重复启动只做只读检查，不重写投影。该表属于可删除、可恢复的派生状态，不是新的事实来源。
+
 ## 四、`file_state`
 
 保存文件 mtime、大小、摘要和更新时间，用于增量扫描。

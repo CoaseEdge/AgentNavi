@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from .config import Settings
+from .semantic_relations import CONCEPT_FILE_MAPPING_RELATIONS_SQL
 from .utils import json_dumps, stable_id, utc_now
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+L2_CONCEPT_EDGE_PROJECTION_VERSION = 1
+BOOTSTRAP_JOURNAL_ATTEMPTS = 5
+BOOTSTRAP_JOURNAL_BACKOFF_SECONDS = 0.01
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -66,7 +71,88 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(project_id, layer, source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(project_id, layer, target_id);
+CREATE INDEX IF NOT EXISTS idx_edges_source_endpoint ON edges(project_id, source_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target_endpoint ON edges(project_id, target_id);
+CREATE INDEX IF NOT EXISTS idx_edges_source_relation ON edges(project_id, layer, source_id, relation);
+CREATE INDEX IF NOT EXISTS idx_edges_target_relation ON edges(project_id, layer, target_id, relation);
+CREATE INDEX IF NOT EXISTS idx_edges_target_provenance ON edges(project_id, layer, target_id, source);
+CREATE INDEX IF NOT EXISTS idx_edges_source_semantic_v2 ON edges(project_id, source_id)
+WHERE layer=2 AND relation NOT IN __CONCEPT_FILE_MAPPING_RELATIONS__;
+CREATE INDEX IF NOT EXISTS idx_edges_target_semantic_v2 ON edges(project_id, target_id)
+WHERE layer=2 AND relation NOT IN __CONCEPT_FILE_MAPPING_RELATIONS__;
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(project_id, relation);
+
+CREATE TABLE IF NOT EXISTS l2_concept_edges (
+    edge_id TEXT PRIMARY KEY REFERENCES edges(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    recorded_order INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_l2_concept_edges_source
+    ON l2_concept_edges(project_id, source_id, recorded_order DESC);
+CREATE INDEX IF NOT EXISTS idx_l2_concept_edges_target
+    ON l2_concept_edges(project_id, target_id, recorded_order DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_l2_concept_edges_insert
+AFTER INSERT ON edges
+WHEN NEW.layer=2
+BEGIN
+    INSERT OR REPLACE INTO l2_concept_edges(
+        edge_id, project_id, source_id, target_id, recorded_order
+    )
+    SELECT NEW.id, NEW.project_id, NEW.source_id, NEW.target_id, NEW.rowid
+    WHERE EXISTS (
+        SELECT 1 FROM nodes source
+        WHERE source.id=NEW.source_id AND source.project_id=NEW.project_id
+          AND source.layer=2 AND source.kind='concept'
+    ) AND EXISTS (
+        SELECT 1 FROM nodes target
+        WHERE target.id=NEW.target_id AND target.project_id=NEW.project_id
+          AND target.layer=2 AND target.kind='concept'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_l2_concept_edges_update
+AFTER UPDATE OF project_id, layer, source_id, target_id ON edges
+BEGIN
+    DELETE FROM l2_concept_edges WHERE edge_id=OLD.id;
+    INSERT OR REPLACE INTO l2_concept_edges(
+        edge_id, project_id, source_id, target_id, recorded_order
+    )
+    SELECT NEW.id, NEW.project_id, NEW.source_id, NEW.target_id, NEW.rowid
+    WHERE NEW.layer=2 AND EXISTS (
+        SELECT 1 FROM nodes source
+        WHERE source.id=NEW.source_id AND source.project_id=NEW.project_id
+          AND source.layer=2 AND source.kind='concept'
+    ) AND EXISTS (
+        SELECT 1 FROM nodes target
+        WHERE target.id=NEW.target_id AND target.project_id=NEW.project_id
+          AND target.layer=2 AND target.kind='concept'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_l2_concept_edges_node_identity
+AFTER UPDATE OF project_id, layer, kind ON nodes
+BEGIN
+    DELETE FROM l2_concept_edges
+    WHERE source_id=OLD.id OR target_id=OLD.id;
+    INSERT OR REPLACE INTO l2_concept_edges(
+        edge_id, project_id, source_id, target_id, recorded_order
+    )
+    SELECT edge.id, edge.project_id, edge.source_id,
+           edge.target_id, edge.rowid
+    FROM edges edge
+    JOIN nodes source ON source.id=edge.source_id
+      AND source.project_id=edge.project_id
+      AND source.layer=2 AND source.kind='concept'
+    JOIN nodes target ON target.id=edge.target_id
+      AND target.project_id=edge.project_id
+      AND target.layer=2 AND target.kind='concept'
+    WHERE edge.layer=2
+      AND (edge.source_id=NEW.id OR edge.target_id=NEW.id);
+END;
 
 CREATE TABLE IF NOT EXISTS file_state (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -179,7 +265,7 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 
 CREATE INDEX IF NOT EXISTS idx_benchmark_suite
     ON benchmark_runs(project_id, suite, run_kind, mode, created_at DESC);
-"""
+""".replace("__CONCEPT_FILE_MAPPING_RELATIONS__", CONCEPT_FILE_MAPPING_RELATIONS_SQL)
 
 
 class Database:
@@ -189,20 +275,144 @@ class Database:
     def initialize(self) -> None:
         self.settings.ensure_layout()
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
-            row = connection.execute(
-                "SELECT value FROM meta WHERE key='schema_version'"
-            ).fetchone()
-            if row is not None and int(row["value"]) > SCHEMA_VERSION:
+            objects, old_version, projection_version = self._schema_state(connection)
+            if old_version is not None and old_version > SCHEMA_VERSION:
                 raise RuntimeError(
-                    f"数据库 schema 版本 {row['value']} 高于当前程序支持的 {SCHEMA_VERSION}"
+                    f"数据库 schema 版本 {old_version} 高于当前程序支持的 {SCHEMA_VERSION}"
                 )
-            connection.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
-            connection.commit()
+            if self._schema_is_current(objects, old_version, projection_version):
+                return
+
+            self._configure_journal_mode(connection)
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                locked_objects, locked_version, locked_projection = self._schema_state(connection)
+                if locked_version is not None and locked_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"数据库 schema 版本 {locked_version} 高于当前程序支持的 {SCHEMA_VERSION}"
+                    )
+                if self._schema_is_current(
+                    locked_objects, locked_version, locked_projection
+                ):
+                    connection.commit()
+                    return
+
+                projection_incomplete = (
+                    locked_version is None or locked_version < SCHEMA_VERSION
+                    or locked_projection != L2_CONCEPT_EDGE_PROJECTION_VERSION
+                    or not self._projection_objects() <= locked_objects
+                )
+                self._execute_schema(connection)
+                if projection_incomplete:
+                    connection.execute("DELETE FROM l2_concept_edges")
+                    connection.execute(
+                        """INSERT INTO l2_concept_edges(
+                               edge_id, project_id, source_id, target_id, recorded_order
+                           )
+                           SELECT edge.id, edge.project_id, edge.source_id,
+                                  edge.target_id, edge.rowid
+                           FROM edges edge
+                           JOIN nodes source ON source.id=edge.source_id
+                             AND source.project_id=edge.project_id
+                             AND source.layer=2 AND source.kind='concept'
+                           JOIN nodes target ON target.id=edge.target_id
+                             AND target.project_id=edge.project_id
+                             AND target.layer=2 AND target.kind='concept'
+                           WHERE edge.layer=2"""
+                    )
+                    connection.execute(
+                        "INSERT INTO meta(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        ("l2_concept_edges_projection_version",
+                         str(L2_CONCEPT_EDGE_PROJECTION_VERSION)),
+                    )
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(SCHEMA_VERSION),),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    @staticmethod
+    def _configure_journal_mode(connection: sqlite3.Connection) -> None:
+        for attempt in range(BOOTSTRAP_JOURNAL_ATTEMPTS):
+            try:
+                row = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+                if row is None or str(row[0]).lower() != "wal":
+                    raise sqlite3.OperationalError("无法启用 SQLite WAL journal mode。")
+                return
+            except sqlite3.OperationalError as error:
+                code = getattr(error, "sqlite_errorcode", None)
+                if code is None or code & 0xFF != sqlite3.SQLITE_BUSY:
+                    raise
+                if attempt + 1 >= BOOTSTRAP_JOURNAL_ATTEMPTS:
+                    raise
+                time.sleep(BOOTSTRAP_JOURNAL_BACKOFF_SECONDS * (2 ** attempt))
+
+    @staticmethod
+    def _projection_objects() -> set[str]:
+        return {
+            "l2_concept_edges",
+            "idx_l2_concept_edges_source", "idx_l2_concept_edges_target",
+            "trg_l2_concept_edges_insert", "trg_l2_concept_edges_update",
+            "trg_l2_concept_edges_node_identity",
+        }
+
+    @classmethod
+    def _required_schema_objects(cls) -> set[str]:
+        return {
+            "meta",
+            "idx_edges_source_relation", "idx_edges_target_relation",
+            "idx_edges_target_provenance",
+            "idx_edges_source_semantic_v2", "idx_edges_target_semantic_v2",
+            *cls._projection_objects(),
+        }
+
+    @classmethod
+    def _schema_is_current(cls, objects: set[str], version: int | None,
+                           projection_version: int | None) -> bool:
+        return (
+            version == SCHEMA_VERSION
+            and projection_version == L2_CONCEPT_EDGE_PROJECTION_VERSION
+            and cls._required_schema_objects() <= objects
+        )
+
+    @classmethod
+    def _schema_state(cls, connection: sqlite3.Connection) -> tuple[set[str], int | None, int | None]:
+        names = cls._required_schema_objects()
+        placeholders = ",".join("?" for _ in names)
+        objects = {str(row[0]) for row in connection.execute(
+            f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
+            tuple(sorted(names)),
+        )}
+        if "meta" not in objects:
+            return objects, None, None
+        values = {str(row["key"]): str(row["value"]) for row in connection.execute(
+            "SELECT key,value FROM meta WHERE key IN "
+            "('schema_version','l2_concept_edges_projection_version')"
+        )}
+        version = int(values["schema_version"]) if "schema_version" in values else None
+        projection = (int(values["l2_concept_edges_projection_version"])
+                      if "l2_concept_edges_projection_version" in values else None)
+        return objects, version, projection
+
+    @staticmethod
+    def _execute_schema(connection: sqlite3.Connection) -> None:
+        statement = ""
+        for line in SCHEMA.splitlines():
+            if not statement and line.strip().upper().startswith("PRAGMA "):
+                continue
+            statement = f"{statement}\n{line}" if statement else line
+            if sqlite3.complete_statement(statement):
+                if statement.strip():
+                    connection.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise RuntimeError("数据库 schema 包含不完整语句。")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

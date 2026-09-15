@@ -591,6 +591,10 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         )
         cases = (
             ("agentnavi_context", None, "query"),
+            ("agentnavi_impact", None, "selector"),
+            ("agentnavi_impact", {"selector": "   "}, "selector"),
+            ("agentnavi_impact", {"selector": list(private_tokens)}, "selector"),
+            ("agentnavi_visualize", {"view": "impact"}, "query"),
             (
                 "agentnavi_visualize",
                 {"query": private_tokens[0], "project_id": private_tokens[1]},
@@ -657,6 +661,185 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         self.assertNotIn(private_message, wire)
         self.assertNotIn(str(self.database.settings.database_path), wire)
 
+    def test_impact_evidence_overflow_is_public_for_both_tools(self) -> None:
+        from agentnavi.impact_view import impact_view_data
+
+        self._add_project()
+        with self.database.connect() as connection:
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        core = impact_view_data(self.database, project, "src/membership.py")
+        secret = str(self.database.settings.database_path)
+        cases = []
+        for field in ("risks", "actions"):
+            if core[field]:
+                item = dict(core[field][0])
+                seed = item["evidence"] or core["focus"]["evidence"]
+                item["evidence"] = seed * 4
+                cases.append({**core, field: [item, *core[field][1:]]})
+        for bad_core in cases:
+            for tool_name, arguments in (
+                ("agentnavi_impact", {"selector": "src/membership.py", "project_id": "fixture"}),
+                ("agentnavi_visualize", {"view": "impact", "query": "src/membership.py", "project_id": "fixture"}),
+            ):
+                with self.subTest(field=next(k for k in ("risks", "actions") if bad_core[k] != core[k]), tool=tool_name), \
+                     patch("agentnavi.impact_view.impact_view_data", return_value=bad_core):
+                    result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                    self.assertTrue(result.is_error)
+                    self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                    self.assertNotIn(secret, json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str))
+
+    def test_invalid_impact_stats_are_public_for_both_tools(self) -> None:
+        from agentnavi.impact_view import impact_view_data
+
+        self._add_project()
+        with self.database.connect() as connection:
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        core = impact_view_data(self.database, project, "src/membership.py")
+        secret = str(self.database.settings.database_path)
+        for value in (True, -1, 1.5, "1"):
+            bad_core = {**core, "stats": {**core["stats"], "files": value}}
+            for tool_name, arguments in (
+                ("agentnavi_impact", {"selector": "src/membership.py", "project_id": "fixture"}),
+                ("agentnavi_visualize", {"view": "impact", "query": "src/membership.py", "project_id": "fixture"}),
+            ):
+                with self.subTest(value=value, tool=tool_name), patch(
+                    "agentnavi.impact_view.impact_view_data", return_value=bad_core
+                ):
+                    result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                    self.assertTrue(result.is_error)
+                    self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                    wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+                    self.assertNotIn(secret, wire)
+                    self.assertNotIn("validation", wire.lower())
+
+    def test_tested_by_file_focus_succeeds_for_both_impact_tools(self) -> None:
+        self._add_project()
+        relative = "checks/membership_contract.py"
+        absolute = self.project_root / relative
+        absolute.parent.mkdir(parents=True, exist_ok=True)
+        absolute.write_text("assert True\n", encoding="utf-8")
+        now = utc_now()
+        with self.database.connect() as connection:
+            file_id = Database.upsert_node(connection, project_id="fixture", layer=1,
+                                           kind="file", key=relative, label=absolute.name,
+                                           source="repository")
+            concept_id = Database.node_id("fixture", 2, "concept", "membership")
+            Database.upsert_edge(connection, project_id="fixture", layer=2,
+                                 source_id=concept_id, relation="tested_by", target_id=file_id,
+                                 source="semantic-heuristic", confidence=.8)
+            stat = absolute.stat()
+            connection.execute(
+                "INSERT INTO file_state(project_id,path,mtime_ns,size,digest,updated_at) VALUES (?,?,?,?,?,?)",
+                ("fixture", relative, stat.st_mtime_ns, stat.st_size,
+                 hashlib.blake2s(absolute.read_bytes()).hexdigest(), now),
+            )
+            connection.commit()
+        for tool_name, arguments in (
+            ("agentnavi_impact", {"selector": relative, "project_id": "fixture"}),
+            ("agentnavi_visualize", {"view": "impact", "query": relative, "project_id": "fixture"}),
+        ):
+            with self.subTest(tool=tool_name):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertFalse(result.is_error)
+                concepts = result.structured_content["data"]["focusConcepts"]
+                self.assertEqual(concepts[0]["mapping"]["relation"], "tested_by")
+                self.assertIn("tested_by", result.content[0].text)
+
+    def test_nonempty_l3_history_succeeds_for_both_impact_tools(self) -> None:
+        self._add_project()
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO tasks(id,project_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                ("task-impact", "fixture", "修改会员", "completed", now, now),
+            )
+            task = Database.upsert_node(connection, project_id="fixture", layer=3, kind="task",
+                                        key="task-impact", label="修改会员", source="task-events")
+            target = Database.node_id("fixture", 1, "file", "src/membership.py")
+            Database.upsert_edge(connection, project_id="fixture", layer=3, source_id=task,
+                                 relation="modified", target_id=target, source="task-events")
+            connection.commit()
+        for tool_name, arguments in (
+            ("agentnavi_impact", {"selector": "src/membership.py", "project_id": "fixture"}),
+            ("agentnavi_visualize", {"view": "impact", "query": "src/membership.py", "project_id": "fixture"}),
+        ):
+            with self.subTest(tool=tool_name):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertFalse(result.is_error)
+                history = result.structured_content["data"]["history"]
+                self.assertEqual(len(history), 1)
+                self.assertEqual(history[0]["evidence"], history[0]["entity"]["evidence"])
+                self.assertEqual(history[0]["evidence"], history[0]["relation"]["evidence"])
+        from agentnavi.impact_view import impact_view_data
+        with self.database.connect() as connection:
+            project = connection.execute("SELECT * FROM projects WHERE id='fixture'").fetchone()
+        core = impact_view_data(self.database, project, "src/membership.py")
+        bad_history = json.loads(json.dumps(core))
+        bad_history["history"][0]["evidence"][0]["source"] = "repository-index"
+        for tool_name, arguments in (
+            ("agentnavi_impact", {"selector": "src/membership.py", "project_id": "fixture"}),
+            ("agentnavi_visualize", {"view": "impact", "query": "src/membership.py", "project_id": "fixture"}),
+        ):
+            with self.subTest(bad_tool=tool_name), patch(
+                "agentnavi.impact_view.impact_view_data", return_value=bad_history
+            ):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+                self.assertIsNotNone(result.structured_content)
+
+    def test_multi_relation_semantic_peer_succeeds_for_both_impact_tools(self) -> None:
+        self._add_project()
+        relative = "src/dependency.py"
+        absolute = self.project_root / relative
+        absolute.write_text("VALUE = 2\n", encoding="utf-8")
+        now = utc_now()
+        with self.database.connect() as connection:
+            focus_file = Database.node_id("fixture", 1, "file", "src/membership.py")
+            focus = Database.node_id("fixture", 2, "concept", "membership")
+            dependency_file = Database.upsert_node(connection, project_id="fixture", layer=1,
+                                                    kind="file", key=relative, label="dependency.py",
+                                                    source="repository")
+            dependency = Database.upsert_node(connection, project_id="fixture", layer=2,
+                                               kind="concept", key="dependency", label="依赖",
+                                               source="semantic-heuristic", confidence=.8)
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=dependency,
+                                 relation="implemented_by", target_id=dependency_file,
+                                 source="semantic-heuristic", confidence=.8)
+            for source, relation, target in ((focus_file, "imports", dependency_file),
+                                             (dependency_file, "imports", focus_file)):
+                Database.upsert_edge(connection, project_id="fixture", layer=1, source_id=source,
+                                     relation=relation, target_id=target, source="extractor")
+            forward = {"evidence": [{"source": "src/membership.py", "target": relative,
+                                      "physical_relation": "imports"}]}
+            reverse = {"evidence": [{"source": relative, "target": "src/membership.py",
+                                      "physical_relation": "imports"}]}
+            for relation in ("depends_on", "related_to"):
+                Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=focus,
+                                     relation=relation, target_id=dependency,
+                                     source="semantic-heuristic", confidence=.7, data=forward)
+            Database.upsert_edge(connection, project_id="fixture", layer=2, source_id=dependency,
+                                 relation="related_to", target_id=focus,
+                                 source="semantic-heuristic", confidence=.7, data=reverse)
+            stat = absolute.stat()
+            connection.execute(
+                "INSERT INTO file_state(project_id,path,mtime_ns,size,digest,updated_at) VALUES (?,?,?,?,?,?)",
+                ("fixture", relative, stat.st_mtime_ns, stat.st_size,
+                 hashlib.blake2s(absolute.read_bytes()).hexdigest(), now),
+            )
+            connection.commit()
+        for tool_name, arguments in (
+            ("agentnavi_impact", {"selector": "会员", "project_id": "fixture"}),
+            ("agentnavi_visualize", {"view": "impact", "query": "会员", "project_id": "fixture"}),
+        ):
+            with self.subTest(tool=tool_name):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertFalse(result.is_error)
+                peers = result.structured_content["data"]["semantic"]
+                self.assertEqual(len(peers), 3)
+                self.assertTrue(all(item["peer"]["evidence"] == peers[0]["peer"]["evidence"]
+                                    for item in peers))
+
     def test_runtime_schema_rejects_invalid_success_envelopes(self) -> None:
         from pydantic import ValidationError
 
@@ -664,6 +847,7 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             ArchitectureViewOutput,
             ContextViewOutput,
             FlowViewOutput,
+            ImpactViewOutput,
             RepositoryOverviewViewOutput,
             RepositoryTourViewOutput,
             VisualizeViewOutput,
@@ -675,6 +859,47 @@ class MCPContextToolContractTestCase(unittest.TestCase):
         )
         payload = result.structured_content
         ContextViewOutput.model_validate(payload)
+        impact = asyncio.run(self._call(
+            {"selector": "src/membership.py", "project_id": "fixture"},
+            tool_name="agentnavi_impact",
+        )).structured_content
+        ImpactViewOutput.model_validate(impact)
+        stats_schema = ImpactViewOutput.model_json_schema()["$defs"]["ImpactStatsOutput"]
+        self.assertEqual(stats_schema["properties"]["files"]["minimum"], 0)
+        self.assertEqual(stats_schema["properties"]["files"]["type"], "integer")
+        from jsonschema import ValidationError as JsonSchemaError, validate
+        invalid_focus = json.loads(json.dumps(impact))
+        invalid_focus["data"]["focus"]["entity"].update({"kind": "task", "layer": "L3"})
+        with self.assertRaises(JsonSchemaError):
+            validate(invalid_focus, ImpactViewOutput.model_json_schema())
+        invalid_registry = json.loads(json.dumps(impact))
+        invalid_registry["data"]["anchorFiles"][0]["entity"]["evidence"][0]["summary"] = "different"
+        with self.assertRaises(ValidationError):
+            ImpactViewOutput.model_validate(invalid_registry)
+        for mutate in (
+            lambda value: value["data"].__setitem__("revision", "   "),
+            lambda value: value["data"]["focus"]["entity"].__setitem__("confidence", True),
+            lambda value: value["data"]["focus"]["evidence"][0].__setitem__("confidence", float("nan")),
+            lambda value: value["data"]["focus"]["evidence"][0].__setitem__("lineStart", 1.5),
+            lambda value: value["data"]["actions"][0].__setitem__("summary", "   "),
+        ):
+            invalid_impact = json.loads(json.dumps(impact))
+            mutate(invalid_impact)
+            with self.assertRaises(ValidationError):
+                ImpactViewOutput.model_validate(invalid_impact)
+        if impact["data"]["risks"]:
+            invalid_risk = json.loads(json.dumps(impact))
+            invalid_risk["data"]["risks"][0]["summary"] = "   "
+            with self.assertRaises(ValidationError):
+                ImpactViewOutput.model_validate(invalid_risk)
+        if impact["data"]["history"]:
+            history = impact["data"]["history"][0]
+            self.assertEqual(history["evidence"], history["entity"]["evidence"])
+            self.assertEqual(history["evidence"], history["relation"]["evidence"])
+            invalid_history = json.loads(json.dumps(impact))
+            invalid_history["data"]["history"][0]["evidence"][0]["source"] = "repository-index"
+            with self.assertRaises(ValidationError):
+                ImpactViewOutput.model_validate(invalid_history)
         VisualizeViewOutput.model_validate(payload)
         invalid_context = json.loads(json.dumps(payload))
         invalid_context["data"]["navigation"]["readingOrder"][0]["chains"][0][

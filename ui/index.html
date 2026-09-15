@@ -183,6 +183,27 @@
           <ol id="flow-steps" class="flow-steps"></ol>
         </div>
 
+        <div id="impact-view" class="impact-view" hidden>
+          <section class="impact-semantic" aria-labelledby="impact-semantic-title">
+            <span class="stage-index">SEMANTIC / L2</span>
+            <h2 id="impact-semantic-title">语义影响</h2>
+            <ul id="impact-semantic"></ul>
+          </section>
+          <div class="impact-lanes" aria-label="Incoming Focus Outgoing 固定影响布局">
+            <section aria-labelledby="impact-incoming-title"><h2 id="impact-incoming-title">Incoming</h2><ul id="impact-incoming"></ul></section>
+            <section class="impact-focus" aria-labelledby="impact-focus-title"><h2 id="impact-focus-title">Focus</h2><strong id="impact-focus-label"></strong><code id="impact-focus-path"></code><div class="impact-focus-group" role="group" aria-labelledby="impact-anchors-title"><h3 id="impact-anchors-title">锚点文件</h3><ul id="impact-anchors"></ul></div><div class="impact-focus-group" role="group" aria-labelledby="impact-concepts-title"><h3 id="impact-concepts-title">关联概念</h3><ul id="impact-concepts"></ul></div></section>
+            <section aria-labelledby="impact-outgoing-title"><h2 id="impact-outgoing-title">Outgoing</h2><ul id="impact-outgoing"></ul></section>
+          </div>
+          <section class="impact-followups" aria-label="影响建议">
+            <div><h2>建议测试</h2><ul id="impact-tests"></ul></div>
+            <div><h2>风险位置</h2><ul id="impact-risks"></ul></div>
+            <div><h2>本地查看</h2><div id="impact-actions"></div></div>
+          </section>
+          <section class="impact-history" aria-labelledby="impact-history-title">
+            <span class="stage-index">HISTORY / L3</span><h2 id="impact-history-title">历史任务关联</h2><ul id="impact-history"></ul>
+          </section>
+        </div>
+
         <section id="warning-panel" class="warning-panel" hidden aria-label="数据提示">
           <span class="warning-label">WARNINGS</span>
           <ul id="warning-list"></ul>

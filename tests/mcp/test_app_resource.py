@@ -73,16 +73,18 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             self.assertIn("AgentNavi ContextMap", result.contents[0].text)
 
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-            self.assertEqual(set(tools), {"agentnavi_context", "agentnavi_visualize"})
+            self.assertEqual(set(tools), {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"})
             self.assertFalse(tools["agentnavi_context"].meta)
             self.assertEqual(tools["agentnavi_visualize"].meta, APP_TOOL_META)
+            visualize_input = tools["agentnavi_visualize"].input_schema
+            self.assertEqual(visualize_input["discriminator"]["propertyName"], "view")
+            self.assertEqual(len(visualize_input["oneOf"]), 3)
+            self.assertIn("VisualizeContextInput", visualize_input["$defs"])
+            self.assertIn("VisualizeImpactInput", visualize_input["$defs"])
+            self.assertIn("VisualizeRepositoryInput", visualize_input["$defs"])
             self.assertEqual(
-                tools["agentnavi_visualize"].input_schema["required"],
-                ["view"],
-            )
-            self.assertEqual(
-                tools["agentnavi_visualize"].input_schema["properties"]["view"]["enum"],
-                ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+                visualize_input["$defs"]["VisualizeImpactInput"]["required"],
+                ["view", "query"],
             )
             self.assertEqual(
                 tools["agentnavi_context"].output_schema["properties"]["view"]["const"],
@@ -96,6 +98,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
                     {"$ref": "#/$defs/RepositoryTourViewOutput"},
                     {"$ref": "#/$defs/ArchitectureViewOutput"},
                     {"$ref": "#/$defs/FlowViewOutput"},
+                    {"$ref": "#/$defs/ImpactViewOutput"},
                 ],
             )
 
