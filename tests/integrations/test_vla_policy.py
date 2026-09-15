@@ -16,13 +16,15 @@ class VLAIntegrationPolicyTestCase(unittest.TestCase):
             "content", "structuredContent", "文本 fallback", "POSIX 相对路径",
         ):
             self.assertIn(term, policy)
-        self.assertIn("不能访问 SQLite", policy)
+        self.assertIn("不得绕过 AgentNavi Core", policy)
+        self.assertIn("执行任务的 Agent 可以通过 Host 正常文件工具读取和修改", policy)
 
-    def test_generic_skill_is_present_and_does_not_authorize_database_access(self) -> None:
+    def test_generic_skill_separates_projection_and_agent_file_boundaries(self) -> None:
         skill = (self.root / "integrations" / "vla" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: agentnavi-vla", skill)
         self.assertIn("agentnavi_visualize", skill)
-        self.assertIn("不能访问 SQLite", skill)
+        self.assertIn("不得绕过 AgentNavi Core", skill)
+        self.assertIn("执行任务的 Agent 可以通过 Host 提供的正常文件工具，读取和修改", skill)
         self.assertNotIn("innerHTML", skill)
 
 
