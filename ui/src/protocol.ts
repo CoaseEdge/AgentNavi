@@ -328,6 +328,41 @@ export interface HistoryView {
   warnings: ContextWarning[];
 }
 
+export interface SemanticReviewEntity {
+  id: string;
+  kind: "concept";
+  label: string;
+  layer: "L2";
+  source: string;
+  confidence: number;
+  evidence: Evidence[];
+}
+
+export interface SemanticReviewView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "semantic-review";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "semantic-review";
+    revision: string;
+    reviewItems: Array<{
+      reviewId: string;
+      subject: SemanticReviewEntity;
+      relation: string;
+      object: SemanticReviewEntity | null;
+      confidence: number;
+      source: string;
+      evidence: Evidence[];
+      allowedActions: Array<"accept" | "reject">;
+      decision: "accepted" | "rejected" | null;
+    }>;
+    includeReviewed: boolean;
+    stats: { candidates: number; pending: number; reviewed: number };
+  };
+  warnings: ContextWarning[];
+}
+
 export type AgentNaviView =
   | ContextView
   | RepositoryOverviewView
@@ -335,7 +370,8 @@ export type AgentNaviView =
   | ArchitectureView
   | FlowView
   | ImpactView
-  | HistoryView;
+  | HistoryView
+  | SemanticReviewView;
 
 export interface PublicError {
   code: string;
@@ -1510,9 +1546,51 @@ export function parseHistoryView(value: unknown): HistoryView | undefined {
     warnings: common.warnings };
 }
 
+export function parseSemanticReviewView(value: unknown): SemanticReviewView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "semantic-review" || common.data.layout !== "semantic-review") return undefined;
+  const revision = text(common.data.revision);
+  const rawItems = Array.isArray(common.data.reviewItems) ? common.data.reviewItems : [];
+  const stats = record(common.data.stats);
+  const entity = (value: unknown): SemanticReviewEntity | undefined => {
+    const item = record(value); if (!item || item.kind !== "concept" || item.layer !== "L2") return undefined;
+    const id = displayText(item.id); const label = displayText(item.label); const source = displayText(item.source);
+    const evidence = evidenceList(item.evidence);
+    const rawConfidence = item.confidence;
+    if (!id || !label || !source || evidence.length === 0 || typeof rawConfidence !== "number" || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1) return undefined;
+    return { id, kind: "concept", label, layer: "L2", source, confidence: rawConfidence, evidence };
+  };
+  if (!revision || revision.length > 120 || rawItems.length > 100 || !stats ||
+      typeof common.data.includeReviewed !== "boolean" ||
+      ![stats.candidates, stats.pending, stats.reviewed].every((entry) => typeof entry === "number" && Number.isInteger(entry) && entry >= 0) ||
+      stats.candidates !== rawItems.length) return undefined;
+  const reviewItems: SemanticReviewView["data"]["reviewItems"] = [];
+  const ids = new Set<string>();
+  for (const raw of rawItems) {
+    const item = record(raw); const subject = entity(item?.subject);
+    const object = item?.object === null ? null : entity(item?.object);
+    const reviewId = displayText(item?.reviewId); const relation = displayText(item?.relation);
+    const source = displayText(item?.source); const evidence = evidenceList(item?.evidence);
+    const actions = Array.isArray(item?.allowedActions) ? item.allowedActions : [];
+    const confidenceValue = item?.confidence;
+    const decision = item?.decision === null || item?.decision === undefined ? null : item.decision;
+    if (!item || !subject || (item.object !== null && !object) || !reviewId || !relation || !source || !evidence.length ||
+        ids.has(reviewId) || typeof confidenceValue !== "number" || !Number.isFinite(confidenceValue) || confidenceValue < 0 || confidenceValue > 1 ||
+        actions.some((action) => action !== "accept" && action !== "reject") || actions.length > 2 ||
+        (decision !== null && decision !== "accepted" && decision !== "rejected") ||
+        JSON.stringify(subject.evidence) !== JSON.stringify(evidence) && (!object || JSON.stringify(object.evidence) !== JSON.stringify(evidence))) return undefined;
+    ids.add(reviewId);
+    reviewItems.push({ reviewId, subject, relation, object: object ?? null, confidence: confidenceValue, source, evidence,
+      allowedActions: actions as Array<"accept" | "reject">, decision: decision as "accepted" | "rejected" | null });
+  }
+  if (stats.pending !== reviewItems.filter((item) => item.decision === null).length || stats.reviewed !== reviewItems.filter((item) => item.decision !== null).length) return undefined;
+  return { schemaVersion: SCHEMA_VERSION, view: "semantic-review", project: common.project, sourceState: common.sourceState,
+    data: { layout: "semantic-review", revision, reviewItems, includeReviewed: common.data.includeReviewed, stats: { candidates: stats.candidates, pending: stats.pending, reviewed: stats.reviewed } }, warnings: common.warnings };
+}
+
 export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
   return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value) ??
-    parseArchitectureView(value) ?? parseFlowView(value) ?? parseImpactView(value) ?? parseHistoryView(value);
+    parseArchitectureView(value) ?? parseFlowView(value) ?? parseImpactView(value) ?? parseHistoryView(value) ?? parseSemanticReviewView(value);
 }
 
 export function parseTaskQuery(value: unknown): string | undefined {
@@ -1525,6 +1603,7 @@ export function parseRequestedView(value: unknown): AgentNaviView["view"] | unde
   const input = record(value);
   return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour" ||
     input?.view === "architecture" || input?.view === "flow" || input?.view === "impact" || input?.view === "history"
+    || input?.view === "semantic-review"
     ? input.view
     : undefined;
 }

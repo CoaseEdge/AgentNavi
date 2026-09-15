@@ -1160,6 +1160,43 @@ def list_review_candidates(
     limit: int = 50,
     include_reviewed: bool = False,
 ) -> list[dict[str, Any]]:
+    def evidence_for_node(row: sqlite3.Row, *, role: str) -> list[dict[str, Any]]:
+        return [{
+            "kind": "semantic-node",
+            "summary": f"{role} 概念 {row['label']}（{row['key']}）由 {row['source']} 推导",
+            "layer": "L2",
+            "source": str(row["source"]),
+            "confidence": float(row["confidence"]),
+        }]
+
+    def evidence_for_edge(row: sqlite3.Row) -> list[dict[str, Any]]:
+        data = json_loads(row["data_json"], {})
+        raw = data.get("evidence", []) if isinstance(data, dict) else []
+        evidence: list[dict[str, Any]] = []
+        for item in raw[:3] if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("source")
+            if not isinstance(path, str) or not path or Path(path).is_absolute() or "://" in path:
+                path = None
+            evidence.append({
+                "kind": "semantic-relation",
+                "summary": f"{item.get('source', row['subject_key'])} {row['relation']} {item.get('target', row['object_key'])}",
+                "layer": "L2",
+                "source": str(row["source"]),
+                "confidence": float(row["confidence"]),
+                **({"path": path} if path else {}),
+            })
+        if not evidence:
+            evidence.append({
+                "kind": "semantic-relation",
+                "summary": f"{row['subject_key']} {row['relation']} {row['object_key']}（edge {row['id']}）",
+                "layer": "L2",
+                "source": str(row["source"]),
+                "confidence": float(row["confidence"]),
+            })
+        return evidence
+
     candidates: list[dict[str, Any]] = []
     with database.connect() as connection:
         concept_decisions, edge_decisions = _decision_maps(connection, project_id)
@@ -1186,6 +1223,8 @@ def list_review_candidates(
                     "object_label": "",
                     "confidence": row["confidence"],
                     "source": row["source"],
+                    "evidence": evidence_for_node(row, role="待审查"),
+                    "allowed_actions": ["accept", "reject"],
                     "decision": decision,
                 }
             )
@@ -1217,6 +1256,8 @@ def list_review_candidates(
                     "object_label": row["object_label"],
                     "confidence": row["confidence"],
                     "source": row["source"],
+                    "evidence": evidence_for_edge(row),
+                    "allowed_actions": ["accept", "reject"],
                     "decision": decision,
                 }
             )
@@ -1249,6 +1290,11 @@ def list_review_candidates(
                             "object_label": "",
                             "confidence": concept["confidence"] if concept else 1.0,
                             "source": concept["source"] if concept else "human-overlay",
+                            "evidence": evidence_for_node(concept, role="已审查") if concept else [{
+                                "kind": "semantic-node", "summary": f"人工校正概念 {row['subject_key']}",
+                                "layer": "L2", "source": "human-overlay", "confidence": 1.0,
+                            }],
+                            "allowed_actions": [],
                             "decision": decision,
                         }
                     )
@@ -1276,6 +1322,12 @@ def list_review_candidates(
                             "object_label": target["label"] if target else row["object_key"],
                             "confidence": 1.0,
                             "source": "human-overlay",
+                            "evidence": [{
+                                "kind": "semantic-relation",
+                                "summary": f"人工校正 {row['subject_key']} {row['relation']} {row['object_key']}",
+                                "layer": "L2", "source": "human-overlay", "confidence": 1.0,
+                            }],
+                            "allowed_actions": [],
                             "decision": decision,
                         }
                     )
@@ -1324,5 +1376,11 @@ def decide_review_candidate(
         subject_key=candidate["subject_key"],
         relation=candidate["relation"],
         object_key=candidate["object_key"],
+        value={
+            "decision": decision,
+            "source": candidate["source"],
+            "confidence": candidate["confidence"],
+            "evidence": candidate.get("evidence", []),
+        },
         note=note,
     )

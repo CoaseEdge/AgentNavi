@@ -18,6 +18,7 @@ from .adapters.context import context_text, context_view
 from .adapters.flow import flow_text, flow_view
 from .adapters.impact import impact_text, impact_to_view
 from .adapters.history import history_text, history_view
+from .adapters.semantic_review import semantic_review_text, semantic_review_view
 from .adapters.repo_overview import repo_overview_text, repo_overview_view
 from .adapters.repo_tour import repo_tour_text, repo_tour_view
 from .errors import AgentNaviMCPError, to_public_error
@@ -70,7 +71,7 @@ async def _complete_required_tool_arguments(ctx: Any, call_next: Any) -> Any:
     params = dict(ctx.params)
     name = params.get("name")
     raw_arguments = params.get("arguments")
-    if name not in {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"}:
+    if name not in {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize", "agentnavi_semantic_review", "agentnavi_review_decide"}:
         return await call_next(ctx)
     arguments = dict(raw_arguments) if isinstance(raw_arguments, Mapping) else {}
     if name == "agentnavi_history" and not set(arguments) <= {
@@ -79,6 +80,18 @@ async def _complete_required_tool_arguments(ctx: Any, call_next: Any) -> Any:
         # SDK 参数校验之前把未知字段折叠为一个公开可处理的无效 mode，
         # 避免 ValidationError 回显原始输入。
         arguments = {"mode": "__invalid__", "query": None}
+    if name == "agentnavi_semantic_review" and not set(arguments) <= {
+        "project_id", "workspace", "limit", "includeReviewed"
+    }:
+        arguments = {"limit": 0}
+    if name == "agentnavi_review_decide" and not set(arguments) <= {
+        "review_id", "reviewId", "decision", "project_id", "workspace", "note"
+    }:
+        arguments = {"review_id": "__invalid__", "decision": "reject"}
+    if name == "agentnavi_review_decide" and "reviewId" in arguments and "review_id" not in arguments:
+        arguments["review_id"] = arguments.pop("reviewId")
+    if name == "agentnavi_semantic_review" and "includeReviewed" in arguments and "include_reviewed" not in arguments:
+        arguments["include_reviewed"] = arguments.pop("includeReviewed")
     if name != "agentnavi_impact":
         arguments.setdefault("query", None)
     else:
@@ -103,6 +116,10 @@ def create_server(*, home: str | Path | None = None) -> Any:
         HISTORY_INPUT_SCHEMA,
         HISTORY_OPTIONAL_TEXT_INPUT,
         HISTORY_TOOL_RESULT,
+        REVIEW_DECISION_INPUT_SCHEMA,
+        REVIEW_DECISION_TOOL_RESULT,
+        SEMANTIC_REVIEW_INPUT_SCHEMA,
+        SEMANTIC_REVIEW_TOOL_RESULT,
         OPTIONAL_TEXT_INPUT,
         REQUIRED_TEXT_INPUT,
         VISUALIZE_TOOL_RESULT,
@@ -242,6 +259,45 @@ def create_server(*, home: str | Path | None = None) -> Any:
 
         return call_history(query, task_id, mode, project_id, workspace)
 
+    def call_semantic_review(
+        project_id: Any = None,
+        workspace: Any = None,
+        limit: Any = 50,
+        include_reviewed: Any = False,
+    ) -> Any:
+        """生成服务器计算动作集合的语义审查候选。"""
+        try:
+            checked_project_id = _validated_text(project_id, "project_id", required=False)
+            checked_workspace = _validated_text(workspace, "workspace", required=False)
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+                raise AgentNaviMCPError("INVALID_ARGUMENT", details={"field": "limit"})
+            if not isinstance(include_reviewed, bool):
+                raise AgentNaviMCPError("INVALID_ARGUMENT", details={"field": "includeReviewed"})
+            project = resolve_project(database, project_id=checked_project_id, workspace=checked_workspace)
+            from ..semantic_review_view import semantic_review_view_data
+            core_data = semantic_review_view_data(
+                database, project, limit=limit, include_reviewed=include_reviewed
+            )
+            structured = semantic_review_view({
+                "project": {"id": project["id"], "name": project["name"], "kind": project["kind"]},
+                "sourceState": {"status": "ready"}, "warnings": [], **core_data,
+            })
+            text = semantic_review_text({
+                "project": {"id": project["id"], "name": project["name"], "kind": project["kind"]},
+                "sourceState": {"status": "ready"}, "warnings": [], **core_data,
+            })
+            return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=structured.to_dict())
+        except Exception as exc:
+            return error_result(exc)
+
+    def agentnavi_semantic_review(
+        project_id: Any = None,
+        workspace: Any = None,
+        limit: Any = 50,
+        include_reviewed: Any = False,
+    ) -> Any:
+        return call_semantic_review(project_id, workspace, limit, include_reviewed)
+
     def agentnavi_visualize(
         view: Any,
         query: Any = None,
@@ -251,7 +307,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         """生成 MCP App 与无 UI Host 都可消费的只读 VLA 结果。"""
 
         try:
-            if view not in {"context", "repo-overview", "repo-tour", "architecture", "flow", "impact", "history"}:
+            if view not in {"context", "repo-overview", "repo-tour", "architecture", "flow", "impact", "history", "semantic-review"}:
                 raise AgentNaviMCPError(
                     "INVALID_ARGUMENT", details={"field": "view"}
                 )
@@ -277,6 +333,8 @@ def create_server(*, home: str | Path | None = None) -> Any:
                 return call_impact(checked_query, project_id, workspace)
             if view == "history":
                 return call_history(checked_query, None, "timeline", project_id, workspace)
+            if view == "semantic-review":
+                return call_semantic_review(project_id, workspace)
             if view == "repo-overview":
                 from ..repository_views import repository_overview_data
 
@@ -308,7 +366,41 @@ def create_server(*, home: str | Path | None = None) -> Any:
         except Exception as exc:
             return error_result(exc)
 
-    for tool in (agentnavi_context, agentnavi_impact, agentnavi_history, agentnavi_visualize):
+    def agentnavi_review_decide(
+        review_id: Any,
+        decision: Any,
+        project_id: Any = None,
+        workspace: Any = None,
+        note: Any = None,
+    ) -> Any:
+        """仅供 MCP App 调用的持久化 Accept/Reject 动作。"""
+        try:
+            checked_review_id = _validated_text(review_id, "review_id", required=True)
+            checked_project_id = _validated_text(project_id, "project_id", required=False)
+            checked_workspace = _validated_text(workspace, "workspace", required=False)
+            checked_note = _validated_text(note, "note", required=False)
+            if decision not in {"accept", "reject"}:
+                raise AgentNaviMCPError("INVALID_ARGUMENT", details={"field": "decision"})
+            project = resolve_project(database, project_id=checked_project_id, workspace=checked_workspace)
+            from ..semantic_overlays import decide_review_candidate
+            row = decide_review_candidate(
+                database, project_id=project["id"], candidate_id=checked_review_id,
+                decision=decision, note=checked_note or "",
+            )
+            output = {
+                "schemaVersion": "agentnavi.vla.v1", "view": "semantic-review",
+                "reviewId": checked_review_id,
+                "decision": "accepted" if decision == "accept" else "rejected",
+                "persisted": bool(row),
+            }
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"语义审查已{'接受' if decision == 'accept' else '拒绝'}：{checked_review_id}")],
+                structuredContent=output,
+            )
+        except Exception as exc:
+            return error_result(exc)
+
+    for tool in (agentnavi_context, agentnavi_impact, agentnavi_history, agentnavi_visualize, agentnavi_semantic_review):
         tool.__annotations__["project_id"] = OPTIONAL_TEXT_INPUT
         tool.__annotations__["workspace"] = OPTIONAL_TEXT_INPUT
     agentnavi_context.__annotations__["query"] = REQUIRED_TEXT_INPUT
@@ -319,9 +411,13 @@ def create_server(*, home: str | Path | None = None) -> Any:
     agentnavi_history.__annotations__["task_id"] = HISTORY_OPTIONAL_TEXT_INPUT
     agentnavi_history.__annotations__["mode"] = HISTORY_MODE_INPUT
     agentnavi_history.__annotations__["return"] = HISTORY_TOOL_RESULT
+    agentnavi_semantic_review.__annotations__["return"] = SEMANTIC_REVIEW_TOOL_RESULT
+    agentnavi_semantic_review.__annotations__["limit"] = Any
+    agentnavi_semantic_review.__annotations__["include_reviewed"] = Any
     agentnavi_visualize.__annotations__["query"] = OPTIONAL_TEXT_INPUT
     agentnavi_visualize.__annotations__["view"] = VISUALIZE_VIEW_INPUT
     agentnavi_visualize.__annotations__["return"] = VISUALIZE_TOOL_RESULT
+    agentnavi_review_decide.__annotations__["return"] = REVIEW_DECISION_TOOL_RESULT
 
     apps = Apps()
     apps.add_html_resource(
@@ -331,7 +427,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         .read_text(encoding="utf-8"),
         name="AgentNavi ContextMap",
         title="AgentNavi ContextMap",
-        description="项目概览、仓库导览、架构、任务流、Context、Impact 与 History 的只读视图。",
+        description="项目概览、仓库导览、架构、任务流、Context、Impact、History 与 Semantic Review 视图。",
         csp=ResourceCsp(
             connectDomains=[],
             resourceDomains=[],
@@ -343,10 +439,17 @@ def create_server(*, home: str | Path | None = None) -> Any:
     apps.tool(
         resource_uri=APP_URI,
         name="agentnavi_visualize",
-        description="展示只读项目概览、仓库导览、架构、任务流、ContextMap、Impact 或 History。",
+        description="展示只读项目概览、仓库导览、架构、任务流、ContextMap、Impact、History 或 Semantic Review。",
         annotations=context_tool_annotations(),
         structured_output=True,
     )(agentnavi_visualize)
+    apps.tool(
+        resource_uri=APP_URI,
+        visibility=["app"],
+        name="agentnavi_review_decide",
+        description="仅由 Semantic Review MCP App 提交 Accept/Reject 决定并持久化 Overlay。",
+        structured_output=True,
+    )(agentnavi_review_decide)
 
     server = MCPServer(
         "AgentNavi",
@@ -377,11 +480,23 @@ def create_server(*, home: str | Path | None = None) -> Any:
         annotations=context_tool_annotations(),
         structured_output=True,
     )
+    server.add_tool(
+        agentnavi_semantic_review,
+        name="agentnavi_semantic_review",
+        description="列出有界、带证据的 L2 语义审查候选；动作集合由 Server 计算。",
+        annotations=context_tool_annotations(),
+        structured_output=True,
+    )
 
     history_tool = server._tool_manager.get_tool("agentnavi_history")
     if history_tool is None:  # pragma: no cover - SDK 注册失败的防御分支
         raise RuntimeError("agentnavi_history 注册失败")
     history_tool.parameters = HISTORY_INPUT_SCHEMA
+
+    semantic_review_tool = server._tool_manager.get_tool("agentnavi_semantic_review")
+    if semantic_review_tool is None:
+        raise RuntimeError("agentnavi_semantic_review 注册失败")
+    semantic_review_tool.parameters = SEMANTIC_REVIEW_INPUT_SCHEMA
 
     # FastMCP 2.x 从单个函数参数生成扁平 schema，无法表达 query 是否必填取决于
     # view。保留 handler 的公开错误防线，同时用公开 tools/list 合同发布判别联合。
