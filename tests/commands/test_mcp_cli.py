@@ -110,6 +110,23 @@ class MCPCLIContractTestCase(unittest.TestCase):
         self.assertEqual(result, 0)
         run_http.assert_called_once_with(home=None, host="127.0.0.1", port=8000)
 
+    def test_non_loopback_http_requires_explicit_opt_in(self) -> None:
+        stderr = io.StringIO()
+        with patch("agentnavi.mcp.server.run_http") as run_http:
+            with contextlib.redirect_stderr(stderr):
+                result = main(["mcp", "--transport", "http", "--host", "0.0.0.0"])
+
+        self.assertEqual(result, 2)
+        run_http.assert_not_called()
+        self.assertIn("--allow-remote", stderr.getvalue())
+
+    def test_non_loopback_http_can_be_explicitly_enabled(self) -> None:
+        with patch("agentnavi.mcp.server.run_http") as run_http:
+            result = main(["mcp", "--transport", "http", "--host", "0.0.0.0", "--allow-remote"])
+
+        self.assertEqual(result, 0)
+        run_http.assert_called_once_with(home=None, host="0.0.0.0", port=8000)
+
 
 if __name__ == "__main__":
     unittest.main()
