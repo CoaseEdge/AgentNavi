@@ -177,3 +177,30 @@ Reasoning tools 固定为：
 - `agentnavi_semantic_review`
 
 Presentation 统一使用 `agentnavi_visualize`。唯一写操作为 App 可见的 `agentnavi_review_decide`。这些工具由后续阶段实现；本协议模块不会导入 MCP SDK，基础安装继续保持零 MCP 依赖。
+
+## 九、Presentation Policy
+
+Agent 在需要理解仓库、评估影响或解释历史时，先调用与任务对应的 reasoning tool，再把结果交给 `agentnavi_visualize`。Presentation tool 只负责把已筛选的结果展示给人，不替代 reasoning，也不扩大候选集合。
+
+### 选择顺序
+
+1. 新任务或陌生仓库：`agentnavi_context`，必要时补充 `repo-overview`、`repo-tour`、`architecture`、`flow`。
+2. 修改前评估：`agentnavi_impact`。
+3. 需要了解项目演进：`agentnavi_history`。
+4. 发现自动语义关系需要人判断：`agentnavi_semantic_review`，决定只能由 App 调用 `agentnavi_review_decide`。
+
+### 交互边界
+
+- VLA UI/MCP Projection 展示 Why、Evidence、Next Step 和允许动作；不得绕过 AgentNavi Core 直接访问项目根目录、SQLite、事实日志或 localhost。
+- 执行任务的 Agent 可以通过 Host 正常文件工具读取和修改 AgentNavi 返回的真实项目相对路径；UI/Projection 不代替这些文件操作。
+- `content` 是模型可读的独立 fallback；`structuredContent` 是 UI 合同，二者语义一致但分别生成。
+- Evidence 不足时显示 warning 或省略不可验证项，不用模型补齐事实。
+- 人工决定后只重放 Overlay 并刷新当前视图，不触发全仓扫描。
+- Host 不支持 MCP Apps 时使用文本 fallback；不能把 fallback 描述成视觉交互已经发生。
+
+### 验收清单
+
+- 请求是否先经过 reasoning tool，且候选数量和一跳限制未放宽？
+- 每个可见主张是否能追溯到 Evidence，路径是否为 POSIX 相对路径？
+- UI 是否把不可信输入作为文本节点渲染，无 `innerHTML`、`eval`、外联或 localhost 请求？
+- 需要人工确认的动作是否只有 App 可见，且决定已经写入事实日志并可重放？
