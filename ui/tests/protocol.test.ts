@@ -1,16 +1,47 @@
 import {
+  SCHEMA_VERSION,
   isCanonicalRelativePath,
   parseAgentNaviView,
   parseArchitectureView,
   parseContextView,
   parseFlowView,
   parseImpactView,
+  parseHistoryView,
   parsePublicError,
   parseRepositoryOverviewView,
   parseRepositoryTourView,
   parseRequestedView,
   parseTaskQuery,
 } from "../src/protocol.js";
+
+const historyEvidence = { kind: "task-record", summary: "任务 task-1：任务记录", layer: "L3", source: "task-events", confidence: 1 } as const;
+const historyRelationEvidence = { kind: "task-relation", summary: "任务 task-1 的关系 edge:1 记录 modified", layer: "L3", source: "task-events", confidence: 1, path: "src/a.py" } as const;
+const historyTask = { id: "task:1", kind: "task", label: "修改 A", layer: "L3", source: "task-events", confidence: 1, evidence: [historyEvidence] } as const;
+const historyFile = { id: "file:a", kind: "file", label: "a.py", path: "src/a.py", layer: "L1", source: "repository", confidence: 1,
+  evidence: [{ kind: "repository-file", summary: "文件", layer: "L1", source: "repository", confidence: 1, path: "src/a.py" }] } as const;
+const historyRelation = { id: "edge:1", sourceId: "task:1", targetId: "file:a", relation: "modified", layer: "L3", source: "task-events", confidence: 1, evidence: [historyRelationEvidence] } as const;
+const historyTimeline = { entity: historyTask, taskId: "task-1", status: "completed", summary: "完成修改", createdAt: "2026-09-15T09:00:00Z", updatedAt: "2026-09-15T10:00:00Z", closedAt: "2026-09-15T10:00:00Z", sortTime: "2026-09-15T10:00:00Z",
+  relations: [{ entity: historyFile, relation: historyRelation, recordedOrder: 1, evidence: [historyRelationEvidence] }], evidence: [historyEvidence] };
+const historyFixture: any = { schemaVersion: SCHEMA_VERSION, view: "history", project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" },
+  data: { layout: "task-timeline-story", revision: "history-1", selectedMode: "timeline", disclaimer: "按 L3 任务关系聚合展示，不是原始工具调用的无损还原，也不据此推断因果。", timeline: [historyTimeline],
+    story: [{ id: "story-1", title: "修改 A", summary: "完成修改", sortTime: historyTimeline.sortTime, task: historyTask,
+      groups: [{ relation: "modified", paths: ["src/a.py"], concepts: [], evidence: [historyRelationEvidence] }], explanationSource: "l3-aggregation", disclaimer: "按 L3 任务关系聚合展示，不是原始工具调用的无损还原，也不据此推断因果。", evidence: [historyEvidence] }],
+    taskDetail: historyTimeline, stats: { files: 1, tasks: 1, displayedTasks: 1, displayedRelations: 1 } }, warnings: [] };
+
+assert(parseHistoryView(historyFixture)?.data.timeline[0]?.taskId === "task-1", "应解析 History timeline");
+assert(parseAgentNaviView(historyFixture)?.view === "history", "通用 parser 应分派 History");
+assert(parseRequestedView({ view: "history" }) === "history", "应识别 History 请求");
+for (const mutate of [
+  (value: any) => { value.data.timeline[0].entity.layer = "L2"; },
+  (value: any) => { value.data.timeline[0].relations[0].relation.targetId = "other"; },
+  (value: any) => { value.data.story[0].groups[0].paths[0] = "/private/a.py"; },
+  (value: any) => { value.data.timeline[0].evidence[0].confidence = 2; },
+  (value: any) => { value.data.timeline[0].relations[0].recordedOrder = true; },
+  (value: any) => { value.data.timeline[0].sortTime = "2027-01-01T00:00:00Z"; value.data.timeline.push(structuredClone(historyTimeline)); },
+]) {
+  const malformed = structuredClone(historyFixture); mutate(malformed);
+  assert(parseHistoryView(malformed) === undefined, "应拒绝畸形 History payload");
+}
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);

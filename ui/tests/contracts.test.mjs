@@ -48,6 +48,8 @@ test("390px layout does not hide connection or error status", () => {
   assert.doesNotMatch(narrow, /error-panel[^}]*display:\s*none/);
   assert.match(css, /\.impact-focus-group\s*\{[^}]*min-width:\s*0/);
   assert.match(css, /\.impact-focus-group\s+li\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(css, /\.history-view\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /@media \(max-width:\s*390px\)/);
 });
 
 test("390px dark layout keeps rail title and facts on the AA token", () => {

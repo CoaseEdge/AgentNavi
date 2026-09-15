@@ -17,6 +17,7 @@ from .adapters.architecture import architecture_text, architecture_view
 from .adapters.context import context_text, context_view
 from .adapters.flow import flow_text, flow_view
 from .adapters.impact import impact_text, impact_to_view
+from .adapters.history import history_text, history_view
 from .adapters.repo_overview import repo_overview_text, repo_overview_view
 from .adapters.repo_tour import repo_tour_text, repo_tour_view
 from .errors import AgentNaviMCPError, to_public_error
@@ -69,9 +70,15 @@ async def _complete_required_tool_arguments(ctx: Any, call_next: Any) -> Any:
     params = dict(ctx.params)
     name = params.get("name")
     raw_arguments = params.get("arguments")
-    if name not in {"agentnavi_context", "agentnavi_impact", "agentnavi_visualize"}:
+    if name not in {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"}:
         return await call_next(ctx)
     arguments = dict(raw_arguments) if isinstance(raw_arguments, Mapping) else {}
+    if name == "agentnavi_history" and not set(arguments) <= {
+        "query", "task_id", "mode", "project_id", "workspace"
+    }:
+        # SDK 参数校验之前把未知字段折叠为一个公开可处理的无效 mode，
+        # 避免 ValidationError 回显原始输入。
+        arguments = {"mode": "__invalid__", "query": None}
     if name != "agentnavi_impact":
         arguments.setdefault("query", None)
     else:
@@ -92,6 +99,10 @@ def create_server(*, home: str | Path | None = None) -> Any:
     from .runtime import (
         CONTEXT_TOOL_RESULT,
         IMPACT_TOOL_RESULT,
+        HISTORY_MODE_INPUT,
+        HISTORY_INPUT_SCHEMA,
+        HISTORY_OPTIONAL_TEXT_INPUT,
+        HISTORY_TOOL_RESULT,
         OPTIONAL_TEXT_INPUT,
         REQUIRED_TEXT_INPUT,
         VISUALIZE_TOOL_RESULT,
@@ -188,6 +199,49 @@ def create_server(*, home: str | Path | None = None) -> Any:
 
         return call_impact(selector, project_id, workspace)
 
+    def call_history(
+        query: Any = None,
+        task_id: Any = None,
+        mode: Any = "timeline",
+        project_id: Any = None,
+        workspace: Any = None,
+    ) -> Any:
+        """生成有界的 Task Timeline 与 Project Story。"""
+
+        try:
+            checked_query = _validated_text(query, "query", required=False)
+            checked_task_id = _validated_text(task_id, "task_id", required=False)
+            checked_project_id = _validated_text(project_id, "project_id", required=False)
+            checked_workspace = _validated_text(workspace, "workspace", required=False)
+            if mode not in {"timeline", "story"}:
+                raise AgentNaviMCPError("INVALID_ARGUMENT", details={"field": "mode"})
+            project = resolve_project(database, project_id=checked_project_id, workspace=checked_workspace)
+            from ..history_view import history_view_data
+
+            core_data = history_view_data(
+                database, project, checked_query or "", task_id=checked_task_id,
+                selected_mode=mode,
+            )
+            structured = history_view(core_data)
+            text = history_text(core_data)
+            return CallToolResult(
+                content=[TextContent(type="text", text=text)],
+                structuredContent=structured.to_dict(),
+            )
+        except Exception as exc:
+            return error_result(exc)
+
+    def agentnavi_history(
+        query: Any = None,
+        task_id: Any = None,
+        mode: Any = "timeline",
+        project_id: Any = None,
+        workspace: Any = None,
+    ) -> Any:
+        """查询任务时间线、任务详情与项目事实故事。"""
+
+        return call_history(query, task_id, mode, project_id, workspace)
+
     def agentnavi_visualize(
         view: Any,
         query: Any = None,
@@ -197,7 +251,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         """生成 MCP App 与无 UI Host 都可消费的只读 VLA 结果。"""
 
         try:
-            if view not in {"context", "repo-overview", "repo-tour", "architecture", "flow", "impact"}:
+            if view not in {"context", "repo-overview", "repo-tour", "architecture", "flow", "impact", "history"}:
                 raise AgentNaviMCPError(
                     "INVALID_ARGUMENT", details={"field": "view"}
                 )
@@ -221,6 +275,8 @@ def create_server(*, home: str | Path | None = None) -> Any:
             if view == "impact":
                 assert checked_query is not None
                 return call_impact(checked_query, project_id, workspace)
+            if view == "history":
+                return call_history(checked_query, None, "timeline", project_id, workspace)
             if view == "repo-overview":
                 from ..repository_views import repository_overview_data
 
@@ -252,13 +308,17 @@ def create_server(*, home: str | Path | None = None) -> Any:
         except Exception as exc:
             return error_result(exc)
 
-    for tool in (agentnavi_context, agentnavi_impact, agentnavi_visualize):
+    for tool in (agentnavi_context, agentnavi_impact, agentnavi_history, agentnavi_visualize):
         tool.__annotations__["project_id"] = OPTIONAL_TEXT_INPUT
         tool.__annotations__["workspace"] = OPTIONAL_TEXT_INPUT
     agentnavi_context.__annotations__["query"] = REQUIRED_TEXT_INPUT
     agentnavi_context.__annotations__["return"] = CONTEXT_TOOL_RESULT
     agentnavi_impact.__annotations__["selector"] = REQUIRED_TEXT_INPUT
     agentnavi_impact.__annotations__["return"] = IMPACT_TOOL_RESULT
+    agentnavi_history.__annotations__["query"] = HISTORY_OPTIONAL_TEXT_INPUT
+    agentnavi_history.__annotations__["task_id"] = HISTORY_OPTIONAL_TEXT_INPUT
+    agentnavi_history.__annotations__["mode"] = HISTORY_MODE_INPUT
+    agentnavi_history.__annotations__["return"] = HISTORY_TOOL_RESULT
     agentnavi_visualize.__annotations__["query"] = OPTIONAL_TEXT_INPUT
     agentnavi_visualize.__annotations__["view"] = VISUALIZE_VIEW_INPUT
     agentnavi_visualize.__annotations__["return"] = VISUALIZE_TOOL_RESULT
@@ -271,7 +331,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
         .read_text(encoding="utf-8"),
         name="AgentNavi ContextMap",
         title="AgentNavi ContextMap",
-        description="项目概览、仓库导览、架构、任务流、Context 与 Impact 的只读视图。",
+        description="项目概览、仓库导览、架构、任务流、Context、Impact 与 History 的只读视图。",
         csp=ResourceCsp(
             connectDomains=[],
             resourceDomains=[],
@@ -283,7 +343,7 @@ def create_server(*, home: str | Path | None = None) -> Any:
     apps.tool(
         resource_uri=APP_URI,
         name="agentnavi_visualize",
-        description="展示只读项目概览、仓库导览、架构、任务流、ContextMap 或 Impact。",
+        description="展示只读项目概览、仓库导览、架构、任务流、ContextMap、Impact 或 History。",
         annotations=context_tool_annotations(),
         structured_output=True,
     )(agentnavi_visualize)
@@ -310,6 +370,18 @@ def create_server(*, home: str | Path | None = None) -> Any:
         annotations=context_tool_annotations(),
         structured_output=True,
     )
+    server.add_tool(
+        agentnavi_history,
+        name="agentnavi_history",
+        description="查询有界任务时间线、任务详情与按 L3 关系聚合的项目故事。",
+        annotations=context_tool_annotations(),
+        structured_output=True,
+    )
+
+    history_tool = server._tool_manager.get_tool("agentnavi_history")
+    if history_tool is None:  # pragma: no cover - SDK 注册失败的防御分支
+        raise RuntimeError("agentnavi_history 注册失败")
+    history_tool.parameters = HISTORY_INPUT_SCHEMA
 
     # FastMCP 2.x 从单个函数参数生成扁平 schema，无法表达 query 是否必填取决于
     # view。保留 handler 的公开错误防线，同时用公开 tools/list 合同发布判别联合。

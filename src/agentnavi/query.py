@@ -1384,3 +1384,20 @@ def history_data(database: Database, project: sqlite3.Row, query: str, *, limit:
     with database.connect() as connection:
         rows = search_tasks(connection, project_id=project["id"], query=query, limit=limit)
         return [dict(row) for row in rows]
+
+
+def task_detail_data(
+    database: Database,
+    project: sqlite3.Row,
+    task_id: str,
+    *,
+    relation_limit: int = 20,
+) -> dict[str, Any] | None:
+    """读取与 History view 完全相同安全规则下的单任务投影。"""
+
+    # 延迟导入避免 history_view 复用 query 的 Evidence helper 时形成模块环。
+    from .history_view import task_detail_projection
+
+    return task_detail_projection(
+        database, project, task_id, relation_limit=relation_limit
+    )

@@ -204,6 +204,24 @@
           </section>
         </div>
 
+        <div id="history-view" class="history-view" hidden>
+          <nav class="history-modes" aria-label="历史视图模式">
+            <button id="history-mode-timeline" type="button" aria-pressed="true">Task Timeline</button>
+            <button id="history-mode-story" type="button" aria-pressed="false">Project Story</button>
+          </nav>
+          <p id="history-disclaimer" class="history-disclaimer"></p>
+          <section id="history-timeline-panel" aria-labelledby="history-timeline-title">
+            <span class="stage-index">NEWEST → OLDEST</span>
+            <h2 id="history-timeline-title">Task Timeline</h2>
+            <ol id="history-timeline" class="history-list"></ol>
+          </section>
+          <section id="history-story-panel" aria-labelledby="history-story-title" hidden>
+            <span class="stage-index">L3 AGGREGATION</span>
+            <h2 id="history-story-title">Project Story</h2>
+            <ol id="history-story" class="history-list"></ol>
+          </section>
+        </div>
+
         <section id="warning-panel" class="warning-panel" hidden aria-label="数据提示">
           <span class="warning-label">WARNINGS</span>
           <ul id="warning-list"></ul>

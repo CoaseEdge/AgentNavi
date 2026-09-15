@@ -283,13 +283,59 @@ export interface ImpactLane {
   evidence: Evidence[];
 }
 
+export interface HistoryRelationItem {
+  entity: TourStop["entity"];
+  relation: TourStop["relations"][number];
+  recordedOrder: number;
+  evidence: Evidence[];
+}
+
+export interface HistoryTimelineItem {
+  entity: TourStop["entity"];
+  taskId: string;
+  status: string;
+  summary: string;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  sortTime: string;
+  relations: HistoryRelationItem[];
+  evidence: Evidence[];
+}
+
+export interface HistoryView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "history";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "task-timeline-story";
+    revision: string;
+    selectedMode: "timeline" | "story";
+    disclaimer: string;
+    timeline: HistoryTimelineItem[];
+    story: Array<{
+      id: string; title: string; summary: string; sortTime: string;
+      task: TourStop["entity"];
+      groups: Array<{ relation: "read" | "modified" | "tested" | "searched" | "affects"; paths: string[]; concepts: string[]; evidence: Evidence[] }>;
+      explanationSource: "l3-aggregation";
+      disclaimer: string;
+      evidence: Evidence[];
+    }>;
+    taskDetail: HistoryTimelineItem | null;
+    stats: { files: number; tasks: number; displayedTasks: number; displayedRelations: number };
+  };
+  warnings: ContextWarning[];
+}
+
 export type AgentNaviView =
   | ContextView
   | RepositoryOverviewView
   | RepositoryTourView
   | ArchitectureView
   | FlowView
-  | ImpactView;
+  | ImpactView
+  | HistoryView;
 
 export interface PublicError {
   code: string;
@@ -1274,9 +1320,199 @@ export function parseImpactView(value: unknown): ImpactView | undefined {
       stats: { files: parsedStats.files, concepts: parsedStats.concepts, tasks: parsedStats.tasks } }, warnings: common.warnings };
 }
 
+export function parseHistoryView(value: unknown): HistoryView | undefined {
+  const rawEnvelope = record(value);
+  if (!Array.isArray(rawEnvelope?.warnings) || rawEnvelope.warnings.length > MAX_CONTEXT_WARNINGS) return undefined;
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "history" || common.data.layout !== "task-timeline-story") return undefined;
+  const strictText = (entry: unknown, maximum: number): string | undefined =>
+    typeof entry === "string" && entry.trim().length > 0 && entry.length <= maximum &&
+      !containsPrivatePath(entry.replace(/<[^>]*>/g, ""))
+      ? entry : undefined;
+  const revision = strictText(common.data.revision, 120);
+  const disclaimer = strictText(common.data.disclaimer, 500);
+  const selectedMode = common.data.selectedMode;
+  const stats = record(common.data.stats);
+  const nonNegativeInteger = (entry: unknown): entry is number =>
+    typeof entry === "number" && Number.isInteger(entry) && entry >= 0;
+  const utcTimestamp = (entry: string): boolean => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(entry);
+    const epoch = Date.parse(entry);
+    if (!match || !Number.isFinite(epoch)) return false;
+    const date = new Date(epoch);
+    return date.getUTCFullYear() === Number(match[1]) && date.getUTCMonth() + 1 === Number(match[2]) &&
+      date.getUTCDate() === Number(match[3]) && date.getUTCHours() === Number(match[4]) &&
+      date.getUTCMinutes() === Number(match[5]) && date.getUTCSeconds() === Number(match[6]);
+  };
+  const historyEvidence = (value: unknown, maximum: number, l3 = false): Evidence[] | undefined => {
+    const raw = Array.isArray(value) ? value : [];
+    if (raw.length === 0 || raw.length > maximum) return undefined;
+    const parsed: Evidence[] = [];
+    for (const entry of raw) {
+      const item = record(entry);
+      const rawConfidence = item?.confidence; const start = item?.lineStart; const end = item?.lineEnd;
+      const kind = strictText(item?.kind, 120); const summary = strictText(item?.summary, 500);
+      const source = strictText(item?.source, 120); const layer = item?.layer;
+      const path = item?.path === undefined ? undefined : strictText(item.path, 500);
+      if (!item || !kind || !summary || !source || (layer !== "L1" && layer !== "L2" && layer !== "L3") ||
+          (item.path !== undefined && (!path || !isCanonicalRelativePath(path))) || typeof rawConfidence !== "number" ||
+          !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1 ||
+          (start !== undefined && (typeof start !== "number" || !Number.isInteger(start) || start < 1)) ||
+          (end !== undefined && (typeof end !== "number" || !Number.isInteger(end) || end < 1 || start === undefined || end < start)) ||
+          (l3 && (layer !== "L3" || source !== "task-events"))) return undefined;
+      parsed.push({ kind, summary, layer, source, confidence: rawConfidence, ...(path ? { path } : {}),
+        ...(start !== undefined ? { lineStart: start } : {}), ...(end !== undefined ? { lineEnd: end } : {}) });
+    }
+    return parsed;
+  };
+  const historyEntity = (value: unknown): TourStop["entity"] | undefined => {
+    const item = record(value); const layer = item?.layer;
+    const id = strictText(item?.id, 240); const kind = strictText(item?.kind, 120);
+    const label = strictText(item?.label, 240); const source = strictText(item?.source, 120);
+    const path = item?.path === undefined ? undefined : strictText(item.path, 500);
+    const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : [];
+    const evidence = historyEvidence(rawEvidence, 3, layer === "L3"); const rawConfidence = item?.confidence;
+    if (!item || !id || !kind || !label || !source || !evidence ||
+        (layer !== "L1" && layer !== "L2" && layer !== "L3") ||
+        typeof rawConfidence !== "number" || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1 ||
+        (item.path !== undefined && (!path || !isCanonicalRelativePath(path)))) return undefined;
+    return { id, kind, label, ...(path ? { path } : {}), layer, source, confidence: rawConfidence, evidence };
+  };
+  const historyRelation = (value: unknown): TourStop["relations"][number] | undefined => {
+    const item = record(value); const rawConfidence = item?.confidence;
+    const id = strictText(item?.id, 240); const sourceId = strictText(item?.sourceId, 240);
+    const targetId = strictText(item?.targetId, 240); const relation = strictText(item?.relation, 120);
+    const source = strictText(item?.source, 120); const evidence = historyEvidence(item?.evidence, 3, true);
+    if (!item || !id || !sourceId || !targetId || !relation || !source || !evidence || item.layer !== "L3" ||
+        typeof rawConfidence !== "number" || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1) return undefined;
+    return { id, sourceId, targetId, relation, layer: "L3", source, confidence: rawConfidence, evidence };
+  };
+  if (!nonBlank(revision) || !nonBlank(disclaimer) || (selectedMode !== "timeline" && selectedMode !== "story") ||
+      !stats || !nonNegativeInteger(stats.files) || !nonNegativeInteger(stats.tasks) ||
+      !nonNegativeInteger(stats.displayedTasks) || !nonNegativeInteger(stats.displayedRelations)) return undefined;
+  const rawTimeline = Array.isArray(common.data.timeline) ? common.data.timeline : [];
+  if (rawTimeline.length > 20) return undefined;
+  const timeline: HistoryTimelineItem[] = [];
+  const taskEntities = new Map<string, string>();
+  const entityRegistry = new Map<string, string>();
+  const edgeIds = new Set<string>();
+  for (const raw of rawTimeline) {
+    const item = record(raw); const rawEntity = record(item?.entity); const entity = historyEntity(item?.entity);
+    const taskId = strictText(item?.taskId, 240); const status = strictText(item?.status, 40);
+    const summary = strictText(item?.summary, 500); const createdAt = strictText(item?.createdAt, 64);
+    const updatedAt = strictText(item?.updatedAt, 64); const sortTime = strictText(item?.sortTime, 64);
+    const closedAt = item?.closedAt === null ? null : strictText(item?.closedAt, 64);
+    const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : [];
+    const evidence = historyEvidence(rawEvidence, 3, true);
+    const rawRelations = Array.isArray(item?.relations) ? item.relations : [];
+    if (!item || !entity || entity.kind !== "task" || entity.layer !== "L3" || entity.source !== "task-events" ||
+        !nonBlank(taskId) || !nonBlank(status) || !nonBlank(summary) || !nonBlank(createdAt) ||
+        !nonBlank(updatedAt) || !nonBlank(sortTime) || (closedAt !== null && !nonBlank(closedAt)) ||
+        !utcTimestamp(createdAt) || !utcTimestamp(updatedAt) || !utcTimestamp(sortTime) ||
+        (closedAt !== null && !utcTimestamp(closedAt)) ||
+        !rawEntity || !historyEvidence(rawEntity.evidence, 3, true) || !evidence ||
+        JSON.stringify(entity.evidence) !== JSON.stringify(evidence) || rawRelations.length > 12) return undefined;
+    const relations: HistoryRelationItem[] = [];
+    for (const rawRelation of rawRelations) {
+      const relationItem = record(rawRelation); const rawTarget = record(relationItem?.entity);
+      const rawRelationValue = record(relationItem?.relation); const target = historyEntity(relationItem?.entity);
+      const relation = historyRelation(relationItem?.relation); const recordedOrder = relationItem?.recordedOrder;
+      const relationRawEvidence = Array.isArray(relationItem?.evidence) ? relationItem.evidence : [];
+      const relationEvidence = historyEvidence(relationRawEvidence, 3, true);
+      if (!relationItem || !target || !relation || relation.layer !== "L3" || relation.source !== "task-events" ||
+          !["read", "modified", "tested", "searched", "affects"].includes(relation.relation) ||
+          relation.sourceId !== entity.id || relation.targetId !== target.id ||
+          !((target.kind === "file" && target.layer === "L1" && target.path && isCanonicalRelativePath(target.path)) ||
+            (target.kind === "concept" && target.layer === "L2" && target.path === undefined)) ||
+          typeof recordedOrder !== "number" || !Number.isInteger(recordedOrder) || recordedOrder < 1 ||
+          !rawTarget || !historyEvidence(rawTarget.evidence, 3) || !rawRelationValue ||
+          !historyEvidence(rawRelationValue.evidence, 3, true) || !relationEvidence ||
+          JSON.stringify(relation.evidence) !== JSON.stringify(relationEvidence) || edgeIds.has(relation.id) ||
+          target.evidence.some((entry) => target.kind === "file"
+            ? entry.kind !== "repository-file" || entry.layer !== "L1" || entry.source !== target.source || entry.path !== target.path
+            : entry.kind !== "semantic-node" || entry.layer !== "L2" || entry.source !== target.source || entry.path !== undefined) ||
+          relationEvidence.some((entry) => !entry.summary.includes(taskId) || !entry.summary.includes(relation.id))) return undefined;
+      const targetSignature = JSON.stringify(target);
+      if (edgeIds.has(target.id) || (entityRegistry.has(target.id) && entityRegistry.get(target.id) !== targetSignature) || entityRegistry.has(relation.id)) return undefined;
+      entityRegistry.set(target.id, targetSignature);
+      edgeIds.add(relation.id);
+      relations.push({ entity: target, relation, recordedOrder, evidence: relationEvidence });
+    }
+    const entitySignature = JSON.stringify(entity);
+    if (edgeIds.has(entity.id) || (entityRegistry.has(entity.id) && entityRegistry.get(entity.id) !== entitySignature) ||
+        (taskEntities.has(entity.id) && taskEntities.get(entity.id) !== entitySignature)) return undefined;
+    entityRegistry.set(entity.id, entitySignature);
+    taskEntities.set(entity.id, entitySignature);
+    if (evidence.some((entry) => !entry.summary.includes(taskId)) || sortTime !== (closedAt ?? updatedAt ?? createdAt)) return undefined;
+    timeline.push({ entity, taskId, status, summary, createdAt, updatedAt, closedAt, sortTime, relations, evidence });
+  }
+  const order = timeline.map((item) => [item.sortTime, item.taskId] as const);
+  const sortedOrder = [...order].sort((left, right) => Date.parse(right[0]) - Date.parse(left[0]) || right[1].localeCompare(left[1]));
+  if (JSON.stringify(order) !== JSON.stringify(sortedOrder) || new Set(timeline.map((item) => item.entity.id)).size !== timeline.length) return undefined;
+  const rawStory = Array.isArray(common.data.story) ? common.data.story : [];
+  if (rawStory.length > 12) return undefined;
+  const story: HistoryView["data"]["story"] = [];
+  for (const raw of rawStory) {
+    const item = record(raw); const task = historyEntity(item?.task);
+    const id = strictText(item?.id, 240); const title = strictText(item?.title, 240);
+    const summary = strictText(item?.summary, 500); const sortTime = strictText(item?.sortTime, 64);
+    const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : [];
+    const evidence = historyEvidence(rawEvidence, 3, true); const rawGroups = Array.isArray(item?.groups) ? item.groups : [];
+    if (!item || !task || !nonBlank(id) || !nonBlank(title) || !nonBlank(summary) || !nonBlank(sortTime) ||
+        item.explanationSource !== "l3-aggregation" || item.disclaimer !== disclaimer ||
+        taskEntities.get(task.id) !== JSON.stringify(task) || rawGroups.length > 5 ||
+        !utcTimestamp(sortTime) || !evidence || JSON.stringify(task.evidence) !== JSON.stringify(evidence)) return undefined;
+    const groups: HistoryView["data"]["story"][number]["groups"] = [];
+    for (const rawGroup of rawGroups) {
+      const group = record(rawGroup); const relation = group?.relation;
+      const paths = Array.isArray(group?.paths) ? group.paths.map((entry) => text(entry)) : [];
+      const concepts = Array.isArray(group?.concepts) ? group.concepts.map((entry) => strictText(entry, 240) ?? "") : [];
+      const rawGroupEvidence = Array.isArray(group?.evidence) ? group.evidence : [];
+      const groupEvidence = rawGroupEvidence.length === 0 ? [] : historyEvidence(rawGroupEvidence, 3, true);
+      if (!group || !["read", "modified", "tested", "searched", "affects"].includes(String(relation)) ||
+          paths.length > 12 || paths.some((path) => !isCanonicalRelativePath(path)) ||
+          concepts.length > 12 || concepts.some((concept) => !nonBlank(concept)) ||
+          !groupEvidence) return undefined;
+      groups.push({ relation: relation as "read" | "modified" | "tested" | "searched" | "affects", paths, concepts, evidence: groupEvidence });
+    }
+    const timelineTask = timeline.find((entry) => entry.entity.id === task.id)!;
+    const expectedGroups = new Map<string, { paths: string[]; concepts: string[]; evidence: Evidence[] }>();
+    for (const relationItem of timelineTask.relations) {
+      const expected = expectedGroups.get(relationItem.relation.relation) ?? { paths: [], concepts: [], evidence: [] };
+      const targets = relationItem.entity.kind === "file" ? expected.paths : expected.concepts;
+      const target = relationItem.entity.path ?? relationItem.entity.label;
+      if (!targets.includes(target)) targets.push(target);
+      if (!expected.evidence.some((entry) => JSON.stringify(entry) === JSON.stringify(relationItem.evidence[0])) && expected.evidence.length < 3) expected.evidence.push(relationItem.evidence[0]!);
+      expectedGroups.set(relationItem.relation.relation, expected);
+    }
+    for (const expected of expectedGroups.values()) {
+      expected.paths.sort((left, right) => left.localeCompare(right));
+      expected.concepts.sort((left, right) => left.localeCompare(right));
+    }
+    if (new Set(groups.map((group) => group.relation)).size !== groups.length || groups.length !== expectedGroups.size || groups.some((group) => {
+      const expected = expectedGroups.get(group.relation);
+      return !expected || JSON.stringify(group.paths) !== JSON.stringify(expected.paths) ||
+        JSON.stringify(group.concepts) !== JSON.stringify(expected.concepts) ||
+        JSON.stringify(group.evidence) !== JSON.stringify(expected.evidence);
+    })) return undefined;
+    story.push({ id, title, summary, sortTime, task, groups, explanationSource: "l3-aggregation", disclaimer, evidence });
+  }
+  if (JSON.stringify(story.map((item) => item.task.id)) !== JSON.stringify(timeline.slice(0, 12).map((item) => item.entity.id)) ||
+      new Set(story.map((item) => item.id)).size !== story.length || story.some((item, index) =>
+        item.title !== timeline[index]?.entity.label || item.summary !== timeline[index]?.summary || item.sortTime !== timeline[index]?.sortTime)) return undefined;
+  const taskDetail = common.data.taskDetail === null ? null : (timeline.find((item) =>
+    JSON.stringify(item) === JSON.stringify(common.data.taskDetail)) ?? undefined);
+  if (common.data.taskDetail !== null && !taskDetail) return undefined;
+  if (stats.displayedTasks !== timeline.length || stats.displayedRelations !== timeline.reduce((total, item) => total + item.relations.length, 0)) return undefined;
+  return { schemaVersion: SCHEMA_VERSION, view: "history", project: common.project, sourceState: common.sourceState,
+    data: { layout: "task-timeline-story", revision, selectedMode, disclaimer, timeline, story,
+      taskDetail: taskDetail ?? null, stats: { files: stats.files, tasks: stats.tasks, displayedTasks: stats.displayedTasks, displayedRelations: stats.displayedRelations } },
+    warnings: common.warnings };
+}
+
 export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
   return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value) ??
-    parseArchitectureView(value) ?? parseFlowView(value) ?? parseImpactView(value);
+    parseArchitectureView(value) ?? parseFlowView(value) ?? parseImpactView(value) ?? parseHistoryView(value);
 }
 
 export function parseTaskQuery(value: unknown): string | undefined {
@@ -1288,7 +1524,7 @@ export function parseTaskQuery(value: unknown): string | undefined {
 export function parseRequestedView(value: unknown): AgentNaviView["view"] | undefined {
   const input = record(value);
   return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour" ||
-    input?.view === "architecture" || input?.view === "flow" || input?.view === "impact"
+    input?.view === "architecture" || input?.view === "flow" || input?.view === "impact" || input?.view === "history"
     ? input.view
     : undefined;
 }
