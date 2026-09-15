@@ -14,5 +14,64 @@
     "max_model_text_budget_increase": 0.05,
     "task_success_regression": 0.0
   },
-  "notes": "固定 Machine/Human VLA 基准；不扩大 context_data 候选集合或一跳上限。"
+  "cases": [
+    {
+      "id": "repository-overview",
+      "view": "repo-overview",
+      "required_paths": ["README.md", "docs/architecture.md"],
+      "required_observations": ["data.purpose.summary", "data.modules", "data.readingOrder"],
+      "baseline_candidate_count": 8,
+      "baseline_model_tokens": 320,
+      "baseline_success": true
+    },
+    {
+      "id": "repository-tour",
+      "view": "repo-tour",
+      "required_paths": ["README.md", "docs/architecture.md"],
+      "required_observations": ["data.tiers"],
+      "baseline_candidate_count": 8,
+      "baseline_model_tokens": 320,
+      "baseline_success": true
+    },
+    {
+      "id": "membership-context",
+      "view": "context",
+      "query": "membership context",
+      "required_paths": ["src/agentnavi/query.py"],
+      "required_observations": ["data.files", "data.navigation.readingOrder"],
+      "baseline_candidate_count": 12,
+      "baseline_model_tokens": 480,
+      "baseline_success": true
+    },
+    {
+      "id": "payment-impact",
+      "view": "impact",
+      "selector": "src/agentnavi/query.py",
+      "required_paths": ["src/agentnavi/query.py"],
+      "required_observations": ["data.focus", "data.testRecommendations"],
+      "baseline_candidate_count": 12,
+      "baseline_model_tokens": 480,
+      "baseline_success": true
+    },
+    {
+      "id": "historical-design",
+      "view": "history",
+      "query": "design",
+      "required_paths": ["CHANGELOG.md"],
+      "required_observations": ["data.timeline", "data.story"],
+      "baseline_candidate_count": 12,
+      "baseline_model_tokens": 480,
+      "baseline_success": true
+    },
+    {
+      "id": "semantic-review",
+      "view": "semantic-review",
+      "required_paths": ["src/agentnavi/semantic_overlays.py"],
+      "required_observations": ["data.reviewItems", "data.stats"],
+      "baseline_candidate_count": 12,
+      "baseline_model_tokens": 480,
+      "baseline_success": true
+    }
+  ],
+  "notes": "固定 Machine/Human VLA 基准；runner 必须实际调用 Core view 与 MCP Adapter，不扩大 context_data 候选集合或一跳上限。"
 }

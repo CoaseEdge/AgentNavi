@@ -17,6 +17,7 @@ class VLABenchmarkTestCase(unittest.TestCase):
                 "model_tokens": 105,
                 "baseline_success": True,
                 "success": True,
+                "measured": True,
             }
             for view in VLA_BENCHMARK_VIEWS
         }
@@ -35,12 +36,31 @@ class VLABenchmarkTestCase(unittest.TestCase):
                 "model_tokens": 106,
                 "baseline_success": True,
                 "success": False,
+                "measured": True,
             }
             for view in VLA_BENCHMARK_VIEWS
         }
         report = evaluate_vla_surface(results)
         self.assertFalse(report["passed"])
         self.assertEqual(report["necessary_file_recall"], 0.0)
+
+    def test_empty_measurements_never_pass(self) -> None:
+        results = {
+            view: {
+                "required_paths": [],
+                "returned_paths": [],
+                "baseline_candidate_count": 0,
+                "candidate_count": 0,
+                "baseline_model_tokens": 0,
+                "model_tokens": 0,
+                "baseline_success": False,
+                "success": False,
+            }
+            for view in VLA_BENCHMARK_VIEWS
+        }
+        report = evaluate_vla_surface(results)
+        self.assertFalse(report["passed"])
+        self.assertEqual(set(report["invalid_views"]), set(VLA_BENCHMARK_VIEWS))
 
 
 if __name__ == "__main__":
