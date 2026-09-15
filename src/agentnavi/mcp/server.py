@@ -514,6 +514,12 @@ def run_stdio(*, home: str | Path | None = None) -> None:
     create_server(home=home).run("stdio")
 
 
+def run_http(*, home: str | Path | None = None, host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Run Streamable HTTP, defaulting to loopback for local-only exposure."""
+
+    create_server(home=home).run("streamable-http", host=host, port=port)
+
+
 __all__ = [
     "APP_MIME_TYPE",
     "APP_RESOURCE_META",
@@ -521,4 +527,5 @@ __all__ = [
     "APP_URI",
     "create_server",
     "run_stdio",
+    "run_http",
 ]
