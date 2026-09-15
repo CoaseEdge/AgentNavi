@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-import json
 import tempfile
 from pathlib import Path
 
@@ -10,14 +9,15 @@ from agentnavi.config import Settings
 from agentnavi.database import ensure_database
 from agentnavi.engine import scan_project
 from agentnavi.registry import add_project
+from agentnavi.tasks import close_task, create_task, record_event
 
 
 class VLABenchmarkIntegrationTest(unittest.TestCase):
     def test_empty_fixture_measurements_are_rejected_for_all_views(self) -> None:
         payload = {
-            view: {"required_paths": [], "returned_paths": [], "baseline_candidate_count": 0,
-                   "candidate_count": 0, "baseline_model_tokens": 0, "model_tokens": 0,
-                   "baseline_success": False, "success": True}
+            view: {"required_paths": [], "returned_paths": [], "candidate_count_budget": 0,
+                   "candidate_count": 0, "model_text_token_budget": 0, "model_tokens": 0,
+                   "view_contract_ok": True}
             for view in VLA_BENCHMARK_VIEWS
         }
         report = evaluate_vla_surface(payload)
@@ -43,49 +43,19 @@ class VLABenchmarkIntegrationTest(unittest.TestCase):
             database = ensure_database(Settings.load(Path(directory) / "home"))
             project = add_project(database, root, project_id="fixture")
             scan_project(database, project, full=True)
-            fixture = {
-                "gates": {"necessary_file_recall": 1.0, "max_model_text_budget_increase": 0.05},
-                "cases": [
-                    {
-                        "view": "repo-overview", "required_paths": ["README.md"],
-                        "required_observations": ["data.purpose.summary"],
-                        "baseline_candidate_count": 4, "baseline_model_tokens": 100,
-                        "baseline_success": True,
-                    },
-                    {
-                        "view": "repo-tour", "required_paths": ["README.md"],
-                        "required_observations": ["data.tiers"],
-                        "baseline_candidate_count": 4, "baseline_model_tokens": 100,
-                        "baseline_success": True,
-                    },
-                    {
-                        "view": "context", "query": "app", "required_paths": ["src/app.py"],
-                        "required_observations": ["data.files"], "baseline_candidate_count": 4,
-                        "baseline_model_tokens": 100, "baseline_success": True,
-                    },
-                    {
-                        "view": "impact", "selector": "src/app.py", "required_paths": ["src/app.py"],
-                        "required_observations": ["data.focus"], "baseline_candidate_count": 4,
-                        "baseline_model_tokens": 100, "baseline_success": True,
-                    },
-                    {
-                        "view": "history", "query": "", "required_paths": ["README.md"],
-                        "required_observations": ["data.timeline"], "baseline_candidate_count": 4,
-                        "baseline_model_tokens": 100, "baseline_success": True,
-                    },
-                    {
-                        "view": "semantic-review", "required_paths": ["README.md"],
-                        "required_observations": ["data.stats"], "baseline_candidate_count": 4,
-                        "baseline_model_tokens": 100, "baseline_success": True,
-                    },
-                ],
-            }
-            fixture_path = Path(directory) / "vla.json"
-            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+            task = create_task(database, project_id="fixture", title="design task", prompt="design")
+            record_event(
+                database, project=project, agent="fixture", event_type="read",
+                task_id=task["id"], paths=["README.md"],
+            )
+            close_task(database, task["id"], summary="design completed")
+            fixture_path = Path(__file__).parents[1] / "fixtures" / "vla-0.3.0.json"
             report = run_vla_benchmark(database, project, fixture_path=fixture_path)
 
         self.assertEqual(set(report["observations"]), set(VLA_BENCHMARK_VIEWS))
         self.assertIn("metrics", report)
+        self.assertTrue(report["passed"], report)
+        self.assertTrue(all(item["measured"] for item in report["observations"].values()))
 
 
 if __name__ == "__main__":
