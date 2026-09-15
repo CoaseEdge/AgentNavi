@@ -11,6 +11,10 @@ class VLABenchmarkContractTest(unittest.TestCase):
         data = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(data["gates"]["max_model_text_budget_increase"], 0.05)
         self.assertEqual(data["gates"]["necessary_file_recall"], 1.0)
+        self.assertEqual({case["view"] for case in data["cases"]}, {
+            "repo-overview", "repo-tour", "context", "impact", "history", "semantic-review"
+        })
+        self.assertTrue(all(case["baseline_success"] for case in data["cases"]))
 
 
 if __name__ == "__main__":

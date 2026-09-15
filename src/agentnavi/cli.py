@@ -9,7 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from .benchmark import compare_suite, evaluate_retrieval_suite, record_observed_run
+from .benchmark import (
+    compare_suite,
+    evaluate_retrieval_suite,
+    record_observed_run,
+    run_vla_benchmark,
+)
 from .config import Settings
 from .database import Database, ensure_database
 from .engine import scan_project
@@ -422,6 +427,21 @@ def command_benchmark_compare(args: argparse.Namespace) -> int:
                 f"门槛：{comparison.get('quality_gate', '')}"
             )
     return 0
+
+
+def command_benchmark_vla(args: argparse.Namespace) -> int:
+    database = _database(args)
+    project = _resolve(database, args.project)
+    report = run_vla_benchmark(database, project, fixture_path=args.fixture)
+    if args.json:
+        _print_json(report)
+    else:
+        print(
+            f"VLA benchmark：{'通过' if report['passed'] else '失败'}；"
+            f"必要文件召回 {report['necessary_file_recall']:.1%}；"
+            f"无效测量 {len(report['invalid_views'])}"
+        )
+    return 0 if report["passed"] else 1
 
 
 def command_semantic_log_verify(args: argparse.Namespace) -> int:
@@ -898,6 +918,11 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_compare.add_argument("--kind", choices=["retrieval", "observed", "all"], default="all")
     benchmark_compare.add_argument("--json", action="store_true")
     benchmark_compare.set_defaults(func=command_benchmark_compare)
+    benchmark_vla = benchmark_sub.add_parser("vla", help="实际运行六类 VLA View/Adapter 基准")
+    benchmark_vla.add_argument("fixture", help="VLA benchmark fixture JSON")
+    benchmark_vla.add_argument("--project")
+    benchmark_vla.add_argument("--json", action="store_true")
+    benchmark_vla.set_defaults(func=command_benchmark_vla)
 
     semantic_parser = subparsers.add_parser("semantic", help="审查和校正 L2 语义层")
     semantic_sub = semantic_parser.add_subparsers(dest="semantic_command", required=True)
