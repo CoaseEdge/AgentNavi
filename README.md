@@ -23,7 +23,7 @@
 
 <p align="center">
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11+" /></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.2.0-5C7CFA?style=flat-square" alt="版本 0.2.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-5C7CFA?style=flat-square" alt="版本 0.3.0" /></a>
   <img src="https://img.shields.io/badge/status-Alpha-F59E0B?style=flat-square" alt="Alpha" />
   <a href="integrations/deepseek-harness/README.md"><img src="https://img.shields.io/badge/DeepSeek%20Harness-supported-4D6BFE?style=flat-square" alt="支持 DeepSeek Harness" /></a>
   <a href="integrations/README.md"><img src="https://img.shields.io/badge/Codex-supported-111827?style=flat-square&amp;logo=openai&amp;logoColor=white" alt="支持 Codex" /></a>

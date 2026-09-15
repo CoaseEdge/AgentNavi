@@ -33,14 +33,18 @@ agentnavi = "agentnavi.cli:main"
 navi = "agentnavi.cli:main"
 
 [project.urls]
-Repository = "https://github.com/Andrewlislin/AgentNavi"
+Repository = "https://github.com/CoaseEdge/AgentNavi"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
-agentnavi = ["mcp/resources/*.html", "mcp/resources/*.txt"]
+agentnavi = [
+  "mcp/resources/*.html",
+  "mcp/resources/*.txt",
+  "resources/skills/vla/*.md",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

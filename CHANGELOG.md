@@ -9,7 +9,7 @@ AgentNavi VLA 0.3.0 将项目导航、项目记忆与人机协作呈现统一为
 - 新增 reasoning-first Presentation Policy、跨 Agent VLA Skill 与安全文本 fallback；
 - 新增多 Host MCP 配置生成、stdio/Streamable HTTP 传输和 loopback 默认安全边界；
 - 新增固定 Machine/Human VLA benchmark，约束必要文件召回、候选集合、文本预算和任务成功率；
-- 本版本只准备 wheel/sdist 与 Release metadata，不自动发布 PyPI 或 GitHub Release。
+- 本版本准备 wheel/sdist 与 Release metadata；GitHub Release Workflow 会附加构建产物，PyPI 发布不在本轮范围内。
 
 ## 0.2.0 — 2026-08-17
 
