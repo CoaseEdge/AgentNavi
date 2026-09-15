@@ -48,7 +48,11 @@ class PackageBuildContractTestCase(unittest.TestCase):
         self.assertTrue(setuptools["include-package-data"])
         self.assertEqual(
             setuptools["package-data"]["agentnavi"],
-            ["mcp/resources/*.html", "mcp/resources/*.txt"],
+            [
+                "mcp/resources/*.html",
+                "mcp/resources/*.txt",
+                "resources/skills/vla/*.md",
+            ],
         )
         resource = importlib.resources.files("agentnavi.mcp.resources").joinpath(
             "agentnavi-app.html"
@@ -83,6 +87,7 @@ class PackageBuildContractTestCase(unittest.TestCase):
                 self.assertIn(f"{resource_root}agentnavi-app.html", names)
                 notice_name = f"{resource_root}THIRD_PARTY_NOTICES.txt"
                 self.assertIn(notice_name, names)
+                self.assertIn("agentnavi/resources/skills/vla/SKILL.md", names)
                 notices = archive.read(notice_name).decode("utf-8")
 
         for package in (
