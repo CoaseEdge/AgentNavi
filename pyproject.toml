@@ -25,6 +25,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+
 [project.scripts]
 agentnavi = "agentnavi.cli:main"
 navi = "agentnavi.cli:main"

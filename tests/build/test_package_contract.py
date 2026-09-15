@@ -32,6 +32,12 @@ class PackageBuildContractTestCase(unittest.TestCase):
                     value = getattr(value, segment)
                 self.assertTrue(callable(value))
 
+    def test_mcp_is_an_exact_optional_dependency(self) -> None:
+        project = self.pyproject["project"]
+
+        self.assertEqual(project["dependencies"], [])
+        self.assertEqual(project["optional-dependencies"]["mcp"], ["mcp>=2,<3"])
+
     def test_all_packaged_python_sources_compile(self) -> None:
         source_files = sorted((self.root / "src" / "agentnavi").rglob("*.py"))
         self.assertTrue(source_files)

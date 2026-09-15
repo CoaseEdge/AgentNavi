@@ -1,0 +1,324 @@
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from agentnavi.config import Settings
+from agentnavi.database import Database, ensure_database
+from agentnavi.utils import utc_now
+
+
+def _mcp_sdk_available() -> bool:
+    try:
+        return importlib.util.find_spec("mcp.server") is not None
+    except ModuleNotFoundError:
+        return False
+
+
+MCP_AVAILABLE = _mcp_sdk_available()
+
+
+@unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
+class MCPContextToolContractTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.base = Path(self.temporary_directory.name)
+        self.home = self.base / "agentnavi-home"
+        self.project_root = self.base / "private" / "project"
+        self.project_root.mkdir(parents=True)
+        self.database = ensure_database(Settings.load(self.home))
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def _add_project(
+        self,
+        *,
+        project_id: str = "fixture",
+        scanned: bool = True,
+        file_path: str = "src/membership.py",
+    ) -> None:
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO projects(
+                    id, name, root, kind, created_at, updated_at, last_scan_at
+                ) VALUES (?, 'Fixture', ?, 'software', ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    str(self.project_root.resolve()),
+                    now,
+                    now,
+                    now if scanned else None,
+                ),
+            )
+            file_id = Database.upsert_node(
+                connection,
+                project_id=project_id,
+                layer=1,
+                kind="file",
+                key=file_path,
+                label=Path(file_path).name,
+                data={"language": "python", "privateExtension": str(self.project_root)},
+                source="repository",
+            )
+            concept_id = Database.upsert_node(
+                connection,
+                project_id=project_id,
+                layer=2,
+                kind="concept",
+                key="membership",
+                label="会员",
+                data={"keywords": ["会员"]},
+                confidence=0.9,
+                source="semantic-heuristic",
+            )
+            Database.upsert_edge(
+                connection,
+                project_id=project_id,
+                layer=2,
+                source_id=concept_id,
+                relation="implemented_by",
+                target_id=file_id,
+                confidence=0.85,
+                source="semantic-heuristic",
+            )
+            connection.commit()
+
+    async def _call(self, arguments: dict[str, str]):
+        from mcp import Client
+
+        from agentnavi.mcp.server import create_server
+
+        async with Client(create_server(home=self.home), raise_exceptions=True) as client:
+            return await client.call_tool("agentnavi_context", arguments)
+
+    def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
+        self._add_project()
+
+        result = asyncio.run(self._call({"query": "会员", "project_id": "fixture"}))
+        fallback = asyncio.run(self._call({"query": "会员"}))
+
+        self.assertFalse(result.is_error)
+        payload = result.structured_content
+        self.assertEqual(payload["schemaVersion"], "agentnavi.vla.v1")
+        self.assertEqual(payload["view"], "context")
+        self.assertEqual(
+            payload["project"],
+            {"id": "fixture", "name": "Fixture", "kind": "software"},
+        )
+        self.assertEqual(payload["sourceState"]["status"], "ready")
+        self.assertNotIn("query", payload["data"])
+        self.assertEqual(payload["data"]["files"][0]["path"], "src/membership.py")
+        self.assertEqual(fallback.structured_content["project"]["id"], "fixture")
+        text = result.content[0].text
+        self.assertIn("会员", text)
+        self.assertIn("src/membership.py", text)
+        self.assertIn("Fixture", text)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        for secret in (
+            str(self.project_root.resolve()),
+            str(self.database.settings.database_path),
+            str(self.database.settings.event_log_path),
+            "privateExtension",
+        ):
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret, serialized)
+
+    def test_workspace_selection_and_unscanned_source_warning(self) -> None:
+        self._add_project(scanned=False)
+
+        result = asyncio.run(
+            self._call({"query": "会员", "workspace": str(self.project_root / "src")})
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["sourceState"], {"status": "partial"})
+        self.assertEqual(
+            [warning["code"] for warning in result.structured_content["warnings"]],
+            ["SOURCE_NOT_INDEXED"],
+        )
+        self.assertIn("尚未完成索引", result.content[0].text)
+
+    def test_project_errors_are_stable_and_do_not_leak_internal_paths(self) -> None:
+        required = asyncio.run(self._call({"query": "会员"}))
+        missing = asyncio.run(
+            self._call({"query": "会员", "project_id": str(self.project_root.resolve())})
+        )
+
+        for result, expected_code in (
+            (required, "PROJECT_REQUIRED"),
+            (missing, "PROJECT_NOT_FOUND"),
+        ):
+            self.assertTrue(result.is_error)
+            self.assertEqual(result.structured_content["code"], expected_code)
+            wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+            self.assertNotIn(str(self.project_root.resolve()), wire)
+            self.assertNotIn(str(self.database.settings.database_path), wire)
+        self.assertEqual(required.structured_content["details"], {"candidateCount": 0})
+
+    def test_unknown_failures_map_to_sanitized_internal_error(self) -> None:
+        self._add_project()
+        private_message = f"SQLite failed at {self.database.settings.database_path}"
+
+        with patch("agentnavi.query.context_data", side_effect=RuntimeError(private_message)):
+            result = asyncio.run(self._call({"query": "会员", "project_id": "fixture"}))
+
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["code"], "INTERNAL_ERROR")
+        self.assertIn("不可直接重试", result.content[0].text)
+        wire = json.dumps(result.model_dump(by_alias=True), ensure_ascii=False, default=str)
+        self.assertNotIn(private_message, wire)
+        self.assertNotIn(str(self.database.settings.database_path), wire)
+
+    def test_runtime_schema_rejects_invalid_success_envelopes(self) -> None:
+        from pydantic import ValidationError
+
+        from agentnavi.mcp.runtime import ContextViewOutput
+
+        self._add_project()
+        result = asyncio.run(
+            self._call({"query": "会员", "project_id": "fixture"})
+        )
+        payload = result.structured_content
+        ContextViewOutput.model_validate(payload)
+
+        invalid_payloads = []
+        for field, value in (
+            ("schemaVersion", "agentnavi.vla.invalid"),
+            ("project", {}),
+            ("sourceState", {}),
+            ("data", {}),
+        ):
+            invalid = json.loads(json.dumps(payload))
+            invalid[field] = value
+            invalid_payloads.append(invalid)
+
+        for invalid in invalid_payloads:
+            with self.subTest(payload=invalid):
+                with self.assertRaises(ValidationError):
+                    ContextViewOutput.model_validate(invalid)
+
+        for invalid_error in (
+            {
+                "code": "UNEXPECTED",
+                "message": "error",
+                "retryable": False,
+                "details": {},
+            },
+            {
+                "code": "INTERNAL_ERROR",
+                "message": "error",
+                "retryable": False,
+                "details": {},
+                "extra": True,
+            },
+        ):
+            with self.subTest(error=invalid_error):
+                with self.assertRaises(ValidationError):
+                    ContextViewOutput.model_validate(invalid_error)
+
+    def test_path_like_queries_succeed_without_echoing_absolute_style_tokens(self) -> None:
+        self._add_project()
+
+        cases = (
+            "/",
+            "inspect / now",
+            "/api/users",
+            "fix /api/users endpoint",
+            f"fix {self.project_root}/secret.py now",
+            r"fix C:\\Users\\alice\\secret.py now",
+            "inspect file:///Users/alice/secret.py",
+        )
+        for query in cases:
+            with self.subTest(query=query):
+                result = asyncio.run(
+                    self._call({"query": query, "project_id": "fixture"})
+                )
+                self.assertFalse(result.is_error)
+                self.assertNotIn("query", result.structured_content["data"])
+                self.assertIn("查询含路径，已隐藏", result.content[0].text)
+                self.assertNotIn(f"当前查询：{query}", result.content[0].text)
+
+        url = "inspect https://example.com/api/users"
+        url_result = asyncio.run(
+            self._call({"query": url, "project_id": "fixture"})
+        )
+        self.assertFalse(url_result.is_error)
+        self.assertIn(url, url_result.content[0].text)
+        self.assertNotIn("查询含路径，已隐藏", url_result.content[0].text)
+
+    def test_long_relative_paths_are_preserved_without_truncation(self) -> None:
+        long_path = f"src/{'a' * 238}.py"
+        self._add_project(file_path=long_path)
+
+        result = asyncio.run(
+            self._call({"query": long_path, "project_id": "fixture"})
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(
+            result.structured_content["data"]["files"][0]["path"], long_path
+        )
+        self.assertIn(long_path, result.content[0].text)
+
+    def test_neighbor_order_is_stable_across_insertion_orders(self) -> None:
+        self._add_project()
+
+        def replace_neighbors(labels: list[str]) -> None:
+            with self.database.connect() as connection:
+                concept_id = connection.execute(
+                    "SELECT id FROM nodes WHERE project_id='fixture' AND key='membership'"
+                ).fetchone()["id"]
+                connection.execute(
+                    "DELETE FROM edges WHERE project_id='fixture' AND source_id=?",
+                    (concept_id,),
+                )
+                connection.execute(
+                    "DELETE FROM nodes WHERE project_id='fixture' AND key LIKE 'neighbor-%'"
+                )
+                for label in labels:
+                    neighbor_id = Database.upsert_node(
+                        connection,
+                        project_id="fixture",
+                        layer=2,
+                        kind="concept",
+                        key=f"neighbor-{label.lower()}",
+                        label=label,
+                        confidence=0.8,
+                        source="semantic-heuristic",
+                    )
+                    Database.upsert_edge(
+                        connection,
+                        project_id="fixture",
+                        layer=2,
+                        source_id=concept_id,
+                        relation="depends_on",
+                        target_id=neighbor_id,
+                        confidence=0.8,
+                        source="semantic-heuristic",
+                    )
+                connection.commit()
+
+        replace_neighbors(["Zulu", "Alpha"])
+        first = asyncio.run(
+            self._call({"query": "会员", "project_id": "fixture"})
+        ).structured_content["data"]["concepts"][0]["neighbors"]
+        replace_neighbors(["Alpha", "Zulu"])
+        second = asyncio.run(
+            self._call({"query": "会员", "project_id": "fixture"})
+        ).structured_content["data"]["concepts"][0]["neighbors"]
+
+        self.assertEqual(first, second)
+        self.assertEqual([neighbor["label"] for neighbor in first], ["Alpha", "Zulu"])
+
+
+if __name__ == "__main__":
+    unittest.main()

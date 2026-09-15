@@ -719,6 +719,24 @@ def command_doctor(args: argparse.Namespace) -> int:
     return 0 if success else 1
 
 
+def command_mcp(args: argparse.Namespace) -> int:
+    """启动本地 MCP stdio Server；SDK 保持可选且延迟导入。"""
+
+    from .mcp.server import run_stdio
+
+    try:
+        run_stdio(home=args.home)
+    except ModuleNotFoundError as exc:
+        if exc.name != "mcp":
+            raise
+        print(
+            "未安装 MCP 可选依赖。请运行：pip install 'agentnavi[mcp]'",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentnavi",
@@ -729,6 +747,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="AgentNavi 数据目录；默认读取 AGENTNAVI_HOME 或 ~/.agentnavi",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    mcp_parser = subparsers.add_parser("mcp", help="通过 stdio 启动 MCP Server")
+    mcp_parser.set_defaults(func=command_mcp)
 
     init_parser = subparsers.add_parser("init", help="初始化外部工作区和 SQLite 数据库")
     init_parser.set_defaults(func=command_init)
