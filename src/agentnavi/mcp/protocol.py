@@ -13,9 +13,10 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
+
+from ..privacy import contains_private_path, is_canonical_relative_path
 
 
 SCHEMA_VERSION = "agentnavi.vla.v1"
@@ -77,9 +78,6 @@ _FORBIDDEN_KEYS = frozenset(
         "sourcebody",
     }
 )
-_WINDOWS_ABSOLUTE_RE = re.compile(r"(?i)(?:^|[^A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\[^\\/]+[\\/])")
-_UNC_FORWARD_RE = re.compile(r"(?<!:)//[A-Za-z0-9._~-]+(?:/|\b)")
-_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _RFC3339_UTC_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
@@ -111,58 +109,14 @@ def _validate_confidence(confidence: float) -> None:
 
 
 def _validate_relative_path(path: str) -> str:
-    if (
-        not isinstance(path, str)
-        or not path
-        or path != path.strip()
-        or any(ord(character) < 32 or ord(character) == 127 for character in path)
-        or "\\" in path
-        or _URI_SCHEME_RE.match(path)
-    ):
-        raise ValueError(f"路径必须是 POSIX 相对路径：{path!r}")
-    posix_path = PurePosixPath(path)
-    if (
-        posix_path.is_absolute()
-        or PureWindowsPath(path).is_absolute()
-        or bool(PureWindowsPath(path).drive)
-        or path.startswith("file://")
-        or path.startswith("~")
-        or ".." in posix_path.parts
-        or str(posix_path) in {"", "."}
-        or str(posix_path) != path
-    ):
+    if not is_canonical_relative_path(path):
         raise ValueError(f"路径必须是 POSIX 相对路径：{path!r}")
     return path
 
 
 def _reject_absolute_path_text(value: str) -> None:
-    lower = value.lower()
-    if (
-        "file://" in lower
-        or "~/" in value
-        or _UNC_FORWARD_RE.search(value)
-        or _WINDOWS_ABSOLUTE_RE.search(value)
-        or _contains_posix_absolute(value)
-        or value == "/"
-    ):
-        raise ValueError("VLA 输出不得包含绝对路径或 file:// URI。")
-
-
-def _contains_posix_absolute(value: str) -> bool:
-    """识别独立出现的 POSIX 绝对路径，同时放过 URL 与相对路径。"""
-
-    for index, character in enumerate(value):
-        if character != "/" or index + 1 >= len(value) or value[index + 1].isspace():
-            continue
-        if index == 0:
-            return True
-        previous = value[index - 1]
-        if previous == ":" and value[index + 1] == "/":
-            continue
-        if previous.isalnum() or previous in "._~-/":
-            continue
-        return True
-    return False
+    if contains_private_path(value):
+        raise ValueError("VLA 输出不得包含绝对路径或本地文件 URI。")
 
 
 def _normalized_key(key: str) -> str:

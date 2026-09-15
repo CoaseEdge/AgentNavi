@@ -139,11 +139,37 @@ import agentnavi.mcp.server
                         "warnings",
                     },
                 )
-                self.assertEqual(visualize_tool.output_schema, context_tool.output_schema)
+                self.assertEqual(
+                    context_tool.output_schema["properties"]["view"]["const"],
+                    "context",
+                )
+                self.assertEqual(
+                    context_tool.output_schema["properties"]["data"]["$ref"],
+                    "#/$defs/ContextDataOutput",
+                )
+                self.assertNotIn(
+                    "RepositoryOverviewDataOutput",
+                    context_tool.output_schema["$defs"],
+                )
+                self.assertEqual(
+                    visualize_tool.output_schema["anyOf"],
+                    [
+                        {"$ref": "#/$defs/ContextViewOutput"},
+                        {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                        {"$ref": "#/$defs/RepositoryTourViewOutput"},
+                        {"$ref": "#/$defs/ArchitectureViewOutput"},
+                        {"$ref": "#/$defs/FlowViewOutput"},
+                    ],
+                )
                 self.assertEqual(
                     visualize_tool.input_schema["properties"]["view"],
-                    {"const": "context", "title": "View", "type": "string"},
+                    {
+                        "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+                        "title": "View",
+                        "type": "string",
+                    },
                 )
+                self.assertEqual(visualize_tool.input_schema["required"], ["view"])
                 self.assertTrue(context_tool.annotations.read_only_hint)
                 self.assertFalse(context_tool.annotations.destructive_hint)
                 self.assertTrue(context_tool.annotations.idempotent_hint)
@@ -163,6 +189,27 @@ import agentnavi.mcp.server
         from mcp import Client, StdioServerParameters, stdio_client
 
         async def verify(home: Path) -> None:
+            from agentnavi.config import Settings
+            from agentnavi.database import ensure_database
+            from agentnavi.engine import scan_project
+            from agentnavi.registry import add_project
+
+            project_root = home.parent / "stdio-fixture"
+            (project_root / "docs").mkdir(parents=True)
+            (project_root / "README.md").write_text(
+                "# Fixture\n\n## 一句话理解\n\n帮助协作者理解项目。\n\n"
+                "## 问题定义\n\n减少重复搜索。\n\n"
+                "## 解决方式\n\n用证据提供导航。\n",
+                encoding="utf-8",
+            )
+            (project_root / "docs" / "architecture.md").write_text(
+                "# 架构\n\n## 主流程\n\n1. 接收\n2. 解析\n3. 读取\n"
+                "4. 汇总\n5. 投影\n6. 返回\n",
+                encoding="utf-8",
+            )
+            database = ensure_database(Settings.load(home))
+            project = add_project(database, project_root, project_id="stdio-fixture")
+            scan_project(database, project, full=True)
             server = StdioServerParameters(
                 command=sys.executable,
                 args=["-m", "agentnavi", "--home", str(home), "mcp"],
@@ -215,19 +262,67 @@ import agentnavi.mcp.server
                     {"ui": {"resourceUri": "ui://agentnavi/app.html"}},
                 )
                 self.assertEqual(
-                    tools_by_name["agentnavi_visualize"].output_schema,
-                    tools_by_name["agentnavi_context"].output_schema,
+                    tools_by_name["agentnavi_context"]
+                    .output_schema["properties"]["view"]["const"],
+                    "context",
                 )
-                fallback = await client.call_tool(
+                self.assertEqual(
+                    tools_by_name["agentnavi_visualize"].output_schema["anyOf"],
+                    [
+                        {"$ref": "#/$defs/ContextViewOutput"},
+                        {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                        {"$ref": "#/$defs/RepositoryTourViewOutput"},
+                        {"$ref": "#/$defs/ArchitectureViewOutput"},
+                        {"$ref": "#/$defs/FlowViewOutput"},
+                    ],
+                )
+                overview = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "repo-overview", "project_id": "stdio-fixture"},
+                )
+                self.assertFalse(overview.is_error)
+                self.assertEqual(overview.structured_content["view"], "repo-overview")
+                overview_wire = str(overview.model_dump(by_alias=True))
+                self.assertNotIn(str(project_root.resolve()), overview_wire)
+                self.assertIn("README.md", overview.content[0].text)
+                tour = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "repo-tour", "project_id": "stdio-fixture"},
+                )
+                self.assertFalse(tour.is_error)
+                self.assertEqual(tour.structured_content["view"], "repo-tour")
+                self.assertEqual(
+                    [tier["depth"] for tier in tour.structured_content["data"]["tiers"]],
+                    ["one-minute", "five-minutes", "source-deep-dive"],
+                )
+                self.assertIn("技术说明", tour.content[0].text)
+                self.assertNotIn(
+                    str(project_root.resolve()),
+                    str(tour.model_dump(by_alias=True)),
+                )
+                context_result = await client.call_tool(
                     "agentnavi_visualize",
                     {"view": "context", "query": "会员入口"},
                 )
-                self.assertTrue(fallback.is_error)
+                self.assertFalse(context_result.is_error)
                 self.assertEqual(
-                    fallback.structured_content["code"],
-                    "PROJECT_REQUIRED",
+                    context_result.structured_content["view"],
+                    "context",
                 )
-                self.assertIn("AgentNavi 错误", fallback.content[0].text)
+                self.assertIn("AgentNavi 项目上下文", context_result.content[0].text)
+                missing_context_query = await client.call_tool(
+                    "agentnavi_visualize",
+                    {"view": "context", "project_id": "stdio-fixture"},
+                )
+                self.assertTrue(missing_context_query.is_error)
+                self.assertEqual(
+                    missing_context_query.structured_content["code"],
+                    "INVALID_ARGUMENT",
+                )
+                self.assertEqual(
+                    missing_context_query.structured_content["details"],
+                    {"field": "query"},
+                )
                 invalid_token = "/private/stdio-secret.py"
                 invalid = await client.call_tool(
                     "agentnavi_visualize",

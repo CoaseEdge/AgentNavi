@@ -12,11 +12,11 @@
   </head>
   <body>
     <main class="app-shell" aria-labelledby="view-title">
-      <aside class="status-rail" aria-label="ContextMap 状态">
+      <aside class="status-rail" aria-label="AgentNavi 视图状态">
         <div class="brand-mark" aria-hidden="true">AN</div>
         <div class="rail-copy">
           <span class="eyebrow">AGENTNAVI / VLA</span>
-          <h1 id="view-title">ContextMap</h1>
+          <h1 id="view-title">Project Navigator</h1>
         </div>
         <div class="connection-state" id="connection-state" role="status" aria-live="polite">
           <span class="state-dot" aria-hidden="true"></span>
@@ -38,11 +38,11 @@
         </dl>
       </aside>
 
-      <section class="map-panel" aria-label="任务到概念与文件的导航图">
+      <section class="map-panel" aria-label="项目导航视图">
         <header class="map-header">
           <div>
-            <span class="eyebrow">READING CONTEXT</span>
-            <p>从当前任务，沿概念定位到必要文件。</p>
+            <span id="view-eyebrow" class="eyebrow">READING CONTEXT</span>
+            <p id="view-description">从当前任务，沿概念定位到必要文件。</p>
           </div>
           <span class="schema-chip">agentnavi.vla.v1</span>
         </header>
@@ -89,6 +89,98 @@
             </header>
             <ol id="file-list" class="node-list"></ol>
           </section>
+        </div>
+
+        <div id="repository-view" class="repository-view" hidden>
+          <section class="overview-section overview-purpose" aria-labelledby="purpose-title">
+            <span class="stage-index">01 / PURPOSE</span>
+            <h2 id="purpose-title">做什么</h2>
+            <p id="overview-purpose"></p>
+            <p id="purpose-evidence" class="evidence-line"></p>
+          </section>
+
+          <section class="overview-section overview-need" aria-labelledby="need-title">
+            <span class="stage-index">02 / WHY</span>
+            <h2 id="need-title">为什么</h2>
+            <dl class="need-grid">
+              <div>
+                <dt>问题</dt>
+                <dd id="overview-problem"></dd>
+                <dd id="problem-evidence" class="evidence-line"></dd>
+              </div>
+              <div>
+                <dt>方案</dt>
+                <dd id="overview-solution"></dd>
+                <dd id="solution-evidence" class="evidence-line"></dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="overview-section overview-workflow" aria-labelledby="workflow-title">
+            <span class="stage-index">03 / FLOW</span>
+            <h2 id="workflow-title">5–7 步主流程</h2>
+            <ol id="overview-workflow" class="overview-list"></ol>
+          </section>
+
+          <section class="overview-section overview-modules" aria-labelledby="modules-title">
+            <span class="stage-index">04 / MODULES</span>
+            <h2 id="modules-title">核心模块</h2>
+            <ul id="overview-modules" class="overview-list"></ul>
+          </section>
+
+          <section class="overview-section overview-reading" aria-labelledby="reading-title">
+            <span class="stage-index">05 / START HERE</span>
+            <h2 id="reading-title">阅读顺序</h2>
+            <ol id="overview-reading-order" class="overview-list"></ol>
+          </section>
+        </div>
+
+        <div id="repository-tour" class="repository-tour" hidden>
+          <nav class="tour-depths" aria-label="导览深度">
+            <button id="tour-depth-one-minute" type="button" aria-pressed="true">1 分钟</button>
+            <button id="tour-depth-five-minutes" type="button" aria-pressed="false">5 分钟</button>
+            <button id="tour-depth-source-deep-dive" type="button" aria-pressed="false">深入源码</button>
+          </nav>
+          <section class="tour-panel" aria-labelledby="tour-depth-label">
+            <span class="stage-index">GUIDED PATH</span>
+            <h2 id="tour-depth-label"></h2>
+            <p id="tour-empty" class="tour-empty" hidden>当前深度没有足够的可追溯证据。</p>
+            <ol id="tour-stops" class="tour-stops"></ol>
+          </section>
+        </div>
+
+        <div id="architecture-view" class="architecture-view" hidden>
+          <section class="architecture-summary" aria-labelledby="architecture-title">
+            <span class="stage-index">FIXED COGNITIVE LAYOUT</span>
+            <h2 id="architecture-title">系统由哪些部分构成</h2>
+            <p id="architecture-summary"></p>
+          </section>
+          <section class="architecture-group" aria-labelledby="architecture-entry-title">
+            <h2 id="architecture-entry-title">入口</h2>
+            <ul id="architecture-entry"></ul>
+          </section>
+          <section class="architecture-group" aria-labelledby="architecture-core-title">
+            <h2 id="architecture-core-title">核心</h2>
+            <ul id="architecture-core"></ul>
+          </section>
+          <section class="architecture-group" aria-labelledby="architecture-support-title">
+            <h2 id="architecture-support-title">支撑</h2>
+            <ul id="architecture-support"></ul>
+          </section>
+          <section class="architecture-relations" aria-labelledby="architecture-relations-title">
+            <h2 id="architecture-relations-title">真实组件关系</h2>
+            <ul id="architecture-connections"></ul>
+          </section>
+        </div>
+
+        <div id="flow-view" class="flow-view" hidden>
+          <section class="flow-task" aria-labelledby="flow-task-title">
+            <span class="stage-index">REAL TASK</span>
+            <h2 id="flow-task-title">任务示例</h2>
+            <p id="flow-task"></p>
+          </section>
+          <p id="flow-empty" class="tour-empty" hidden>项目文档中没有可验证的 5–7 步执行主流程。</p>
+          <ol id="flow-steps" class="flow-steps"></ol>
         </div>
 
         <section id="warning-panel" class="warning-panel" hidden aria-label="数据提示">

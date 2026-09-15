@@ -37,6 +37,116 @@ function fixture() {
   };
 }
 
+function overviewFixture() {
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "repo-overview",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      purpose: {
+        summary: "帮助协作者理解项目 <script>alert(1)</script>",
+        evidence: [{ kind: "document", summary: "说明", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 4 }],
+      },
+      need: {
+        problem: { summary: "重复搜索", evidence: [{ kind: "document", summary: "问题", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 8 }] },
+        solution: { summary: "证据导航", evidence: [{ kind: "document", summary: "方案", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 12 }] },
+      },
+      workflow: Array.from({ length: 7 }, (_, index) => ({
+        step: index + 1,
+        title: `动作 ${index + 1}`,
+        detail: `动作 ${index + 1} 的说明`,
+        evidence: [{ kind: "document", summary: "流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md", lineStart: index + 3 }],
+      })),
+      modules: [{ id: "core", name: "Core", summary: "核心模块", paths: ["src/core.py"], layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [] }],
+      readingOrder: [{ position: 1, path: "README.md", reason: "先读目的", evidence: [] }],
+      stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
+function tourFixture() {
+  const evidence = { kind: "document", summary: "仓库证据", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 };
+  const stop = (id, kind, title) => ({
+    id,
+    kind,
+    title,
+    plainLanguage: `${title}的讲人话说明 <script>alert(1)</script>`,
+    technicalExplanation: `${title}的技术说明`,
+    evidence: [evidence],
+    entity: { id, kind: "concept", label: title, path: "README.md", layer: "L1", source: "repository-document", confidence: 1, evidence: [evidence] },
+    relations: [],
+  });
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "repo-tour",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      tiers: [
+        { depth: "one-minute", label: "1 分钟", stops: [stop("purpose", "purpose", "是什么")] },
+        { depth: "five-minutes", label: "5 分钟", stops: [stop("file", "file", "关键文件")] },
+        { depth: "source-deep-dive", label: "深入源码", stops: [stop("symbol", "symbol", "PublicModel")] },
+      ],
+      stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
+function architectureFixture() {
+  const evidence = { kind: "physical-edge", summary: "imports", layer: "L1", source: "ast-import", confidence: 1, path: "src/cli.py" };
+  const entity = (id, label, path, kind = "concept") => ({ id, kind, label, path, layer: kind === "file" ? "L1" : "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] });
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "architecture",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      layout: "cognitive-components",
+      summary: { text: "入口 <script>alert(1)</script> 连接核心", explanationSource: "derived-presentation", evidence: [evidence] },
+      components: [
+        { id: "cli", name: "CLI", group: "entry", responsibility: "接收请求", paths: ["src/cli.py"], entity: entity("cli", "CLI", "src/cli.py"), evidence: [evidence] },
+        { id: "core", name: "Core", group: "core", responsibility: "处理请求", paths: ["src/core.py"], entity: entity("core", "Core", "src/core.py"), evidence: [evidence] },
+      ],
+      connections: [{ id: "edge", sourceId: "cli", targetId: "core", relation: "depends_on", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [evidence] }],
+      entryPoints: [{ path: "src/cli.py", reason: "入口", entity: entity("file:cli", "src/cli.py", "src/cli.py", "file"), evidence: [evidence] }],
+      stats: { files: 2, concepts: 2, tasks: 0, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
+function flowFixture() {
+  const evidence = { kind: "document", summary: "执行流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md" };
+  return {
+    schemaVersion: "agentnavi.vla.v1",
+    view: "flow",
+    project: { id: "fixture", name: "Fixture", kind: "software" },
+    sourceState: { status: "ready" },
+    data: {
+      layout: "numbered-task-flow",
+      exampleTask: { title: "理解 <script>alert(1)</script> 项目", source: "request" },
+      steps: Array.from({ length: 5 }, (_, index) => ({
+        step: index + 1,
+        id: `step-${index + 1}`,
+        title: `步骤 ${index + 1}`,
+        purpose: `阶段 ${index + 1}`,
+        input: index === 0 ? "用户请求" : `步骤 ${index} 的结果`,
+        output: index === 4 ? "主流程结果" : `交给步骤 ${index + 2}`,
+        keyFiles: [],
+        why: `项目文档列为第 ${index + 1} 步`,
+        nextStep: index === 4 ? null : `步骤 ${index + 2}`,
+        explanationSource: "derived-presentation",
+        evidence: [evidence],
+      })),
+      stats: { files: 2, concepts: 2, tasks: 1, documentsRead: 2 },
+    },
+    warnings: [],
+  };
+}
+
 function setup() {
   const { document } = parseHTML(html);
   globalThis.document = document;
@@ -59,6 +169,93 @@ test("bridge renders a successful result as text and preserves concept-file evid
   assert.equal(document.querySelector(".concept-file-links code").textContent, "src/membership.py");
   assert.match(document.querySelector(".file-node .node-meta").textContent, /^候选 · matched/);
   assert.equal(document.querySelector("#connection-label").textContent, "已连接");
+});
+
+test("renderer registry shows repository overview with safe DOM and evidence", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "repo-overview" });
+  assert.equal(document.querySelector("#view-title").textContent, "Repository Overview");
+  assert.equal(document.querySelector("#context-map").hidden, true);
+  applyToolResult(shell, { structuredContent: overviewFixture() });
+
+  assert.equal(document.querySelector("#repository-view").hidden, false);
+  assert.equal(document.querySelector("#context-map").hidden, true);
+  assert.equal(document.querySelector("#view-title").textContent, "Repository Overview");
+  assert.equal(document.querySelector("#overview-workflow").children.length, 7);
+  assert.equal(document.querySelector("#overview-purpose script"), null);
+  assert.equal(document.querySelector("#overview-purpose").textContent, "[内容含路径，已隐藏]");
+  assert.equal(document.querySelector("#purpose-evidence").textContent, "证据 · README.md:4");
+  assert.equal(document.querySelector("#problem-evidence").textContent, "证据 · README.md:8");
+  assert.equal(document.querySelector("#solution-evidence").textContent, "证据 · README.md:12");
+  assert.match(document.querySelector("#overview-workflow li strong").textContent, /01 · 动作 1/);
+  assert.equal(document.querySelector("#overview-workflow li p").textContent, "动作 1 的说明");
+  assert.match(document.querySelector("#overview-reading-order").textContent, /README\.md/);
+  assert.equal(document.querySelector("#connection-label").textContent, "已连接");
+
+  applyToolResult(shell, { structuredContent: fixture() });
+  assert.equal(document.querySelector("#repository-view").hidden, true);
+  assert.equal(document.querySelector("#overview-workflow").children.length, 0);
+  assert.equal(document.querySelector("#problem-evidence").textContent, "");
+  assert.equal(document.querySelector("#solution-evidence").textContent, "");
+  assert.equal(document.querySelector("#context-map").hidden, false);
+});
+
+test("repository tour switches depth locally with accessible controls and safe details", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "repo-tour" });
+  applyToolResult(shell, { structuredContent: tourFixture() });
+
+  assert.equal(document.querySelector("#repository-tour").hidden, false);
+  assert.equal(document.querySelector("#repository-view").hidden, true);
+  assert.equal(document.querySelector("#view-title").textContent, "Repository Tour");
+  assert.equal(document.querySelector("#tour-depth-one-minute").getAttribute("aria-pressed"), "true");
+  assert.equal(document.querySelector("#tour-stops h3").textContent, "是什么");
+  assert.equal(document.querySelector("#tour-stops script"), null);
+  assert.equal(document.querySelector("#tour-stops details summary").textContent, "技术说明与源码证据");
+
+  document.querySelector("#tour-depth-source-deep-dive").click();
+  assert.equal(document.querySelector("#tour-depth-one-minute").getAttribute("aria-pressed"), "false");
+  assert.equal(document.querySelector("#tour-depth-source-deep-dive").getAttribute("aria-pressed"), "true");
+  assert.equal(document.querySelector("#tour-stops h3").textContent, "PublicModel");
+
+  applyToolResult(shell, { structuredContent: fixture() });
+  assert.equal(document.querySelector("#repository-tour").hidden, true);
+  assert.equal(document.querySelector("#tour-stops").children.length, 0);
+});
+
+test("architecture uses grouped cards and only included real connections", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "architecture" });
+  applyToolResult(shell, { structuredContent: architectureFixture() });
+
+  assert.equal(document.querySelector("#architecture-view").hidden, false);
+  assert.equal(document.querySelector("#architecture-entry").children.length, 1);
+  assert.equal(document.querySelector("#architecture-core").children.length, 1);
+  assert.equal(document.querySelector("#architecture-connections strong").textContent, "CLI → Core");
+  assert.equal(document.querySelector("#architecture-summary script"), null);
+  assert.equal(document.querySelector("#architecture-summary").textContent, "[内容含路径，已隐藏]");
+
+  applyToolResult(shell, { structuredContent: flowFixture() });
+  assert.equal(document.querySelector("#architecture-view").hidden, true);
+  assert.equal(document.querySelector("#architecture-connections").children.length, 0);
+});
+
+test("flow renders a local five-step expandable timeline and clears across views", () => {
+  const { document, shell } = setup();
+  applyToolInput(shell, { view: "flow" });
+  applyToolResult(shell, { structuredContent: flowFixture() });
+
+  assert.equal(document.querySelector("#flow-view").hidden, false);
+  assert.equal(document.querySelectorAll("#flow-steps > li").length, 5);
+  assert.equal(document.querySelector("#flow-steps details summary strong").textContent, "步骤 1");
+  assert.equal(document.querySelector("#flow-steps details dl dt").textContent, "作用");
+  assert.match(document.querySelector("#flow-steps details dl").textContent, /证据/);
+  assert.equal(document.querySelector("#flow-task script"), null);
+  assert.equal(document.querySelector("#flow-task").textContent, "[内容含路径，已隐藏]");
+
+  applyToolResult(shell, { structuredContent: fixture() });
+  assert.equal(document.querySelector("#flow-view").hidden, true);
+  assert.equal(document.querySelector("#flow-steps").children.length, 0);
 });
 
 test("new input clears stale data before an error and keeps status perceivable", () => {
@@ -159,4 +356,19 @@ test("every displayed non-path string hides local path tokens recursively", () =
   }
   assert.match(visible, /\[内容含路径，已隐藏\]/);
   assert.match(visible, /https:\/\/example\.com\/api\/users/);
+});
+
+test("overview hides invalid why evidence and reports malformed workflow", () => {
+  const { document, shell } = setup();
+  const malicious = overviewFixture();
+  malicious.data.need.problem.evidence[0].path = "cursor://file/private/problem.md";
+  malicious.data.need.solution.evidence[0].path = "custom-editor://file/private/solution.md";
+  malicious.data.workflow[4].step = 4;
+
+  applyToolResult(shell, { structuredContent: malicious });
+
+  assert.equal(document.querySelector("#problem-evidence").textContent, "");
+  assert.equal(document.querySelector("#solution-evidence").textContent, "");
+  assert.equal(document.querySelector("#overview-workflow").children.length, 0);
+  assert.match(document.querySelector("#warning-list").textContent, /WORKFLOW_SHAPE_INVALID/);
 });

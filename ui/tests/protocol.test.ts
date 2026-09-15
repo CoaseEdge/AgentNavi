@@ -1,7 +1,13 @@
 import {
   isCanonicalRelativePath,
+  parseAgentNaviView,
+  parseArchitectureView,
   parseContextView,
+  parseFlowView,
   parsePublicError,
+  parseRepositoryOverviewView,
+  parseRepositoryTourView,
+  parseRequestedView,
   parseTaskQuery,
 } from "../src/protocol.js";
 
@@ -37,7 +43,7 @@ assert(view.data.concepts[0]?.confidence === 1, "置信度应限制在有效范�
 assert(view.data.files[0]?.path === "src/membership.py", "应接受 POSIX 相对路径");
 
 assert(parseContextView({ ...fixture, schemaVersion: "future" }) === undefined, "应拒绝未知协议");
-assert(parseContextView({ ...fixture, view: "impact" }) === undefined, "S04 应拒绝非 context 视图");
+assert(parseContextView({ ...fixture, view: "repo-overview" }) === undefined, "Context parser 应拒绝其他视图");
 const unsafe = structuredClone(fixture);
 unsafe.data.files[0]!.path = "/private/project.py";
 assert(parseContextView(unsafe)?.data.files.length === 0, "应丢弃绝对路径");
@@ -74,6 +80,11 @@ for (const query of [
   String.raw`fix C:\Users\alice\file.py`,
   String.raw`fix \\server\share\file.py`,
   "inspect file:///private/file.py",
+  "inspect file:/private/file.py",
+  "inspect vscode://file/private/file.py",
+  "inspect vscode-insiders://file/private/file.py",
+  "inspect cursor://file/private/file.py",
+  "inspect custom-editor://file/private/file.py",
 ]) {
   assert(parseTaskQuery({ query }) === "[查询含路径，已隐藏]", "路径型 query 不应回显");
 }
@@ -82,9 +93,277 @@ assert(
   "HTTP URL 不应误判为本地路径",
 );
 assert(
+  parseTaskQuery({ query: "inspect https://file.example.com/api" }) === "inspect https://file.example.com/api",
+  "HTTP(S) 的 file host 仍应作为普通公网 URL",
+);
+assert(
   parsePublicError({ code: "INVALID_ARGUMENT", message: "/private/secret.py" })?.message ===
     "请求参数无效，请检查参数类型和取值。",
   "应只显示本地固定公开错误，不回显远端 message",
 );
+
+const overviewFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "repo-overview",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    purpose: {
+      summary: "帮助协作者理解项目",
+      evidence: [{ kind: "document", summary: "项目说明", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 }],
+    },
+    need: {
+      problem: { summary: "重复搜索", evidence: [{ kind: "document", summary: "问题", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 8 }] },
+      solution: { summary: "证据导航", evidence: [{ kind: "document", summary: "方案", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 12 }] },
+    },
+    workflow: Array.from({ length: 7 }, (_, index) => ({
+      step: index + 1,
+      title: `动作 ${index + 1}`,
+      detail: `动作 ${index + 1} 的说明`,
+      evidence: [{ kind: "document", summary: "流程", layer: "L1", source: "repository-document", confidence: 1, path: "docs/architecture.md", lineStart: index + 3 }],
+    })),
+    modules: [{ id: "concept:core", name: "Core", summary: "核心模块", paths: ["src/core.py"], layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [] }],
+    readingOrder: [{ position: 1, path: "README.md", reason: "先读目的", evidence: [] }],
+    stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+  },
+  warnings: [],
+};
+
+const overview = parseRepositoryOverviewView(overviewFixture);
+assert(overview?.data.workflow.length === 7, "应解析 5–7 步主流程");
+assert(overview?.data.purpose.evidence[0]?.path === "README.md", "应保留规范证据路径");
+assert(parseAgentNaviView(overviewFixture)?.view === "repo-overview", "通用 parser 应分派 Overview");
+assert(parseRequestedView({ view: "repo-overview" }) === "repo-overview", "应识别 Overview 请求");
+
+const tourEvidence = { kind: "document", summary: "证据", layer: "L1", source: "repository-document", confidence: 1, path: "README.md", lineStart: 3 };
+const tourStop = {
+  id: "purpose",
+  kind: "purpose",
+  title: "是什么",
+  plainLanguage: "帮助理解项目",
+  technicalExplanation: "来自项目文档",
+  evidence: [tourEvidence],
+  entity: { id: "purpose", kind: "concept", label: "项目目的", path: "README.md", layer: "L1", source: "repository-document", confidence: 1, evidence: [tourEvidence] },
+  relations: [],
+};
+const tourFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "repo-tour",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    tiers: [
+      { depth: "one-minute", label: "1 分钟", stops: [tourStop] },
+      { depth: "five-minutes", label: "5 分钟", stops: [{ ...tourStop, id: "file", kind: "file" }] },
+      { depth: "source-deep-dive", label: "深入源码", stops: [{ ...tourStop, id: "symbol", kind: "symbol" }] },
+    ],
+    stats: { files: 3, concepts: 1, tasks: 0, documentsRead: 2 },
+  },
+  warnings: [],
+};
+assert(parseRepositoryTourView(tourFixture)?.data.tiers.length === 3, "应解析固定三档 Tour");
+assert(parseAgentNaviView(tourFixture)?.view === "repo-tour", "通用 parser 应分派 Tour");
+assert(parseRequestedView({ view: "repo-tour" }) === "repo-tour", "应识别 Tour 请求");
+const unsafeTour = structuredClone(tourFixture);
+unsafeTour.data.tiers[0]!.stops[0]!.evidence[0]!.path = "/private/tour.py";
+assert(parseRepositoryTourView(unsafeTour) === undefined, "无有效证据的 Tour stop 应使畸形视图被拒绝");
+const duplicateTour = structuredClone(tourFixture);
+duplicateTour.data.tiers[2]!.depth = "one-minute";
+assert(parseRepositoryTourView(duplicateTour) === undefined, "应拒绝重复或缺失的固定 depth");
+const extraTour = structuredClone(tourFixture);
+extraTour.data.tiers.push(structuredClone(extraTour.data.tiers[0]!));
+assert(parseRepositoryTourView(extraTour) === undefined, "应拒绝多于三档的原始 tiers");
+const oversizedTour = structuredClone(tourFixture);
+oversizedTour.data.tiers[0]!.stops = Array.from(
+  { length: 5 },
+  (_, index) => ({ ...structuredClone(tourStop), id: `purpose-${index}` }),
+);
+assert(parseRepositoryTourView(oversizedTour) === undefined, "应拒绝超过档位上限的 stops");
+const wrongKindTour = structuredClone(tourFixture);
+wrongKindTour.data.tiers[0]!.stops[0]!.kind = "symbol";
+assert(parseRepositoryTourView(wrongKindTour) === undefined, "应拒绝放入错误档位的 stop kind");
+
+const unsafeOverview = structuredClone(overviewFixture);
+unsafeOverview.data.purpose.summary = "secret at /private/project";
+unsafeOverview.data.purpose.evidence[0]!.path = "../outside.md";
+unsafeOverview.data.need.problem.evidence[0]!.path = "cursor://file/private/problem.md";
+unsafeOverview.data.need.solution.evidence[0]!.path = "custom-editor://file/private/solution.md";
+unsafeOverview.data.modules[0]!.paths = ["file:///private/source.py"];
+const sanitizedOverview = parseRepositoryOverviewView(unsafeOverview);
+assert(sanitizedOverview?.data.purpose.summary === "[内容含路径，已隐藏]", "应隐藏递归文本路径");
+assert(sanitizedOverview?.data.purpose.evidence.length === 0, "应丢弃不规范 Evidence 路径");
+assert(sanitizedOverview?.data.need.problem.evidence.length === 0, "应过滤问题中的本地 URI Evidence");
+assert(sanitizedOverview?.data.need.solution.evidence.length === 0, "应过滤方案中的本地 URI Evidence");
+assert(sanitizedOverview?.data.modules[0]?.paths.length === 0, "应丢弃模块中的不规范路径");
+
+const eightSteps = structuredClone(overviewFixture.data.workflow);
+eightSteps.push({ ...eightSteps[0]!, step: 8 });
+const duplicateSteps = overviewFixture.data.workflow.map((step, index) => ({
+  ...step,
+  step: index === 4 ? 4 : step.step,
+}));
+const fractionalSteps = overviewFixture.data.workflow.map((step, index) => ({
+  ...step,
+  step: index === 0 ? 1.9 : step.step,
+}));
+for (const invalidWorkflow of [
+  overviewFixture.data.workflow.slice(0, 4),
+  eightSteps,
+  duplicateSteps,
+  fractionalSteps,
+]) {
+  const candidate = structuredClone(overviewFixture);
+  candidate.data.workflow = structuredClone(invalidWorkflow);
+  const parsed = parseRepositoryOverviewView(candidate);
+  assert(parsed?.data.workflow.length === 0, "非法 workflow 不应展示成 5–7 步主流程");
+  assert(parsed?.warnings.some((warning) => warning.code === "WORKFLOW_SHAPE_INVALID"), "非法 workflow 应返回明确提示");
+}
+
+const emptyWorkflow = structuredClone(overviewFixture);
+emptyWorkflow.data.workflow = [];
+assert(parseRepositoryOverviewView(emptyWorkflow)?.data.workflow.length === 0, "空 workflow 是合法的证据不足状态");
+
+const architectureEntity = (id: string, label: string, path: string, kind = "concept") => ({
+  id, kind, label, path, layer: kind === "file" ? "L1" : "L2", source: "semantic-heuristic", confidence: 0.8,
+  evidence: [tourEvidence],
+});
+const architectureFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "architecture",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    layout: "cognitive-components",
+    summary: { text: "入口连接核心", explanationSource: "derived-presentation", evidence: [tourEvidence] },
+    components: [
+      { id: "cli", name: "CLI", group: "entry", responsibility: "接收请求", paths: ["src/cli.py"], entity: architectureEntity("cli", "CLI", "src/cli.py"), evidence: [tourEvidence] },
+      { id: "core", name: "Core", group: "core", responsibility: "处理请求", paths: ["src/core.py"], entity: architectureEntity("core", "Core", "src/core.py"), evidence: [tourEvidence] },
+    ],
+    connections: [{ id: "edge:cli-core", sourceId: "cli", targetId: "core", relation: "depends_on", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [tourEvidence] }],
+    entryPoints: [{ path: "src/cli.py", reason: "命令入口", entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py", "file"), evidence: [tourEvidence] }],
+    stats: { files: 2, concepts: 2, tasks: 0, documentsRead: 2 },
+  },
+  warnings: [],
+};
+assert(parseArchitectureView(architectureFixture)?.data.connections.length === 1, "应解析固定 Architecture 布局");
+assert(parseAgentNaviView(architectureFixture)?.view === "architecture", "通用 parser 应分派 Architecture");
+assert(parseRequestedView({ view: "architecture" }) === "architecture", "应识别 Architecture 请求");
+const missingEndpoint = structuredClone(architectureFixture);
+missingEndpoint.data.connections[0]!.targetId = "missing";
+assert(parseArchitectureView(missingEndpoint) === undefined, "应拒绝未包含的 Architecture endpoint");
+const duplicateComponent = structuredClone(architectureFixture);
+duplicateComponent.data.components[1]!.id = "cli";
+duplicateComponent.data.components[1]!.entity.id = "cli";
+assert(parseArchitectureView(duplicateComponent) === undefined, "应拒绝重复 component id");
+for (const mutate of [
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.kind = "concept"; },
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.path = "src/other.py"; },
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.entity.layer = "L2"; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.entity.layer = "L1"; },
+  (value: typeof architectureFixture) => { value.data.connections[0]!.layer = "L1"; },
+  (value: typeof architectureFixture) => { value.data.entryPoints[0]!.reason = ""; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.name = ""; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.responsibility = ""; },
+  (value: typeof architectureFixture) => { value.data.components[0]!.evidence = [tourEvidence, tourEvidence, tourEvidence, tourEvidence]; },
+  (value: typeof architectureFixture) => { value.data.summary.text = ""; },
+]) {
+  const malformed = structuredClone(architectureFixture);
+  mutate(malformed);
+  assert(parseArchitectureView(malformed) === undefined, "应拒绝 Architecture 的空文本或错配 entry entity");
+}
+
+const flowFixture = {
+  schemaVersion: "agentnavi.vla.v1",
+  view: "flow",
+  project: { id: "fixture", name: "Fixture", kind: "software" },
+  sourceState: { status: "ready" },
+  data: {
+    layout: "numbered-task-flow",
+    exampleTask: { title: "理解项目", source: "request" },
+    steps: Array.from({ length: 5 }, (_, index) => ({
+      step: index + 1,
+      id: `step-${index + 1}`,
+      title: `步骤 ${index + 1}`,
+      purpose: `处理阶段 ${index + 1}`,
+      input: index === 0 ? "用户请求" : `步骤 ${index} 的结果`,
+      output: index === 4 ? "主流程结果" : `交给步骤 ${index + 2}`,
+      keyFiles: index === 0 ? [{
+        path: "src/cli.py", moduleId: "cli", moduleName: "CLI",
+        entity: architectureEntity("file:cli", "src/cli.py", "src/cli.py", "file"),
+        relation: { id: "edge:cli-file", sourceId: "cli", targetId: "file:cli", relation: "implemented_by", layer: "L2", source: "semantic-heuristic", confidence: 0.8, evidence: [tourEvidence] },
+        evidence: [tourEvidence],
+      }] : [],
+      why: `文档列为第 ${index + 1} 步`,
+      nextStep: index === 4 ? null : `步骤 ${index + 2}`,
+      explanationSource: "derived-presentation",
+      evidence: [tourEvidence],
+    })),
+    stats: { files: 2, concepts: 2, tasks: 1, documentsRead: 2 },
+  },
+  warnings: [],
+};
+assert(parseFlowView(flowFixture)?.data.steps.length === 5, "应解析连续 5–7 步 Flow");
+assert(parseAgentNaviView(flowFixture)?.view === "flow", "通用 parser 应分派 Flow");
+assert(parseRequestedView({ view: "flow" }) === "flow", "应识别 Flow 请求");
+const discontinuousFlow = structuredClone(flowFixture);
+discontinuousFlow.data.steps[2]!.step = 4;
+assert(parseFlowView(discontinuousFlow) === undefined, "应拒绝不连续的 Flow step");
+const duplicateFlow = structuredClone(flowFixture);
+duplicateFlow.data.steps[2]!.id = "step-2";
+assert(parseFlowView(duplicateFlow) === undefined, "应拒绝重复 Flow id");
+const wrongNextFlow = structuredClone(flowFixture);
+wrongNextFlow.data.steps[0]!.nextStep = "步骤 5";
+assert(parseFlowView(wrongNextFlow) === undefined, "应拒绝未指向紧邻步骤的 nextStep");
+for (const mutate of [
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.moduleId = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.moduleName = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.kind = "concept"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.path = "src/other.py"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.entity.layer = "L2"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.layer = "L1"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.sourceId = "other"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.keyFiles[0]!.relation.targetId = "other"; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.purpose = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.input = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.output = ""; },
+  (value: typeof flowFixture) => { value.data.steps[0]!.why = ""; },
+]) {
+  const malformed = structuredClone(flowFixture);
+  mutate(malformed);
+  assert(parseFlowView(malformed) === undefined, "应拒绝 Flow 的空文本或错配 keyFile provenance");
+}
+const shortFlow = structuredClone(flowFixture);
+shortFlow.data.steps = shortFlow.data.steps.slice(0, 4);
+assert(parseFlowView(shortFlow) === undefined, "应拒绝非空但少于 5 步的 Flow");
+const emptyFlow = structuredClone(flowFixture);
+emptyFlow.data.steps = [];
+assert(parseFlowView(emptyFlow)?.data.steps.length === 0, "证据不足时空 Flow 合法");
+
+const requestWithProvenance = structuredClone(flowFixture) as any;
+requestWithProvenance.data.exampleTask.entity = architectureEntity("task", "Task", "src/cli.py", "file");
+requestWithProvenance.data.exampleTask.evidence = [tourEvidence];
+assert(parseFlowView(requestWithProvenance) === undefined, "request task 不得携带 provenance");
+
+const historyFlow = structuredClone(flowFixture) as any;
+const taskEvidence = { kind: "task-record", summary: "任务事实", layer: "L3", source: "task-events", confidence: 1 };
+historyFlow.data.exampleTask = {
+  title: "历史任务",
+  source: "task-events",
+  entity: { id: "task", kind: "task", label: "历史任务", layer: "L3", source: "task-events", confidence: 1, evidence: [taskEvidence] },
+  evidence: [taskEvidence],
+};
+assert(parseFlowView(historyFlow)?.data.exampleTask?.source === "task-events", "应接受完整 L3 历史任务 provenance");
+for (const mutate of [
+  (value: any) => { delete value.data.exampleTask.entity; },
+  (value: any) => { value.data.exampleTask.entity.kind = "file"; },
+  (value: any) => { value.data.exampleTask.entity.layer = "L2"; },
+  (value: any) => { value.data.exampleTask.entity.source = "repository"; },
+  (value: any) => { value.data.exampleTask.evidence[0].layer = "L2"; },
+  (value: any) => { value.data.exampleTask.evidence[0].source = "repository"; },
+]) {
+  const malformed = structuredClone(historyFlow);
+  mutate(malformed);
+  assert(parseFlowView(malformed) === undefined, "应拒绝不完整或错层的历史 task provenance");
+}
 
 console.log("protocol unit checks passed");

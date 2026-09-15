@@ -17,6 +17,18 @@ export interface ContextConcept {
 export interface ContextWarning {
   code: string;
   message: string;
+  evidence: Evidence[];
+}
+
+export interface Evidence {
+  kind: string;
+  summary: string;
+  layer: "L1" | "L2" | "L3";
+  source: string;
+  confidence: number;
+  path?: string;
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 export interface ContextView {
@@ -42,6 +54,173 @@ export interface ContextView {
   warnings: ContextWarning[];
 }
 
+export interface OverviewStatement {
+  summary: string;
+  evidence: Evidence[];
+}
+
+export interface RepositoryOverviewView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "repo-overview";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    purpose: OverviewStatement;
+    need: {
+      problem: OverviewStatement;
+      solution: OverviewStatement;
+    };
+    workflow: Array<{
+      step: number;
+      title: string;
+      detail: string;
+      evidence: Evidence[];
+    }>;
+    modules: Array<{
+      id: string;
+      name: string;
+      summary: string;
+      paths: string[];
+      layer: "L2";
+      source: string;
+      confidence: number;
+      evidence: Evidence[];
+    }>;
+    readingOrder: Array<{
+      position: number;
+      path: string;
+      reason: string;
+      evidence: Evidence[];
+    }>;
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export type TourDepth = "one-minute" | "five-minutes" | "source-deep-dive";
+
+export interface TourStop {
+  id: string;
+  kind: string;
+  title: string;
+  plainLanguage: string;
+  technicalExplanation: string;
+  evidence: Evidence[];
+  entity: {
+    id: string;
+    kind: string;
+    label: string;
+    path?: string;
+    layer: "L1" | "L2" | "L3";
+    source: string;
+    confidence: number;
+    evidence: Evidence[];
+  };
+  relations: Array<{
+    id: string;
+    sourceId: string;
+    targetId: string;
+    relation: string;
+    layer: "L1" | "L2" | "L3";
+    source: string;
+    confidence: number;
+    evidence: Evidence[];
+  }>;
+}
+
+export interface RepositoryTourView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "repo-tour";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    tiers: Array<{ depth: TourDepth; label: string; stops: TourStop[] }>;
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export interface ArchitectureComponent {
+  id: string;
+  name: string;
+  group: "entry" | "core" | "support";
+  responsibility: string;
+  paths: string[];
+  entity: TourStop["entity"];
+  evidence: Evidence[];
+}
+
+export interface ArchitectureView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "architecture";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "cognitive-components";
+    summary: { text: string; explanationSource: "derived-presentation"; evidence: Evidence[] };
+    components: ArchitectureComponent[];
+    connections: TourStop["relations"];
+    entryPoints: Array<{
+      path: string;
+      reason: string;
+      entity: TourStop["entity"];
+      evidence: Evidence[];
+    }>;
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export interface FlowStep {
+  step: number;
+  id: string;
+  title: string;
+  purpose: string;
+  input: string;
+  output: string;
+  keyFiles: Array<{
+    path: string;
+    moduleId: string;
+    moduleName: string;
+    entity: TourStop["entity"];
+    relation: TourStop["relations"][number];
+    evidence: Evidence[];
+  }>;
+  why: string;
+  nextStep: string | null;
+  explanationSource: "derived-presentation";
+  evidence: Evidence[];
+}
+
+export interface FlowView {
+  schemaVersion: typeof SCHEMA_VERSION;
+  view: "flow";
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: {
+    layout: "numbered-task-flow";
+    exampleTask?: {
+      title: string;
+      source: "request" | "request-redacted";
+    } | {
+      title: string;
+      source: "task-events";
+      entity: TourStop["entity"];
+      evidence: Evidence[];
+    };
+    steps: FlowStep[];
+    stats: ContextView["data"]["stats"] & { documentsRead: number };
+  };
+  warnings: ContextWarning[];
+}
+
+export type AgentNaviView =
+  | ContextView
+  | RepositoryOverviewView
+  | RepositoryTourView
+  | ArchitectureView
+  | FlowView;
+
 export interface PublicError {
   code: string;
   message: string;
@@ -57,6 +236,7 @@ const PUBLIC_ERROR_MESSAGES: Record<string, string> = {
 };
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const WINDOWS_ABSOLUTE = /(?:^|[^A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/;
+const URI_TOKEN = /(?:^|[^A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:[^\s<>"']*)/gi;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -127,8 +307,21 @@ function containsPosixAbsolute(value: string): boolean {
 }
 
 function containsPrivatePath(value: string): boolean {
+  URI_TOKEN.lastIndex = 0;
+  for (const match of value.matchAll(URI_TOKEN)) {
+    const token = match[1]?.replace(/[.,;!?)}\]，。；！？）】]+$/u, "");
+    if (!token) continue;
+    const separator = token.indexOf(":");
+    const scheme = token.slice(0, separator).toLowerCase();
+    if (scheme === "http" || scheme === "https") continue;
+    const remainder = token.slice(separator + 1);
+    if (/^\/\/file(?:[\\/]|$)/i.test(remainder)) return true;
+    if (
+      scheme === "file" &&
+      (/^(?:[\\/]|~\/|[A-Za-z]:[\\/])/.test(remainder))
+    ) return true;
+  }
   return (
-    value.toLowerCase().includes("file://") ||
     value.includes("~/") ||
     WINDOWS_ABSOLUTE.test(value) ||
     containsPosixAbsolute(value)
@@ -145,7 +338,7 @@ export function safeTaskQuery(value: string): string {
 function contextConcept(value: unknown): ContextConcept | undefined {
   const item = record(value);
   if (!item) return undefined;
-  const id = text(item.id);
+  const id = displayText(item.id);
   const label = displayText(item.label);
   if (!id || !label) return undefined;
   const files = Array.isArray(item.files)
@@ -165,31 +358,80 @@ function contextWarning(value: unknown): ContextWarning | undefined {
   if (!item) return undefined;
   const code = displayText(item.code);
   const message = displayText(item.message);
-  return code && message ? { code, message } : undefined;
+  const evidence = Array.isArray(item.evidence)
+    ? item.evidence.slice(0, MAX_ITEMS).map(parseEvidence).filter((entry): entry is Evidence => Boolean(entry))
+    : [];
+  return code && message ? { code, message, evidence } : undefined;
 }
 
-export function parseContextView(value: unknown): ContextView | undefined {
+function parseEvidence(value: unknown): Evidence | undefined {
+  const item = record(value);
+  const layer = item?.layer;
+  if (!item || (layer !== "L1" && layer !== "L2" && layer !== "L3")) return undefined;
+  const kind = displayText(item.kind);
+  const summary = displayText(item.summary);
+  const source = displayText(item.source);
+  if (!kind || !summary || !source) return undefined;
+  const pathValue = item.path === undefined ? undefined : text(item.path);
+  if (pathValue !== undefined && !isCanonicalRelativePath(pathValue)) return undefined;
+  const lineStart = count(item.lineStart);
+  const lineEnd = count(item.lineEnd);
+  return {
+    kind,
+    summary,
+    layer,
+    source,
+    confidence: confidence(item.confidence),
+    ...(pathValue ? { path: pathValue } : {}),
+    ...(lineStart > 0 ? { lineStart } : {}),
+    ...(lineEnd > 0 ? { lineEnd } : {}),
+  };
+}
+
+function evidenceList(value: unknown): Evidence[] {
+  return Array.isArray(value)
+    ? value.slice(0, MAX_ITEMS).map(parseEvidence).filter((entry): entry is Evidence => Boolean(entry))
+    : [];
+}
+
+function overviewStatement(value: unknown): OverviewStatement | undefined {
+  const item = record(value);
+  if (!item) return undefined;
+  return { summary: displayText(item.summary), evidence: evidenceList(item.evidence) };
+}
+
+function commonEnvelope(value: unknown): {
+  envelope: Record<string, unknown>;
+  project: ContextView["project"];
+  sourceState: ContextView["sourceState"];
+  data: Record<string, unknown>;
+  warnings: ContextWarning[];
+} | undefined {
   const envelope = record(value);
-  if (envelope?.schemaVersion !== SCHEMA_VERSION || envelope.view !== "context") {
-    return undefined;
-  }
+  if (envelope?.schemaVersion !== SCHEMA_VERSION) return undefined;
   const project = record(envelope.project);
   const sourceState = record(envelope.sourceState);
   const data = record(envelope.data);
-  const stats = record(data?.stats);
   const status = sourceState?.status;
-  if (
-    !project ||
-    !data ||
-    !stats ||
-    (status !== "ready" && status !== "partial" && status !== "stale")
-  ) {
+  if (!project || !data || (status !== "ready" && status !== "partial" && status !== "stale")) {
     return undefined;
   }
-  const projectId = text(project.id);
-  const projectName = displayText(project.name);
-  const projectKind = displayText(project.kind);
-  if (!projectId || !projectName || !projectKind) return undefined;
+  const id = displayText(project.id);
+  const name = displayText(project.name);
+  const kind = displayText(project.kind);
+  if (!id || !name || !kind) return undefined;
+  const warnings = Array.isArray(envelope.warnings)
+    ? envelope.warnings.slice(0, MAX_ITEMS).map(contextWarning).filter((entry): entry is ContextWarning => Boolean(entry))
+    : [];
+  return { envelope, project: { id, name, kind }, sourceState: { status }, data, warnings };
+}
+
+export function parseContextView(value: unknown): ContextView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "context") return undefined;
+  const { project, sourceState, data, warnings } = common;
+  const stats = record(data?.stats);
+  if (!stats) return undefined;
 
   const concepts = Array.isArray(data.concepts)
     ? data.concepts.slice(0, MAX_ITEMS).map(contextConcept).filter((entry): entry is ContextConcept => Boolean(entry))
@@ -197,15 +439,11 @@ export function parseContextView(value: unknown): ContextView | undefined {
   const files = Array.isArray(data.files)
     ? data.files.slice(0, MAX_ITEMS).map(contextFile).filter((entry): entry is ContextFile => Boolean(entry))
     : [];
-  const warnings = Array.isArray(envelope.warnings)
-    ? envelope.warnings.slice(0, MAX_ITEMS).map(contextWarning).filter((entry): entry is ContextWarning => Boolean(entry))
-    : [];
-
   return {
     schemaVersion: SCHEMA_VERSION,
     view: "context",
-    project: { id: projectId, name: projectName, kind: projectKind },
-    sourceState: { status },
+    project,
+    sourceState,
     data: {
       stats: {
         files: count(stats.files),
@@ -219,10 +457,453 @@ export function parseContextView(value: unknown): ContextView | undefined {
   };
 }
 
+export function parseRepositoryOverviewView(value: unknown): RepositoryOverviewView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "repo-overview") return undefined;
+  const { project, sourceState, data } = common;
+  const warnings = [...common.warnings];
+  const purpose = overviewStatement(data.purpose);
+  const need = record(data.need);
+  const problem = overviewStatement(need?.problem);
+  const solution = overviewStatement(need?.solution);
+  const stats = record(data.stats);
+  if (!purpose || !need || !problem || !solution || !stats) return undefined;
+
+  const rawWorkflow = Array.isArray(data.workflow) ? data.workflow : [];
+  const parsedWorkflow = rawWorkflow.flatMap((value) => {
+      const item = record(value);
+      const rawStep = item?.step;
+      const step = typeof rawStep === "number" && Number.isInteger(rawStep) ? rawStep : 0;
+      const title = displayText(item?.title);
+      if (!item || step < 1 || !title) return [];
+      return [{ step, title, detail: displayText(item.detail), evidence: evidenceList(item.evidence) }];
+    });
+  const workflowIsValid = rawWorkflow.length === 0 || (
+    rawWorkflow.length >= 5 &&
+    rawWorkflow.length <= 7 &&
+    parsedWorkflow.length === rawWorkflow.length &&
+    parsedWorkflow.every((item, index) => item.step === index + 1)
+  );
+  const workflow = workflowIsValid ? parsedWorkflow : [];
+  if (!workflowIsValid) {
+    warnings.push({
+      code: "WORKFLOW_SHAPE_INVALID",
+      message: "主流程必须为空或包含连续编号的 5–7 步，当前结果已隐藏。",
+      evidence: [],
+    });
+  }
+  const modules = Array.isArray(data.modules)
+    ? data.modules.slice(0, 8).flatMap((value) => {
+      const item = record(value);
+      if (!item || item.layer !== "L2") return [];
+      const id = displayText(item.id);
+      const name = displayText(item.name);
+      if (!id || !name) return [];
+      const paths = Array.isArray(item.paths)
+        ? item.paths.slice(0, 3).map((path) => text(path)).filter(isCanonicalRelativePath)
+        : [];
+      return [{
+        id,
+        name,
+        summary: displayText(item.summary),
+        paths,
+        layer: "L2" as const,
+        source: displayText(item.source),
+        confidence: confidence(item.confidence),
+        evidence: evidenceList(item.evidence),
+      }];
+    })
+    : [];
+  const readingOrder = Array.isArray(data.readingOrder)
+    ? data.readingOrder.slice(0, 7).flatMap((value) => {
+      const item = record(value);
+      const position = count(item?.position);
+      const path = text(item?.path);
+      if (!item || position < 1 || !isCanonicalRelativePath(path)) return [];
+      return [{ position, path, reason: displayText(item.reason), evidence: evidenceList(item.evidence) }];
+    })
+    : [];
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "repo-overview",
+    project,
+    sourceState,
+    data: {
+      purpose,
+      need: { problem, solution },
+      workflow,
+      modules,
+      readingOrder,
+      stats: {
+        files: count(stats.files),
+        concepts: count(stats.concepts),
+        tasks: count(stats.tasks),
+        documentsRead: count(stats.documentsRead),
+      },
+    },
+    warnings,
+  };
+}
+
+const TOUR_DEPTHS: TourDepth[] = ["one-minute", "five-minutes", "source-deep-dive"];
+const TOUR_KINDS = new Set([
+  "purpose", "why", "workflow", "module", "data-structure", "task", "file",
+  "history", "symbol", "dependency", "test", "task-history", "evidence",
+]);
+const TOUR_LIMITS: Record<TourDepth, number> = {
+  "one-minute": 4,
+  "five-minutes": 8,
+  "source-deep-dive": 12,
+};
+const TOUR_KINDS_BY_DEPTH: Record<TourDepth, Set<string>> = {
+  "one-minute": new Set(["purpose", "why", "workflow", "module"]),
+  "five-minutes": new Set([
+    "purpose", "why", "workflow", "module", "data-structure", "task", "file", "history",
+  ]),
+  "source-deep-dive": new Set([
+    "file", "symbol", "dependency", "test", "task-history", "evidence",
+  ]),
+};
+
+function tourEntity(value: unknown): TourStop["entity"] | undefined {
+  const item = record(value);
+  const layer = item?.layer;
+  if (!item || (layer !== "L1" && layer !== "L2" && layer !== "L3")) return undefined;
+  const id = displayText(item.id);
+  const kind = displayText(item.kind);
+  const label = displayText(item.label);
+  const source = displayText(item.source);
+  const path = item.path === undefined ? undefined : text(item.path);
+  if (!id || !kind || !label || !source || (path !== undefined && !isCanonicalRelativePath(path))) {
+    return undefined;
+  }
+  return {
+    id,
+    kind,
+    label,
+    ...(path ? { path } : {}),
+    layer,
+    source,
+    confidence: confidence(item.confidence),
+    evidence: evidenceList(item.evidence),
+  };
+}
+
+function tourRelation(value: unknown): TourStop["relations"][number] | undefined {
+  const item = record(value);
+  const layer = item?.layer;
+  if (!item || (layer !== "L1" && layer !== "L2" && layer !== "L3")) return undefined;
+  const id = displayText(item.id);
+  const sourceId = displayText(item.sourceId);
+  const targetId = displayText(item.targetId);
+  const relation = displayText(item.relation);
+  const source = displayText(item.source);
+  if (!id || !sourceId || !targetId || !relation || !source) return undefined;
+  return {
+    id, sourceId, targetId, relation, layer, source,
+    confidence: confidence(item.confidence),
+    evidence: evidenceList(item.evidence),
+  };
+}
+
+function tourStop(value: unknown): TourStop | undefined {
+  const item = record(value);
+  const id = displayText(item?.id);
+  const kind = displayText(item?.kind);
+  const title = displayText(item?.title);
+  const plainLanguage = displayText(item?.plainLanguage);
+  const technicalExplanation = displayText(item?.technicalExplanation);
+  const evidence = evidenceList(item?.evidence);
+  const entity = tourEntity(item?.entity);
+  if (
+    !item || !id || !TOUR_KINDS.has(kind) || !title || !plainLanguage ||
+    !technicalExplanation || evidence.length === 0 || !entity
+  ) return undefined;
+  const relations = Array.isArray(item.relations)
+    ? item.relations.slice(0, 4).map(tourRelation).filter((entry): entry is TourStop["relations"][number] => Boolean(entry))
+    : [];
+  return { id, kind, title, plainLanguage, technicalExplanation, evidence, entity, relations };
+}
+
+export function parseRepositoryTourView(value: unknown): RepositoryTourView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "repo-tour") return undefined;
+  const stats = record(common.data.stats);
+  const rawTiers = Array.isArray(common.data.tiers) ? common.data.tiers : [];
+  if (!stats || rawTiers.length !== 3) return undefined;
+  const rawDepths = rawTiers.map((tier) => record(tier)?.depth);
+  if (new Set(rawDepths).size !== 3 || !TOUR_DEPTHS.every((depth) => rawDepths.includes(depth))) {
+    return undefined;
+  }
+  const tiers = TOUR_DEPTHS.map((depth) => {
+    const tier = rawTiers.map(record).find((item) => item?.depth === depth);
+    if (!tier) return undefined;
+    const label = displayText(tier.label);
+    if (!label) return undefined;
+    const rawStops = Array.isArray(tier.stops) ? tier.stops : [];
+    if (rawStops.length > TOUR_LIMITS[depth]) return undefined;
+    const stops = rawStops.map(tourStop).filter((entry): entry is TourStop => Boolean(entry));
+    if (
+      stops.length !== rawStops.length ||
+      stops.some((stop) => !TOUR_KINDS_BY_DEPTH[depth].has(stop.kind))
+    ) return undefined;
+    return { depth, label, stops };
+  });
+  if (tiers.some((tier) => !tier)) return undefined;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "repo-tour",
+    project: common.project,
+    sourceState: common.sourceState,
+    data: {
+      tiers: tiers as RepositoryTourView["data"]["tiers"],
+      stats: {
+        files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks),
+        documentsRead: count(stats.documentsRead),
+      },
+    },
+    warnings: common.warnings,
+  };
+}
+
+function repositoryStats(value: unknown): RepositoryOverviewView["data"]["stats"] | undefined {
+  const stats = record(value);
+  if (!stats) return undefined;
+  return {
+    files: count(stats.files), concepts: count(stats.concepts), tasks: count(stats.tasks),
+    documentsRead: count(stats.documentsRead),
+  };
+}
+
+function nonBlank(value: string | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function completeEntity(entity: TourStop["entity"]): boolean {
+  return nonBlank(entity.id) && nonBlank(entity.kind) && nonBlank(entity.label) &&
+    nonBlank(entity.source) && entity.evidence.length > 0;
+}
+
+function completeRelation(relation: TourStop["relations"][number]): boolean {
+  return nonBlank(relation.id) && nonBlank(relation.sourceId) && nonBlank(relation.targetId) &&
+    nonBlank(relation.relation) && nonBlank(relation.source) && relation.evidence.length > 0;
+}
+
+export function parseArchitectureView(value: unknown): ArchitectureView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "architecture" || common.data.layout !== "cognitive-components") {
+    return undefined;
+  }
+  const summary = record(common.data.summary);
+  const stats = repositoryStats(common.data.stats);
+  const rawComponents = Array.isArray(common.data.components) ? common.data.components : [];
+  if (!summary || summary.explanationSource !== "derived-presentation" || !stats || rawComponents.length > 8) {
+    return undefined;
+  }
+  const components = rawComponents.flatMap((value) => {
+    const item = record(value);
+    const id = displayText(item?.id);
+    const name = displayText(item?.name);
+    const group = item?.group;
+    const entity = tourEntity(item?.entity);
+    const rawPaths = Array.isArray(item?.paths) ? item.paths : [];
+    const paths = rawPaths.map((path) => text(path));
+    const rawEvidence = Array.isArray(item?.evidence) ? item.evidence : [];
+    const evidence = evidenceList(rawEvidence);
+    const responsibility = displayText(item?.responsibility);
+    if (
+      !item || !nonBlank(id) || !nonBlank(name) || !nonBlank(responsibility) ||
+      !entity || !completeEntity(entity) || entity.id !== id || entity.layer !== "L2" ||
+      (group !== "entry" && group !== "core" && group !== "support") ||
+      paths.length === 0 || paths.length > 3 || new Set(paths).size !== paths.length ||
+      paths.some((path) => !isCanonicalRelativePath(path)) || rawEvidence.length > 3 ||
+      evidence.length !== rawEvidence.length || evidence.length === 0
+    ) return [];
+    return [{
+      id, name, group: group as ArchitectureComponent["group"],
+      responsibility, paths, entity, evidence,
+    }];
+  });
+  const componentIds = components.map((component) => component.id);
+  if (components.length !== rawComponents.length || new Set(componentIds).size !== componentIds.length) {
+    return undefined;
+  }
+  const rawConnections = Array.isArray(common.data.connections) ? common.data.connections : [];
+  if (rawConnections.length > 12) return undefined;
+  const connections = rawConnections.map(tourRelation).filter((edge): edge is TourStop["relations"][number] => Boolean(edge));
+  const connectionIds = connections.map((edge) => edge.id);
+  const included = new Set(componentIds);
+  if (
+    connections.length !== rawConnections.length || new Set(connectionIds).size !== connectionIds.length ||
+    connections.some((edge) => edge.layer !== "L2" || !completeRelation(edge) || !included.has(edge.sourceId) || !included.has(edge.targetId))
+  ) return undefined;
+  const rawEntries = Array.isArray(common.data.entryPoints) ? common.data.entryPoints : [];
+  if (rawEntries.length > 3) return undefined;
+  const entryPoints = rawEntries.flatMap((value) => {
+    const item = record(value);
+    const path = text(item?.path);
+    const entity = tourEntity(item?.entity);
+    const evidence = evidenceList(item?.evidence);
+    const reason = displayText(item?.reason);
+    if (
+      !item || !isCanonicalRelativePath(path) || !nonBlank(reason) || !entity ||
+      !completeEntity(entity) || entity.kind !== "file" || entity.layer !== "L1" ||
+      entity.path !== path || evidence.length === 0
+    ) return [];
+    return [{ path, reason, entity, evidence }];
+  });
+  if (entryPoints.length !== rawEntries.length || new Set(entryPoints.map((entry) => entry.path)).size !== entryPoints.length) {
+    return undefined;
+  }
+  const summaryText = displayText(summary.text);
+  if (!nonBlank(summaryText)) return undefined;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "architecture",
+    project: common.project,
+    sourceState: common.sourceState,
+    data: {
+      layout: "cognitive-components",
+      summary: {
+        text: summaryText, explanationSource: "derived-presentation",
+        evidence: evidenceList(summary.evidence),
+      },
+      components,
+      connections,
+      entryPoints,
+      stats,
+    },
+    warnings: common.warnings,
+  };
+}
+
+export function parseFlowView(value: unknown): FlowView | undefined {
+  const common = commonEnvelope(value);
+  if (!common || common.envelope.view !== "flow" || common.data.layout !== "numbered-task-flow") {
+    return undefined;
+  }
+  const stats = repositoryStats(common.data.stats);
+  const rawSteps = Array.isArray(common.data.steps) ? common.data.steps : [];
+  if (!stats || (rawSteps.length !== 0 && (rawSteps.length < 5 || rawSteps.length > 7))) return undefined;
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  const steps: FlowStep[] = [];
+  for (let index = 0; index < rawSteps.length; index += 1) {
+    const item = record(rawSteps[index]);
+    const step = item?.step;
+    const id = displayText(item?.id);
+    const title = displayText(item?.title);
+    const expectedNext = index + 1 < rawSteps.length ? record(rawSteps[index + 1])?.title : null;
+    const evidence = evidenceList(item?.evidence);
+    if (
+      !item || step !== index + 1 || !nonBlank(id) || ids.has(id) || !nonBlank(title) ||
+      item.explanationSource !== "derived-presentation" || item.nextStep !== expectedNext || evidence.length === 0
+    ) return undefined;
+    ids.add(id);
+    const rawFiles = Array.isArray(item.keyFiles) ? item.keyFiles : [];
+    if (rawFiles.length > 3) return undefined;
+    const keyFiles: FlowStep["keyFiles"] = [];
+    for (const rawFile of rawFiles) {
+      const file = record(rawFile);
+      const path = text(file?.path);
+      const entity = tourEntity(file?.entity);
+      const relation = tourRelation(file?.relation);
+      const fileEvidence = evidenceList(file?.evidence);
+      const moduleId = displayText(file?.moduleId);
+      const moduleName = displayText(file?.moduleName);
+      if (
+        !file || !isCanonicalRelativePath(path) || paths.has(path) ||
+        !nonBlank(moduleId) || !nonBlank(moduleName) || !entity || !completeEntity(entity) ||
+        entity.kind !== "file" || entity.layer !== "L1" || entity.path !== path ||
+        !relation || relation.layer !== "L2" || !completeRelation(relation) ||
+        relation.sourceId !== moduleId || relation.targetId !== entity.id ||
+        relation.evidence.length === 0 || fileEvidence.length === 0
+      ) {
+        return undefined;
+      }
+      paths.add(path);
+      keyFiles.push({
+        path,
+        moduleId,
+        moduleName,
+        entity,
+        relation,
+        evidence: fileEvidence,
+      });
+    }
+    const purpose = displayText(item.purpose);
+    const input = displayText(item.input);
+    const output = displayText(item.output);
+    const why = displayText(item.why);
+    if (!nonBlank(purpose) || !nonBlank(input) || !nonBlank(output) || !nonBlank(why)) return undefined;
+    steps.push({
+      step,
+      id,
+      title,
+      purpose,
+      input,
+      output,
+      keyFiles,
+      why,
+      nextStep: item.nextStep === null ? null : displayText(item.nextStep),
+      explanationSource: "derived-presentation",
+      evidence,
+    });
+  }
+  if (paths.size > 18) return undefined;
+  const rawTask = common.data.exampleTask;
+  let exampleTask: FlowView["data"]["exampleTask"];
+  if (rawTask !== undefined && rawTask !== null) {
+    const task = record(rawTask);
+    const title = displayText(task?.title);
+    const source = displayText(task?.source);
+    if (!task || !nonBlank(title) || !nonBlank(source)) return undefined;
+    if (source === "request" || source === "request-redacted") {
+      if ("entity" in task || "evidence" in task) return undefined;
+      exampleTask = { title, source };
+    } else if (source === "task-events") {
+      const entity = tourEntity(task.entity);
+      const rawEvidence = Array.isArray(task.evidence) ? task.evidence : [];
+      const evidence = evidenceList(rawEvidence);
+      if (
+        !entity || !completeEntity(entity) || entity.kind !== "task" || entity.layer !== "L3" ||
+        entity.source !== "task-events" ||
+        evidence.length === 0 || evidence.length !== rawEvidence.length ||
+        evidence.some((entry) => entry.layer !== "L3" || entry.source !== "task-events")
+      ) return undefined;
+      exampleTask = { title, source, entity, evidence };
+    } else {
+      return undefined;
+    }
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    view: "flow",
+    project: common.project,
+    sourceState: common.sourceState,
+    data: { layout: "numbered-task-flow", ...(exampleTask ? { exampleTask } : {}), steps, stats },
+    warnings: common.warnings,
+  };
+}
+
+export function parseAgentNaviView(value: unknown): AgentNaviView | undefined {
+  return parseContextView(value) ?? parseRepositoryOverviewView(value) ?? parseRepositoryTourView(value) ??
+    parseArchitectureView(value) ?? parseFlowView(value);
+}
+
 export function parseTaskQuery(value: unknown): string | undefined {
   const input = record(value);
   const query = text(input?.query).trim();
   return query ? safeTaskQuery(query) : undefined;
+}
+
+export function parseRequestedView(value: unknown): AgentNaviView["view"] | undefined {
+  const input = record(value);
+  return input?.view === "context" || input?.view === "repo-overview" || input?.view === "repo-tour" ||
+    input?.view === "architecture" || input?.view === "flow"
+    ? input.view
+    : undefined;
 }
 
 export function parsePublicError(value: unknown): PublicError | undefined {

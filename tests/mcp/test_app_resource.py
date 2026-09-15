@@ -78,15 +78,25 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             self.assertEqual(tools["agentnavi_visualize"].meta, APP_TOOL_META)
             self.assertEqual(
                 tools["agentnavi_visualize"].input_schema["required"],
-                ["view", "query"],
+                ["view"],
             )
             self.assertEqual(
-                tools["agentnavi_visualize"].input_schema["properties"]["view"]["const"],
+                tools["agentnavi_visualize"].input_schema["properties"]["view"]["enum"],
+                ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+            )
+            self.assertEqual(
+                tools["agentnavi_context"].output_schema["properties"]["view"]["const"],
                 "context",
             )
             self.assertEqual(
-                tools["agentnavi_visualize"].output_schema,
-                tools["agentnavi_context"].output_schema,
+                tools["agentnavi_visualize"].output_schema["anyOf"],
+                [
+                    {"$ref": "#/$defs/ContextViewOutput"},
+                    {"$ref": "#/$defs/RepositoryOverviewViewOutput"},
+                    {"$ref": "#/$defs/RepositoryTourViewOutput"},
+                    {"$ref": "#/$defs/ArchitectureViewOutput"},
+                    {"$ref": "#/$defs/FlowViewOutput"},
+                ],
             )
 
             fallback = await client.call_tool(

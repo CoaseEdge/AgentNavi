@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from mcp.types import CallToolResult, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, WithJsonSchema, model_validator
 
 from .protocol import SCHEMA_VERSION
 
@@ -80,8 +80,95 @@ class WarningOutput(_ExtensibleModel):
     evidence: list[dict[str, Any]]
 
 
+class OverviewStatementOutput(_ExtensibleModel):
+    summary: str
+    evidence: list[dict[str, Any]]
+
+
+class OverviewNeedOutput(_ExtensibleModel):
+    problem: OverviewStatementOutput
+    solution: OverviewStatementOutput
+
+
+class OverviewWorkflowOutput(_ExtensibleModel):
+    step: int
+    title: str
+    detail: str
+    evidence: list[dict[str, Any]]
+
+
+class OverviewModuleOutput(_ExtensibleModel):
+    id: str
+    name: str
+    summary: str
+    paths: list[str]
+    layer: Literal["L2"]
+    source: str
+    confidence: float
+    evidence: list[dict[str, Any]]
+
+
+class OverviewReadingOutput(_ExtensibleModel):
+    position: int
+    path: str
+    reason: str
+    evidence: list[dict[str, Any]]
+
+
+class OverviewStatsOutput(_ExtensibleModel):
+    files: int
+    concepts: int
+    tasks: int
+    documents_read: int = Field(alias="documentsRead")
+
+
+class RepositoryOverviewDataOutput(_ExtensibleModel):
+    purpose: OverviewStatementOutput
+    need: OverviewNeedOutput
+    workflow: list[OverviewWorkflowOutput]
+    modules: list[OverviewModuleOutput]
+    reading_order: list[OverviewReadingOutput] = Field(alias="readingOrder")
+    stats: OverviewStatsOutput
+
+
+_PUBLIC_ERROR_CODES = {
+    "PROJECT_REQUIRED",
+    "PROJECT_NOT_FOUND",
+    "INVALID_ARGUMENT",
+    "INTERNAL_ERROR",
+}
+
+
+def _is_public_error(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and "schemaVersion" not in value
+        and set(value) == {"code", "message", "retryable", "details"}
+        and value.get("code") in _PUBLIC_ERROR_CODES
+        and isinstance(value.get("message"), str)
+        and isinstance(value.get("retryable"), bool)
+        and isinstance(value.get("details"), Mapping)
+    )
+
+
+def _context_error_placeholder() -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "view": "context",
+        "project": {"id": "error", "name": "error", "kind": "internal"},
+        "sourceState": {"status": "partial"},
+        "data": {
+            "stats": {"files": 0, "concepts": 0, "tasks": 0},
+            "concepts": [],
+            "files": [],
+            "tasks": [],
+        },
+        "warnings": [],
+    }
+
+
 class ContextViewOutput(_ExtensibleModel):
-    """用于 SDK tool discovery 的成功 Context envelope schema。
+    """reasoning tool 专用的 Context 成功 schema。
 
     S01 的标准库 DTO 仍是 wire 真相与严格隐私边界；此模型只把同一顶层合同
     暴露给 MCP SDK。SDK 2.0 会错误地对 ``isError`` 结果也执行成功 schema
@@ -99,45 +186,347 @@ class ContextViewOutput(_ExtensibleModel):
     @model_validator(mode="before")
     @classmethod
     def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
-        if (
-            isinstance(value, Mapping)
-            and "schemaVersion" not in value
-            and set(value) == {"code", "message", "retryable", "details"}
-            and value.get("code")
-            in {
-                "PROJECT_REQUIRED",
-                "PROJECT_NOT_FOUND",
-                "INVALID_ARGUMENT",
-                "INTERNAL_ERROR",
-            }
-            and isinstance(value.get("message"), str)
-            and isinstance(value.get("retryable"), bool)
-            and isinstance(value.get("details"), Mapping)
-        ):
+        if _is_public_error(value):
+            return _context_error_placeholder()
+        return value
+
+
+class RepositoryOverviewViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["repo-overview"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: RepositoryOverviewDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
             return {
                 "schemaVersion": SCHEMA_VERSION,
-                "view": "context",
+                "view": "repo-overview",
                 "project": {"id": "error", "name": "error", "kind": "internal"},
                 "sourceState": {"status": "partial"},
                 "data": {
-                    "stats": {"files": 0, "concepts": 0, "tasks": 0},
-                    "concepts": [],
-                    "files": [],
-                    "tasks": [],
+                    "purpose": {"summary": "", "evidence": []},
+                    "need": {
+                        "problem": {"summary": "", "evidence": []},
+                        "solution": {"summary": "", "evidence": []},
+                    },
+                    "workflow": [],
+                    "modules": [],
+                    "readingOrder": [],
+                    "stats": {
+                        "files": 0,
+                        "concepts": 0,
+                        "tasks": 0,
+                        "documentsRead": 0,
+                    },
                 },
                 "warnings": [],
             }
         return value
 
 
+class TourEvidenceOutput(_ExtensibleModel):
+    kind: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    layer: Literal["L1", "L2", "L3"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    path: str | None = None
+    line_start: int | None = Field(default=None, alias="lineStart", ge=1)
+    line_end: int | None = Field(default=None, alias="lineEnd", ge=1)
+
+
+class TourEntityOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    path: str | None = None
+    layer: Literal["L1", "L2", "L3"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class TourRelationOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    source_id: str = Field(alias="sourceId", min_length=1)
+    target_id: str = Field(alias="targetId", min_length=1)
+    relation: str = Field(min_length=1)
+    layer: Literal["L1", "L2", "L3"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class TourStopOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    kind: Literal[
+        "purpose", "why", "workflow", "module", "data-structure", "task",
+        "file", "history", "symbol", "dependency", "test", "task-history",
+        "evidence",
+    ]
+    title: str = Field(min_length=1)
+    plain_language: str = Field(alias="plainLanguage", min_length=1)
+    technical_explanation: str = Field(alias="technicalExplanation", min_length=1)
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+    entity: TourEntityOutput
+    relations: list[TourRelationOutput] = Field(max_length=4)
+
+
+class TourTierOutput(_ExtensibleModel):
+    depth: Literal["one-minute", "five-minutes", "source-deep-dive"]
+    label: str = Field(min_length=1)
+    stops: list[TourStopOutput] = Field(max_length=12)
+
+
+class RepositoryTourDataOutput(_ExtensibleModel):
+    tiers: list[TourTierOutput] = Field(min_length=3, max_length=3)
+    stats: OverviewStatsOutput
+
+
+class RepositoryTourViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["repo-tour"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: RepositoryTourDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "view": "repo-tour",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "tiers": [
+                        {"depth": depth, "label": label, "stops": []}
+                        for depth, label in (
+                            ("one-minute", "1 分钟"),
+                            ("five-minutes", "5 分钟"),
+                            ("source-deep-dive", "深入源码"),
+                        )
+                    ],
+                    "stats": {
+                        "files": 0, "concepts": 0, "tasks": 0, "documentsRead": 0,
+                    },
+                },
+                "warnings": [],
+            }
+        return value
+
+
+class ArchitectureSummaryOutput(_ExtensibleModel):
+    text: str
+    explanation_source: Literal["derived-presentation"] = Field(alias="explanationSource")
+    evidence: list[TourEvidenceOutput]
+
+
+class ArchitectureComponentEntityOutput(TourEntityOutput):
+    layer: Literal["L2"]
+
+
+class ArchitectureConnectionOutput(TourRelationOutput):
+    layer: Literal["L2"]
+
+
+class ArchitectureEntryEntityOutput(TourEntityOutput):
+    kind: Literal["file"]
+    layer: Literal["L1"]
+
+
+class ArchitectureComponentOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    group: Literal["entry", "core", "support"]
+    responsibility: str = Field(min_length=1)
+    paths: list[str] = Field(min_length=1, max_length=3)
+    entity: ArchitectureComponentEntityOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class ArchitectureEntryOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    entity: ArchitectureEntryEntityOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class ArchitectureDataOutput(_ExtensibleModel):
+    layout: Literal["cognitive-components"]
+    summary: ArchitectureSummaryOutput
+    components: list[ArchitectureComponentOutput] = Field(max_length=8)
+    connections: list[ArchitectureConnectionOutput] = Field(max_length=12)
+    entry_points: list[ArchitectureEntryOutput] = Field(alias="entryPoints", max_length=3)
+    stats: OverviewStatsOutput
+
+
+class ArchitectureViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["architecture"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: ArchitectureDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "view": "architecture",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "layout": "cognitive-components",
+                    "summary": {"text": "", "explanationSource": "derived-presentation", "evidence": []},
+                    "components": [], "connections": [], "entryPoints": [],
+                    "stats": {"files": 0, "concepts": 0, "tasks": 0, "documentsRead": 0},
+                },
+                "warnings": [],
+            }
+        return value
+
+
+class FlowRequestTaskOutput(_ExtensibleModel):
+    title: str = Field(min_length=1)
+    source: Literal["request", "request-redacted"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def forbid_provenance(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and ({"entity", "evidence"} & value.keys()):
+            raise ValueError("request exampleTask 不得包含 provenance。")
+        return value
+
+
+class FlowTaskEntityOutput(TourEntityOutput):
+    kind: Literal["task"]
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+
+
+class FlowTaskEvidenceOutput(TourEvidenceOutput):
+    layer: Literal["L3"]
+    source: Literal["task-events"]
+
+
+class FlowHistoryTaskOutput(_ExtensibleModel):
+    title: str = Field(min_length=1)
+    source: Literal["task-events"]
+    entity: FlowTaskEntityOutput
+    evidence: list[FlowTaskEvidenceOutput] = Field(min_length=1)
+
+
+FlowTaskOutput = Annotated[
+    FlowRequestTaskOutput | FlowHistoryTaskOutput,
+    Field(discriminator="source"),
+]
+
+
+class FlowKeyFileEntityOutput(TourEntityOutput):
+    kind: Literal["file"]
+    layer: Literal["L1"]
+
+
+class FlowKeyFileRelationOutput(TourRelationOutput):
+    layer: Literal["L2"]
+
+
+class FlowKeyFileOutput(_ExtensibleModel):
+    path: str = Field(min_length=1)
+    module_id: str = Field(alias="moduleId", min_length=1)
+    module_name: str = Field(alias="moduleName", min_length=1)
+    entity: FlowKeyFileEntityOutput
+    relation: FlowKeyFileRelationOutput
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class FlowStepOutput(_ExtensibleModel):
+    step: int = Field(ge=1, le=7)
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    input: str = Field(min_length=1)
+    output: str = Field(min_length=1)
+    key_files: list[FlowKeyFileOutput] = Field(alias="keyFiles", max_length=3)
+    why: str = Field(min_length=1)
+    next_step: str | None = Field(alias="nextStep")
+    explanation_source: Literal["derived-presentation"] = Field(alias="explanationSource")
+    evidence: list[TourEvidenceOutput] = Field(min_length=1)
+
+
+class FlowDataOutput(_ExtensibleModel):
+    layout: Literal["numbered-task-flow"]
+    example_task: FlowTaskOutput | None = Field(alias="exampleTask")
+    steps: list[FlowStepOutput] = Field(max_length=7)
+    stats: OverviewStatsOutput
+
+
+class FlowViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["flow"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: FlowDataOutput
+    warnings: list[WarningOutput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "view": "flow",
+                "project": {"id": "error", "name": "error", "kind": "internal"},
+                "sourceState": {"status": "partial"},
+                "data": {
+                    "layout": "numbered-task-flow", "exampleTask": None, "steps": [],
+                    "stats": {"files": 0, "concepts": 0, "tasks": 0, "documentsRead": 0},
+                },
+                "warnings": [],
+            }
+        return value
+
+
+class VisualizeViewOutput(
+    RootModel[
+        ContextViewOutput | RepositoryOverviewViewOutput | RepositoryTourViewOutput
+        | ArchitectureViewOutput | FlowViewOutput
+    ]
+):
+    """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if _is_public_error(value):
+            return _context_error_placeholder()
+        return value
+
+
 CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
+VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
 
 # MCPServer 会在调用函数之前按类型注解验证输入。这里用 Any 接住原始值，
 # 保证所有错误都能进入 AgentNavi 的公开错误边界；WithJsonSchema 只负责让
 # tools/list 继续发布精确的 string / const 合同，不依赖 SDK 私有实现。
-CONTEXT_VIEW_INPUT = Annotated[
+VISUALIZE_VIEW_INPUT = Annotated[
     Any,
-    WithJsonSchema({"type": "string", "const": "context"}),
+    WithJsonSchema(
+        {
+            "type": "string",
+            "enum": ["context", "repo-overview", "repo-tour", "architecture", "flow"],
+        }
+    ),
 ]
 REQUIRED_TEXT_INPUT = Annotated[
     Any,
@@ -165,9 +554,17 @@ def context_tool_annotations() -> ToolAnnotations:
 
 __all__ = [
     "CONTEXT_TOOL_RESULT",
-    "CONTEXT_VIEW_INPUT",
+    "ArchitectureViewOutput",
+    "FlowViewOutput",
+    "VISUALIZE_TOOL_RESULT",
+    "VISUALIZE_VIEW_INPUT",
     "OPTIONAL_TEXT_INPUT",
     "REQUIRED_TEXT_INPUT",
     "ContextViewOutput",
+    "RepositoryOverviewViewOutput",
+    "RepositoryOverviewDataOutput",
+    "RepositoryTourViewOutput",
+    "RepositoryTourDataOutput",
+    "VisualizeViewOutput",
     "context_tool_annotations",
 ]

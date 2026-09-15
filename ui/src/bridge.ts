@@ -1,4 +1,4 @@
-import { parseContextView, parsePublicError, parseTaskQuery } from "./protocol.js";
+import { parseAgentNaviView, parsePublicError, parseRequestedView, parseTaskQuery } from "./protocol.js";
 import type { AgentNaviShell } from "./shell.js";
 
 export interface ToolResultLike {
@@ -7,11 +7,25 @@ export interface ToolResultLike {
 }
 
 export function applyToolInput(shell: AgentNaviShell, toolArguments: unknown): void {
-  shell.beginRequest(parseTaskQuery(toolArguments));
+  const requestedView = parseRequestedView(toolArguments);
+  shell.beginRequest(
+    parseTaskQuery(toolArguments) ?? (
+      requestedView === "repo-overview"
+        ? "项目概览"
+        : requestedView === "repo-tour"
+          ? "仓库导览"
+          : requestedView === "architecture"
+            ? "系统架构"
+            : requestedView === "flow"
+              ? "任务主流程"
+          : undefined
+    ),
+    requestedView,
+  );
 }
 
 export function applyToolResult(shell: AgentNaviShell, result: ToolResultLike): void {
-  const view = parseContextView(result.structuredContent);
+  const view = parseAgentNaviView(result.structuredContent);
   if (view && !result.isError) {
     shell.render(view);
     shell.setConnection("已连接", true);

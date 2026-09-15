@@ -1,0 +1,176 @@
+"""Flow Core 数据到编号任务流与文本的严格投影。"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from ..protocol import AgentNaviView
+from .architecture import _stats
+from .repo_overview import (
+    _evidence_list,
+    _evidence_reference,
+    _mapping,
+    _path,
+    _project,
+    _sequence,
+    _source_state,
+    _text,
+)
+from .repo_tour import _entity, _relation
+
+
+def _required_text(value: Any, field: str, *, limit: int = 320) -> str:
+    candidate = _text(value, field, limit=limit)
+    if not candidate.strip():
+        raise ValueError(f"{field} 不得为空。")
+    return candidate
+
+
+def _flow_payload(core_data: Mapping[str, Any]) -> dict[str, Any]:
+    data = _mapping(core_data, "flow")
+    if data.get("layout") != "numbered-task-flow":
+        raise ValueError("flow.layout 无效。")
+    raw_task = data.get("exampleTask")
+    task = None
+    if raw_task is not None:
+        item = _mapping(raw_task, "flow.exampleTask")
+        task_source = _required_text(item.get("source"), "exampleTask.source", limit=120)
+        if task_source not in {"request", "request-redacted", "task-events"}:
+            raise ValueError("flow.exampleTask.source 无效。")
+        task = {
+            "title": _required_text(item.get("title"), "exampleTask.title"),
+            "source": task_source,
+        }
+        if task_source in {"request", "request-redacted"}:
+            if "entity" in item or "evidence" in item:
+                raise ValueError("request exampleTask 不得包含 entity/evidence。")
+        else:
+            if item.get("entity") is None or item.get("evidence") is None:
+                raise ValueError("task-events exampleTask 缺少 entity/evidence。")
+            entity = _entity(item.get("entity"), "exampleTask.entity")
+            evidence = _evidence_list(item.get("evidence"), "exampleTask.evidence")
+            if (
+                entity["kind"] != "task" or entity["layer"] != "L3"
+                or entity["source"] != "task-events" or not evidence
+                or any(
+                    entry["layer"] != "L3" or entry["source"] != "task-events"
+                    for entry in evidence
+                )
+            ):
+                raise ValueError("task-events exampleTask provenance 无效。")
+            task.update({"entity": entity, "evidence": evidence})
+    raw_steps = _sequence(data.get("steps", []), "flow.steps")
+    if raw_steps and not 5 <= len(raw_steps) <= 7:
+        raise ValueError("flow.steps 必须为空或 5–7 步。")
+    steps = []
+    ids: set[str] = set()
+    all_paths: set[str] = set()
+    for index, raw in enumerate(raw_steps):
+        item = _mapping(raw, "flow.steps[]")
+        position = item.get("step")
+        if isinstance(position, bool) or not isinstance(position, int) or position != index + 1:
+            raise ValueError("flow.steps 必须连续编号。")
+        step_id = _text(item.get("id"), "flow.step.id", limit=240)
+        title = _required_text(item.get("title"), "flow.step.title", limit=240)
+        if not step_id or step_id in ids or item.get("explanationSource") != "derived-presentation":
+            raise ValueError("flow step id/source 无效。")
+        ids.add(step_id)
+        next_step = item.get("nextStep")
+        expected_next = (
+            _mapping(raw_steps[index + 1], "flow.steps[]").get("title")
+            if index + 1 < len(raw_steps) else None
+        )
+        if next_step != expected_next:
+            raise ValueError("flow.nextStep 必须指向紧邻步骤，末步必须为 null。")
+        raw_files = _sequence(item.get("keyFiles", []), "flow.step.keyFiles")
+        if len(raw_files) > 3:
+            raise ValueError("flow.step.keyFiles 超过上限。")
+        key_files = []
+        for raw_file in raw_files:
+            file_item = _mapping(raw_file, "flow.step.keyFiles[]")
+            path = _path(file_item.get("path"), "keyFile.path")
+            evidence = _evidence_list(file_item.get("evidence", []), "keyFile.evidence")
+            module_id = _required_text(file_item.get("moduleId"), "keyFile.moduleId", limit=240)
+            module_name = _required_text(file_item.get("moduleName"), "keyFile.moduleName", limit=240)
+            entity = _entity(file_item.get("entity"), "keyFile.entity")
+            relation = _relation(file_item.get("relation"), "keyFile.relation")
+            if (
+                path in all_paths or not evidence or entity["kind"] != "file"
+                or entity["layer"] != "L1" or entity.get("path") != path
+                or relation["layer"] != "L2" or relation["sourceId"] != module_id
+                or relation["targetId"] != entity["id"]
+            ):
+                raise ValueError("flow keyFile path/evidence 无效。")
+            all_paths.add(path)
+            key_files.append({
+                "path": path,
+                "moduleId": module_id,
+                "moduleName": module_name,
+                "entity": entity,
+                "relation": relation,
+                "evidence": evidence,
+            })
+        evidence = _evidence_list(item.get("evidence", []), "flow.step.evidence")
+        if not evidence:
+            raise ValueError("flow.step.evidence 不得为空。")
+        steps.append({
+            "step": position,
+            "id": step_id,
+            "title": title,
+            "purpose": _required_text(item.get("purpose"), "flow.step.purpose"),
+            "input": _required_text(item.get("input"), "flow.step.input"),
+            "output": _required_text(item.get("output"), "flow.step.output"),
+            "keyFiles": key_files,
+            "why": _required_text(item.get("why"), "flow.step.why"),
+            "nextStep": _text(next_step, "flow.step.nextStep", limit=240) if next_step is not None else None,
+            "explanationSource": "derived-presentation",
+            "evidence": evidence,
+        })
+    if len(all_paths) > 18:
+        raise ValueError("flow keyFiles 总数超过上限。")
+    return {
+        "layout": "numbered-task-flow",
+        "exampleTask": task,
+        "steps": steps,
+        "stats": _stats(data.get("stats")),
+    }
+
+
+def flow_view(core_data: Mapping[str, Any]) -> AgentNaviView:
+    source_state, warnings = _source_state(core_data)
+    return AgentNaviView(
+        view="flow",
+        project=_project(core_data),
+        source_state=source_state,
+        data=_flow_payload(core_data),
+        warnings=tuple(warnings),
+    )
+
+
+def flow_text(core_data: Mapping[str, Any]) -> str:
+    project = _project(core_data)
+    payload = _flow_payload(core_data)
+    _, warnings = _source_state(core_data)
+    task = payload["exampleTask"]
+    lines = ["[AgentNavi 任务流]", f"项目：{project.name}（{project.id}）"]
+    lines.append(f"任务：{task['title']}" if task else "任务：暂无可展示示例")
+    for step in payload["steps"]:
+        files = "、".join(item["path"] for item in step["keyFiles"]) or "未命中关键文件"
+        lines.extend([
+            "",
+            f"{step['step']}. {step['title']}：{step['purpose']}",
+            f"   输入：{step['input']}",
+            f"   输出：{step['output']}",
+            f"   关键源码：{files}",
+            f"   为什么：{step['why']}",
+            f"   下一步：{step['nextStep'] or '交给 Agent'}",
+            f"   证据：{_evidence_reference(step['evidence'])}",
+        ])
+    if warnings:
+        lines.extend(["", "提示："])
+        lines.extend(f"- {warning.code}：{warning.message}" for warning in warnings)
+    return "\n".join(lines)
+
+
+__all__ = ["flow_text", "flow_view"]

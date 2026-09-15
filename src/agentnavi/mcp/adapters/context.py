@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ...privacy import contains_private_path
 from ...query import format_context
 from ..protocol import AgentNaviView, Project, SourceState, Warning
 
 _NOT_INDEXED_MESSAGE = "项目尚未完成索引，当前结果可能不完整。"
-_WINDOWS_ABSOLUTE_RE = re.compile(
-    r"(?i)(?:^|[^A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\[^\\/]+[\\/])"
-)
 
 
 def _text(value: Any, field: str, *, limit: int = 240) -> str:
@@ -34,32 +31,9 @@ def _query_text(value: Any) -> str:
 
     if not isinstance(value, str):
         raise TypeError("context.query 必须是字符串。")
-    lowered = value.lower()
-    if (
-        "file://" in lowered
-        or "~/" in value
-        or _WINDOWS_ABSOLUTE_RE.search(value)
-        or _contains_posix_absolute(value)
-    ):
+    if contains_private_path(value):
         return "[查询含路径，已隐藏]"
     return value[:500]
-
-
-def _contains_posix_absolute(value: str) -> bool:
-    """识别独立 POSIX 路径 token，并避免把 HTTP(S) URL 当作路径。"""
-
-    for index, character in enumerate(value):
-        if character != "/":
-            continue
-        if index == 0:
-            return True
-        previous = value[index - 1]
-        if previous == ":" and index + 1 < len(value) and value[index + 1] == "/":
-            continue
-        if previous.isalnum() or previous in "._~-/":
-            continue
-        return True
-    return False
 
 
 def _number(value: Any, field: str) -> int | float:
