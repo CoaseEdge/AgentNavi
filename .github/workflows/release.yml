@@ -45,6 +45,13 @@ jobs:
           fi
           test -f ".github/release/${TAG}.md"
 
+      - name: 构建 wheel 与 sdist
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          python -m build --sdist --wheel --outdir dist
+
       - name: 创建 GitHub Release
         shell: bash
         env:
@@ -61,4 +68,5 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$RELEASE_NAME" \
             --notes-file ".github/release/${TAG}.md" \
-            --latest
+            --latest \
+            dist/*

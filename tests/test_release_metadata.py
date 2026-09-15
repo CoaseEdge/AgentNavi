@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import tomllib
 import unittest
+from importlib.resources import files
 from pathlib import Path
 
 
@@ -28,6 +29,23 @@ class ReleaseMetadataTestCase(unittest.TestCase):
 
         changelog = (self.root / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(f"## {version} —", changelog)
+
+    def test_vla_skill_source_and_packaged_copy_stay_identical(self) -> None:
+        source = (self.root / "integrations" / "vla" / "SKILL.md").read_text(encoding="utf-8")
+        packaged = (self.root / "src" / "agentnavi" / "resources" / "skills" / "vla" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(source, packaged)
+
+    def test_vla_release_metadata_is_current_and_builds_artifacts(self) -> None:
+        readme = (self.root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("version-0.3.0", readme)
+        with (self.root / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        self.assertEqual(project["urls"]["Repository"], "https://github.com/CoaseEdge/AgentNavi")
+        workflow = (self.root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("python -m build --sdist --wheel", workflow)
+        self.assertIn("dist/*", workflow)
+        skill = files("agentnavi").joinpath("resources", "skills", "vla", "SKILL.md")
+        self.assertTrue(skill.is_file())
 
 
 if __name__ == "__main__":

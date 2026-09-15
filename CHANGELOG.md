@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.3.0 — 2026-09-15
+
+AgentNavi VLA 0.3.0 将项目导航、项目记忆与人机协作呈现统一为可验证的 MCP Apps 协议。
+
+- 新增 `agentnavi.vla.v1` DTO、Envelope、Evidence 与错误契约；
+- 新增 repository overview/tour、architecture、flow、context、impact、history 与 semantic-review 视图；
+- 新增 reasoning-first Presentation Policy、跨 Agent VLA Skill 与安全文本 fallback；
+- 新增多 Host MCP 配置生成、stdio/Streamable HTTP 传输和 loopback 默认安全边界；
+- 新增固定 Machine/Human VLA benchmark，约束必要文件召回、候选集合、文本预算和视图契约正确性；
+- 本版本准备 wheel/sdist 与 Release metadata；GitHub Release Workflow 会附加构建产物，PyPI 发布不在本轮范围内。
+
 ## 0.2.0 — 2026-08-17
 
 首个 GitHub Release。AgentNavi 已从基础三层图谱原型演进为可接入 Codex、Claude Code 与 DeepSeek Harness 的本地项目上下文导航引擎。
