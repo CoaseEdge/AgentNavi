@@ -8,6 +8,7 @@ import { clearArchitecture } from "./views/architecture.js";
 import { clearFlow } from "./views/flow.js";
 import { clearImpact } from "./views/impact.js";
 import { clearHistory } from "./views/history.js";
+import { clearSemanticReview, type ReviewDecisionHandler } from "./views/semantic-review.js";
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -183,6 +184,10 @@ export class AgentNaviShell {
       replaceText(element("view-title"), "History");
       replaceText(element("view-eyebrow"), "TASK TIMELINE / PROJECT STORY");
       replaceText(element("view-description"), "按权威任务时间与 L3 关系理解项目如何演进。");
+    } else if (view === "semantic-review") {
+      replaceText(element("view-title"), "Semantic Review");
+      replaceText(element("view-eyebrow"), "SEMANTIC REVIEW · 3 / 12");
+      replaceText(element("view-description"), "查看来源、置信度与证据，由人决定是否写入持久化语义 Overlay。");
     } else {
       replaceText(element("view-title"), "ContextMap");
       replaceText(element("view-eyebrow"), "READING CONTEXT");
@@ -209,6 +214,8 @@ export class AgentNaviShell {
               ? "正在分析影响"
             : view === "history"
               ? "正在读取项目历史"
+            : view === "semantic-review"
+              ? "正在读取语义审查"
           : "正在读取 Context",
     );
     replaceText(element("empty-message"), "新请求已收到，旧视图结果已清除。");
@@ -231,6 +238,7 @@ export class AgentNaviShell {
     clearFlow();
     clearImpact();
     clearHistory();
+    clearSemanticReview();
     element("concept-list").replaceChildren();
     element("file-list").replaceChildren();
     element("warning-list").replaceChildren();
@@ -266,10 +274,10 @@ export class AgentNaviShell {
     this.clearResult();
     replaceText(element("project-name"), view.project.name);
     replaceText(element("source-state"), view.sourceState.status.toUpperCase());
-    replaceText(element("file-count"), String(view.data.stats.files));
+    replaceText(element("file-count"), String("files" in view.data.stats ? view.data.stats.files : 0));
     this.setViewIdentity(view.view);
 
-    renderRegisteredView(view, (context) => this.renderContext(context));
+    renderRegisteredView(view, (context) => this.renderContext(context), this.onDecision ?? (() => undefined));
 
     const warningPanel = element("warning-panel");
     const warningList = element("warning-list");
@@ -282,5 +290,11 @@ export class AgentNaviShell {
     );
     warningPanel.hidden = view.warnings.length === 0;
     element("empty-state").hidden = true;
+  }
+
+  private onDecision: ReviewDecisionHandler | undefined;
+
+  setSemanticReviewAction(handler: ReviewDecisionHandler): void {
+    this.onDecision = handler;
   }
 }

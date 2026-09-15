@@ -841,6 +841,17 @@ h1 {
 .history-list summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; }
 .history-list ul { padding-left: 16px; }
 @media (max-width: 390px) { .history-list summary { flex-direction: column; } }
+.semantic-review-view { display: grid; gap: 16px; min-width: 0; }
+.semantic-review-items { display: grid; gap: 12px; margin: 0; padding-left: 22px; }
+.semantic-review-item { border: 1px solid var(--line); border-radius: 12px; padding: 14px; overflow-wrap: anywhere; }
+.semantic-review-item h3 { margin: 0 0 6px; font-size: 15px; }
+.semantic-review-item p { margin: 6px 0; font-size: 12px; line-height: 1.5; }
+.semantic-review-evidence { margin: 8px 0; padding-left: 16px; font-size: 12px; }
+.semantic-review-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.semantic-review-actions button { border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; background: transparent; color: inherit; }
+.semantic-review-actions .review-accept { border-color: var(--accent); }
+.semantic-review-actions .review-reject { border-color: var(--ink); }
+.review-decision { font-size: 12px; opacity: .75; }
 
 .warning-panel {
   margin-top: 26px;

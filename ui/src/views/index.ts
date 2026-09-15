@@ -5,10 +5,12 @@ import { renderArchitecture } from "./architecture.js";
 import { renderFlow } from "./flow.js";
 import { renderImpact } from "./impact.js";
 import { renderHistory } from "./history.js";
+import { renderSemanticReview, type ReviewDecisionHandler } from "./semantic-review.js";
 
 export function renderRegisteredView(
   view: AgentNaviView,
   renderContext: (context: ContextView) => void,
+  onDecision: ReviewDecisionHandler,
 ): void {
   const renderers: Record<AgentNaviView["view"], (value: AgentNaviView) => void> = {
     context: (value) => {
@@ -31,6 +33,9 @@ export function renderRegisteredView(
     },
     history: (value) => {
       if (value.view === "history") renderHistory(value);
+    },
+    "semantic-review": (value) => {
+      if (value.view === "semantic-review") renderSemanticReview(value, onDecision);
     },
   };
   renderers[view.view](view);

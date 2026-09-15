@@ -1421,10 +1421,95 @@ class HistoryViewOutput(_ExtensibleModel):
         return _history_error_placeholder() if _is_public_error(value) else value
 
 
+class SemanticReviewEntityOutput(_ExtensibleModel):
+    id: str = Field(min_length=1)
+    kind: Literal["concept"]
+    label: str = Field(min_length=1)
+    layer: Literal["L2"]
+    source: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1, max_length=3)
+
+
+class SemanticReviewItemOutput(_ExtensibleModel):
+    review_id: str = Field(alias="reviewId", min_length=1)
+    subject: SemanticReviewEntityOutput
+    relation: str = Field(min_length=1)
+    object: SemanticReviewEntityOutput | None
+    confidence: float = Field(ge=0.0, le=1.0)
+    source: str = Field(min_length=1)
+    evidence: list[ContextEvidenceOutput] = Field(min_length=1, max_length=3)
+    allowed_actions: list[Literal["accept", "reject"]] = Field(alias="allowedActions", max_length=2)
+    decision: Literal["accepted", "rejected"] | None = None
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> "SemanticReviewItemOutput":
+        if self.subject.evidence != self.evidence and (self.object is None or self.object.evidence != self.evidence):
+            raise ValueError("semantic review evidence must bind subject or object")
+        if self.object is not None and self.subject.id == self.object.id:
+            raise ValueError("semantic review endpoints must differ")
+        return self
+
+
+class SemanticReviewStatsOutput(_ExtensibleModel):
+    candidates: int = Field(strict=True, ge=0)
+    pending: int = Field(strict=True, ge=0)
+    reviewed: int = Field(strict=True, ge=0)
+
+
+class SemanticReviewDataOutput(_ExtensibleModel):
+    layout: Literal["semantic-review"]
+    revision: str = Field(min_length=1)
+    review_items: list[SemanticReviewItemOutput] = Field(alias="reviewItems", max_length=100)
+    include_reviewed: bool = Field(alias="includeReviewed")
+    stats: SemanticReviewStatsOutput
+
+    @model_validator(mode="after")
+    def validate_stats(self) -> "SemanticReviewDataOutput":
+        if self.stats.candidates != len(self.review_items):
+            raise ValueError("semantic review candidate count mismatch")
+        if self.stats.pending != sum(item.decision is None for item in self.review_items):
+            raise ValueError("semantic review pending count mismatch")
+        if self.stats.reviewed != sum(item.decision is not None for item in self.review_items):
+            raise ValueError("semantic review reviewed count mismatch")
+        return self
+
+
+class SemanticReviewViewOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["semantic-review"]
+    project: ProjectOutput
+    source_state: SourceStateOutput = Field(alias="sourceState")
+    data: SemanticReviewDataOutput
+    warnings: list[WarningOutput] = Field(max_length=MAX_CONTEXT_WARNINGS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_public_error_for_mcp_2_0(cls, value: Any) -> Any:
+        if not _is_public_error(value):
+            return value
+        return {
+            "schemaVersion": SCHEMA_VERSION, "view": "semantic-review",
+            "project": {"id": "error", "name": "error", "kind": "internal"},
+            "sourceState": {"status": "partial"},
+            "data": {"layout": "semantic-review", "revision": "error", "reviewItems": [],
+                     "includeReviewed": False, "stats": {"candidates": 0, "pending": 0, "reviewed": 0}},
+            "warnings": [],
+        }
+
+
+class ReviewDecisionOutput(_ExtensibleModel):
+    schema_version: Literal["agentnavi.vla.v1"] = Field(alias="schemaVersion")
+    view: Literal["semantic-review"]
+    review_id: str = Field(alias="reviewId", min_length=1)
+    decision: Literal["accepted", "rejected"]
+    persisted: bool
+
+
 class VisualizeViewOutput(
     RootModel[
         ContextViewOutput | RepositoryOverviewViewOutput | RepositoryTourViewOutput
-        | ArchitectureViewOutput | FlowViewOutput | ImpactViewOutput | HistoryViewOutput
+        | ArchitectureViewOutput | FlowViewOutput | ImpactViewOutput | HistoryViewOutput | SemanticReviewViewOutput
     ]
 ):
     """Presentation tool 可返回的判别联合，顶层保持标准 Envelope。"""
@@ -1441,6 +1526,8 @@ CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
 IMPACT_TOOL_RESULT = Annotated[CallToolResult, ImpactViewOutput]
 HISTORY_TOOL_RESULT = Annotated[CallToolResult, HistoryViewOutput]
 VISUALIZE_TOOL_RESULT = Annotated[CallToolResult, VisualizeViewOutput]
+SEMANTIC_REVIEW_TOOL_RESULT = Annotated[CallToolResult, SemanticReviewViewOutput]
+REVIEW_DECISION_TOOL_RESULT = Annotated[CallToolResult, ReviewDecisionOutput]
 
 
 class HistoryInput(BaseModel):
@@ -1453,6 +1540,27 @@ class HistoryInput(BaseModel):
 
 
 HISTORY_INPUT_SCHEMA = HistoryInput.model_json_schema()
+
+
+class SemanticReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str | None = Field(default=None, min_length=1, max_length=4096)
+    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
+    limit: int = Field(default=50, ge=1, le=100)
+    include_reviewed: bool = Field(default=False, alias="includeReviewed")
+
+
+class ReviewDecisionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_id: str = Field(alias="reviewId", min_length=1, max_length=240)
+    decision: Literal["accept", "reject"]
+    project_id: str | None = Field(default=None, min_length=1, max_length=4096)
+    workspace: str | None = Field(default=None, min_length=1, max_length=4096)
+    note: str | None = Field(default=None, max_length=4096)
+
+
+SEMANTIC_REVIEW_INPUT_SCHEMA = SemanticReviewInput.model_json_schema()
+REVIEW_DECISION_INPUT_SCHEMA = ReviewDecisionInput.model_json_schema()
 
 
 class _VisualizeInputBase(BaseModel):
@@ -1472,7 +1580,7 @@ class VisualizeImpactInput(_VisualizeInputBase):
 
 
 class VisualizeRepositoryInput(_VisualizeInputBase):
-    view: Literal["repo-overview", "repo-tour", "architecture", "flow", "history"]
+    view: Literal["repo-overview", "repo-tour", "architecture", "flow", "history", "semantic-review"]
     query: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
@@ -1543,7 +1651,11 @@ __all__ = [
     "FlowViewOutput",
     "IMPACT_TOOL_RESULT",
     "HISTORY_TOOL_RESULT",
+    "SEMANTIC_REVIEW_TOOL_RESULT",
+    "REVIEW_DECISION_TOOL_RESULT",
     "HISTORY_INPUT_SCHEMA",
+    "SEMANTIC_REVIEW_INPUT_SCHEMA",
+    "REVIEW_DECISION_INPUT_SCHEMA",
     "HISTORY_MODE_INPUT",
     "HISTORY_OPTIONAL_TEXT_INPUT",
     "HistoryViewOutput",

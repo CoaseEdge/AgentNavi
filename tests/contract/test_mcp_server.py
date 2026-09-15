@@ -81,7 +81,7 @@ import agentnavi.mcp.server
         async def call_next(ctx: FakeContext) -> dict[str, object]:
             return ctx.params
 
-        for tool_name in ("agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"):
+        for tool_name in ("agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize", "agentnavi_semantic_review", "agentnavi_review_decide"):
             with self.subTest(tool=tool_name):
                 result = asyncio.run(
                     _complete_required_tool_arguments(
@@ -95,6 +95,8 @@ import agentnavi.mcp.server
                 arguments = result["arguments"]
                 if tool_name == "agentnavi_impact":
                     self.assertEqual(arguments["selector"], None)
+                elif tool_name in {"agentnavi_semantic_review", "agentnavi_review_decide"}:
+                    self.assertNotIn("/private/posix.py", str(arguments))
                 else:
                     self.assertEqual(arguments["query"], None)
                 if tool_name == "agentnavi_visualize":
@@ -122,7 +124,7 @@ import agentnavi.mcp.server
                 tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
                     set(tools_by_name),
-                    {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"},
+                    {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize", "agentnavi_semantic_review", "agentnavi_review_decide"},
                 )
                 context_tool = tools_by_name["agentnavi_context"]
                 impact_tool = tools_by_name["agentnavi_impact"]
@@ -203,6 +205,7 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/FlowViewOutput"},
                         {"$ref": "#/$defs/ImpactViewOutput"},
                         {"$ref": "#/$defs/HistoryViewOutput"},
+                        {"$ref": "#/$defs/SemanticReviewViewOutput"},
                     ],
                 )
                 self.assertEqual(visualize_tool.input_schema["discriminator"]["propertyName"], "view")
@@ -292,7 +295,7 @@ import agentnavi.mcp.server
                 tools_by_name = {tool.name: tool for tool in tools}
                 self.assertEqual(
                     set(tools_by_name),
-                    {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"},
+                    {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize", "agentnavi_semantic_review", "agentnavi_review_decide"},
                 )
                 resources = (await client.list_resources()).resources
                 self.assertEqual(
@@ -341,6 +344,7 @@ import agentnavi.mcp.server
                         {"$ref": "#/$defs/FlowViewOutput"},
                         {"$ref": "#/$defs/ImpactViewOutput"},
                         {"$ref": "#/$defs/HistoryViewOutput"},
+                        {"$ref": "#/$defs/SemanticReviewViewOutput"},
                     ],
                 )
                 overview = await client.call_tool(

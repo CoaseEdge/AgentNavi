@@ -73,7 +73,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
             self.assertIn("AgentNavi ContextMap", result.contents[0].text)
 
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-            self.assertEqual(set(tools), {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize"})
+            self.assertEqual(set(tools), {"agentnavi_context", "agentnavi_impact", "agentnavi_history", "agentnavi_visualize", "agentnavi_semantic_review", "agentnavi_review_decide"})
             self.assertFalse(tools["agentnavi_context"].meta)
             self.assertEqual(tools["agentnavi_visualize"].meta, APP_TOOL_META)
             visualize_input = tools["agentnavi_visualize"].input_schema
@@ -100,6 +100,7 @@ class MCPAppResourceContractTestCase(unittest.TestCase):
                     {"$ref": "#/$defs/FlowViewOutput"},
                     {"$ref": "#/$defs/ImpactViewOutput"},
                     {"$ref": "#/$defs/HistoryViewOutput"},
+                    {"$ref": "#/$defs/SemanticReviewViewOutput"},
                 ],
             )
 

@@ -16,6 +16,17 @@ const app = new App(
   { autoResize: true, allowUnsafeEval: false },
 );
 
+shell.setSemanticReviewAction((reviewId, decision, projectId) => {
+  void app.callServerTool({
+    name: "agentnavi_review_decide",
+    arguments: { review_id: reviewId, decision, project_id: projectId },
+  }).then(() => app.callServerTool({
+    name: "agentnavi_semantic_review",
+    arguments: { project_id: projectId },
+  }).then((result) => lifecycle.handleToolResult(result)))
+    .catch(() => shell.showError("语义决定未能持久化，请稍后重试。"));
+});
+
 // One-shot notifications can arrive during initialization. Register every listener first.
 app.addEventListener("toolinput", ({ arguments: toolArguments }) => {
   lifecycle.handleToolInput(toolArguments);
