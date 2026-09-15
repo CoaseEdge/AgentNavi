@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,7 +12,11 @@ from agentnavi.mcp.server import create_server
 from agentnavi.utils import utc_now
 
 
+MCP_AVAILABLE = importlib.util.find_spec("mcp.server") is not None
+
+
 class SemanticReviewContractTestCase(unittest.TestCase):
+    @unittest.skipUnless(MCP_AVAILABLE, "需要安装 agentnavi[mcp]")
     def test_server_review_and_app_decision_persist_overlay_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"
