@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from mcp.types import CallToolResult, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
 
 from .protocol import SCHEMA_VERSION
 
@@ -104,7 +104,12 @@ class ContextViewOutput(_ExtensibleModel):
             and "schemaVersion" not in value
             and set(value) == {"code", "message", "retryable", "details"}
             and value.get("code")
-            in {"PROJECT_REQUIRED", "PROJECT_NOT_FOUND", "INTERNAL_ERROR"}
+            in {
+                "PROJECT_REQUIRED",
+                "PROJECT_NOT_FOUND",
+                "INVALID_ARGUMENT",
+                "INTERNAL_ERROR",
+            }
             and isinstance(value.get("message"), str)
             and isinstance(value.get("retryable"), bool)
             and isinstance(value.get("details"), Mapping)
@@ -127,6 +132,27 @@ class ContextViewOutput(_ExtensibleModel):
 
 CONTEXT_TOOL_RESULT = Annotated[CallToolResult, ContextViewOutput]
 
+# MCPServer 会在调用函数之前按类型注解验证输入。这里用 Any 接住原始值，
+# 保证所有错误都能进入 AgentNavi 的公开错误边界；WithJsonSchema 只负责让
+# tools/list 继续发布精确的 string / const 合同，不依赖 SDK 私有实现。
+CONTEXT_VIEW_INPUT = Annotated[
+    Any,
+    WithJsonSchema({"type": "string", "const": "context"}),
+]
+REQUIRED_TEXT_INPUT = Annotated[
+    Any,
+    WithJsonSchema({"type": "string", "minLength": 1}),
+]
+OPTIONAL_TEXT_INPUT = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        }
+    ),
+]
+
 
 def context_tool_annotations() -> ToolAnnotations:
     return ToolAnnotations(
@@ -137,4 +163,11 @@ def context_tool_annotations() -> ToolAnnotations:
     )
 
 
-__all__ = ["CONTEXT_TOOL_RESULT", "ContextViewOutput", "context_tool_annotations"]
+__all__ = [
+    "CONTEXT_TOOL_RESULT",
+    "CONTEXT_VIEW_INPUT",
+    "OPTIONAL_TEXT_INPUT",
+    "REQUIRED_TEXT_INPUT",
+    "ContextViewOutput",
+    "context_tool_annotations",
+]

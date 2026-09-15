@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from agentnavi.config import Settings
@@ -92,13 +93,38 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             )
             connection.commit()
 
-    async def _call(self, arguments: dict[str, str]):
+    async def _call(
+        self,
+        arguments: Any,
+        *,
+        tool_name: str = "agentnavi_context",
+    ):
         from mcp import Client
 
         from agentnavi.mcp.server import create_server
 
         async with Client(create_server(home=self.home), raise_exceptions=True) as client:
-            return await client.call_tool("agentnavi_context", arguments)
+            return await client.call_tool(tool_name, arguments)
+
+    def test_visualize_tool_returns_context_view_and_readable_fallback(self) -> None:
+        self._add_project()
+
+        result = asyncio.run(
+            self._call(
+                {"view": "context", "query": "会员", "project_id": "fixture"},
+                tool_name="agentnavi_visualize",
+            )
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["schemaVersion"], "agentnavi.vla.v1")
+        self.assertEqual(result.structured_content["view"], "context")
+        self.assertEqual(
+            result.structured_content["data"]["files"][0]["path"],
+            "src/membership.py",
+        )
+        self.assertIn("会员", result.content[0].text)
+        self.assertIn("src/membership.py", result.content[0].text)
 
     def test_context_tool_returns_equivalent_text_and_vla_view_without_paths(self) -> None:
         self._add_project()
@@ -163,6 +189,67 @@ class MCPContextToolContractTestCase(unittest.TestCase):
             self.assertNotIn(str(self.project_root.resolve()), wire)
             self.assertNotIn(str(self.database.settings.database_path), wire)
         self.assertEqual(required.structured_content["details"], {"candidateCount": 0})
+
+    def test_invalid_argument_types_and_values_are_public_and_never_echoed(self) -> None:
+        private_tokens = (
+            "/private/posix-secret.py",
+            r"C:\\Users\\alice\\windows-secret.py",
+            r"\\server\share\unc-secret.py",
+            "file:///Users/alice/url-secret.py",
+        )
+        cases = (
+            ("agentnavi_context", None, "query"),
+            (
+                "agentnavi_visualize",
+                {"query": private_tokens[0], "project_id": private_tokens[1]},
+                "view",
+            ),
+            (
+                "agentnavi_visualize",
+                {"view": private_tokens[0], "workspace": private_tokens[2]},
+                "view",
+            ),
+            (
+                "agentnavi_context",
+                {"project_id": private_tokens[3]},
+                "query",
+            ),
+            (
+                "agentnavi_visualize",
+                {"view": private_tokens[0], "query": "会员"},
+                "view",
+            ),
+            (
+                "agentnavi_visualize",
+                {"view": "context", "query": list(private_tokens)},
+                "query",
+            ),
+            (
+                "agentnavi_context",
+                {"query": "会员", "project_id": {"value": private_tokens[1]}},
+                "project_id",
+            ),
+            (
+                "agentnavi_context",
+                {"query": "会员", "workspace": list(private_tokens)},
+                "workspace",
+            ),
+            ("agentnavi_context", {"query": "   "}, "query"),
+        )
+
+        for tool_name, arguments, field in cases:
+            with self.subTest(tool=tool_name, field=field):
+                result = asyncio.run(self._call(arguments, tool_name=tool_name))
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["code"], "INVALID_ARGUMENT")
+                self.assertEqual(result.structured_content["details"], {"field": field})
+                wire = json.dumps(
+                    result.model_dump(by_alias=True),
+                    ensure_ascii=False,
+                    default=str,
+                )
+                for token in private_tokens:
+                    self.assertNotIn(token, wire)
 
     def test_unknown_failures_map_to_sanitized_internal_error(self) -> None:
         self._add_project()

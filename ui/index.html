@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <script>globalThis.__zod_globalConfig={jitless:true};</script>
+    <title>AgentNavi ContextMap</title>
+  </head>
+  <body>
+    <main class="app-shell" aria-labelledby="view-title">
+      <aside class="status-rail" aria-label="ContextMap 状态">
+        <div class="brand-mark" aria-hidden="true">AN</div>
+        <div class="rail-copy">
+          <span class="eyebrow">AGENTNAVI / VLA</span>
+          <h1 id="view-title">ContextMap</h1>
+        </div>
+        <div class="connection-state" id="connection-state" role="status" aria-live="polite">
+          <span class="state-dot" aria-hidden="true"></span>
+          <span id="connection-label">正在连接</span>
+        </div>
+        <dl class="project-facts">
+          <div>
+            <dt>PROJECT</dt>
+            <dd id="project-name">等待数据</dd>
+          </div>
+          <div>
+            <dt>SOURCE</dt>
+            <dd id="source-state">—</dd>
+          </div>
+          <div>
+            <dt>FILES</dt>
+            <dd id="file-count">0</dd>
+          </div>
+        </dl>
+      </aside>
+
+      <section class="map-panel" aria-label="任务到概念与文件的导航图">
+        <header class="map-header">
+          <div>
+            <span class="eyebrow">READING CONTEXT</span>
+            <p>从当前任务，沿概念定位到必要文件。</p>
+          </div>
+          <span class="schema-chip">agentnavi.vla.v1</span>
+        </header>
+
+        <section id="error-panel" class="error-panel" hidden role="alert" aria-live="assertive">
+          <span class="error-label">ERROR</span>
+          <p id="error-message">查询失败。</p>
+        </section>
+
+        <div id="empty-state" class="empty-state">
+          <span class="empty-index">00</span>
+          <h2 id="empty-title">等待 Context 结果</h2>
+          <p id="empty-message">调用 agentnavi_visualize 后，这里会显示只读导航关系。</p>
+        </div>
+
+        <div id="context-map" class="context-map" hidden>
+          <section class="map-stage task-stage" aria-labelledby="task-stage-title">
+            <header>
+              <span class="stage-index">01</span>
+              <h2 id="task-stage-title">Current Task</h2>
+            </header>
+            <div class="task-card">
+              <span class="node-kind">TASK</span>
+              <p id="task-query">当前查询</p>
+            </div>
+          </section>
+
+          <div class="flow-arrow" aria-hidden="true"><span>→</span></div>
+
+          <section class="map-stage concept-stage" aria-labelledby="concept-stage-title">
+            <header>
+              <span class="stage-index">02</span>
+              <h2 id="concept-stage-title">Concepts</h2>
+            </header>
+            <ol id="concept-list" class="node-list"></ol>
+          </section>
+
+          <div class="flow-arrow" aria-hidden="true"><span>→</span></div>
+
+          <section class="map-stage file-stage" aria-labelledby="file-stage-title">
+            <header>
+              <span class="stage-index">03</span>
+              <h2 id="file-stage-title">Files</h2>
+            </header>
+            <ol id="file-list" class="node-list"></ol>
+          </section>
+        </div>
+
+        <section id="warning-panel" class="warning-panel" hidden aria-label="数据提示">
+          <span class="warning-label">WARNINGS</span>
+          <ul id="warning-list"></ul>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/src/app.ts"></script>
+  </body>
+</html>

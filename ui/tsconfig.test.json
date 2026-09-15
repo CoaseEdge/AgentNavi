@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/protocol.ts", "src/shell.ts", "src/bridge.ts", "tests/protocol.test.ts"]
+}

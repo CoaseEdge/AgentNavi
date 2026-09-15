@@ -74,7 +74,38 @@ jobs:
       - name: 运行 MCP 合同测试
         run: |
           python -m unittest tests.contract.test_mcp_server -v
+          python -m unittest tests.contract.test_mcp_context_tool -v
           python -m unittest tests.commands.test_mcp_cli tests.unit.test_project_resolver -v
+          python -m unittest tests.mcp.test_app_resource -v
+
+  mcp-app-ui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: 安装 UI 依赖
+        run: npm ci --prefix ui
+
+      - name: 类型与安全检查
+        run: npm run check --prefix ui
+
+      - name: 运行 UI 单元测试
+        run: npm test --prefix ui
+
+      - name: 构建单文件 MCP App
+        run: npm run build --prefix ui
+
+      - name: 检查生成资源无漂移
+        run: npm run check:generated --prefix ui
 
   deepseek-harness-integration:
     runs-on: ubuntu-latest

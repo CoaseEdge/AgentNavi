@@ -31,6 +31,10 @@ ERROR_DEFINITIONS = MappingProxyType(
             message="找不到指定的项目，请检查 project ID。",
             retryable=True,
         ),
+        "INVALID_ARGUMENT": _ErrorDefinition(
+            message="请求参数无效，请检查参数类型和取值。",
+            retryable=True,
+        ),
         "INTERNAL_ERROR": _ErrorDefinition(
             message="AgentNavi 处理请求时发生内部错误。",
             retryable=False,
