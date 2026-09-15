@@ -16,6 +16,67 @@ from .utils import json_dumps, json_loads, utc_now
 RETRIEVAL_MODES = {"full-scan", "filename-search", "agentnavi"}
 OBSERVED_MODES = {"baseline", "agentnavi"}
 
+VLA_BENCHMARK_VIEWS = (
+    "repo-overview",
+    "repo-tour",
+    "context",
+    "impact",
+    "history",
+    "semantic-review",
+)
+
+
+def evaluate_vla_surface(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Evaluate fixed machine/human VLA acceptance metrics without broadening retrieval."""
+
+    missing_views = [view for view in VLA_BENCHMARK_VIEWS if view not in results]
+    view_metrics: dict[str, dict[str, Any]] = {}
+    for view in VLA_BENCHMARK_VIEWS:
+        item = results.get(view, {})
+        required = {str(path) for path in item.get("required_paths", [])}
+        returned = {str(path) for path in item.get("returned_paths", [])}
+        baseline_candidates = int(item.get("baseline_candidate_count", 0) or 0)
+        candidate_count = int(item.get("candidate_count", 0) or 0)
+        baseline_tokens = int(item.get("baseline_model_tokens", 0) or 0)
+        model_tokens = int(item.get("model_tokens", 0) or 0)
+        baseline_success = bool(item.get("baseline_success", False))
+        success = bool(item.get("success", False))
+        recall = len(required & returned) / len(required) if required else 1.0
+        token_delta = (
+            (model_tokens - baseline_tokens) / baseline_tokens
+            if baseline_tokens
+            else 0.0
+        )
+        view_metrics[view] = {
+            "recall": recall,
+            "candidate_count": candidate_count,
+            "candidate_set_not_expanded": candidate_count <= baseline_candidates,
+            "model_token_delta": token_delta,
+            "model_budget_ok": token_delta <= 0.05,
+            "task_success_not_lower": success or not baseline_success,
+        }
+    recalls = [metric["recall"] for metric in view_metrics.values()]
+    return {
+        "views": list(VLA_BENCHMARK_VIEWS),
+        "missing_views": missing_views,
+        "metrics": view_metrics,
+        "necessary_file_recall": min(recalls, default=0.0),
+        "candidate_set_not_expanded": all(
+            metric["candidate_set_not_expanded"] for metric in view_metrics.values()
+        ),
+        "model_budget_ok": all(metric["model_budget_ok"] for metric in view_metrics.values()),
+        "task_success_not_lower": all(
+            metric["task_success_not_lower"] for metric in view_metrics.values()
+        ),
+        "passed": (
+            not missing_views
+            and min(recalls, default=0.0) >= 1.0
+            and all(metric["candidate_set_not_expanded"] for metric in view_metrics.values())
+            and all(metric["model_budget_ok"] for metric in view_metrics.values())
+            and all(metric["task_success_not_lower"] for metric in view_metrics.values())
+        ),
+    }
+
 
 def _normalize_path(value: str) -> str:
     return PurePosixPath(value.replace("\\", "/").strip().lstrip("./")).as_posix()

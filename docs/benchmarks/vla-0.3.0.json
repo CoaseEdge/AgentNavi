@@ -1,0 +1,18 @@
+{
+  "suite": "agentnavi-vla-0.3.0",
+  "views": [
+    "repo-overview",
+    "repo-tour",
+    "context",
+    "impact",
+    "history",
+    "semantic-review"
+  ],
+  "gates": {
+    "necessary_file_recall": 1.0,
+    "candidate_set_expansion": 0.0,
+    "max_model_text_budget_increase": 0.05,
+    "task_success_regression": 0.0
+  },
+  "notes": "固定 Machine/Human VLA 基准；不扩大 context_data 候选集合或一跳上限。"
+}
