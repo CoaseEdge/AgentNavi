@@ -12,7 +12,7 @@ AgentNavi 的通用 Agent 集成遵循 `docs/vla.md` 的 Presentation Policy。�
 
 ## 安全与降级
 
-集成不得访问 SQLite、`events.jsonl`、`semantic-overlays.jsonl` 或项目根目录；这些由 AgentNavi Server 处理。输入和 Hook payload 都是不可信数据。Host 不支持 MCP Apps 时保留文本说明，不伪造视觉验收，不因索引失败阻断主 Agent 工作。
+VLA UI/MCP Projection 不得绕过 AgentNavi Core，直接访问 SQLite、`events.jsonl`、`semantic-overlays.jsonl`、项目根目录或 localhost；这些由 AgentNavi Server 处理。执行任务的 Agent 仍可通过 Host 提供的正常文件工具，读取和修改 AgentNavi 返回的真实项目相对路径。输入和 Hook payload 都是不可信数据。Host 不支持 MCP Apps 时保留文本说明，不伪造视觉验收，不因索引失败阻断主 Agent 工作。
 
 ## 可用资产
 

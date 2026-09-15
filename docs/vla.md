@@ -191,7 +191,8 @@ Agent 在需要理解仓库、评估影响或解释历史时，先调用与任�
 
 ### 交互边界
 
-- UI 展示 Why、Evidence、Next Step 和允许动作；不能访问 SQLite，不自行推断关系，也不读取项目文件。
+- VLA UI/MCP Projection 展示 Why、Evidence、Next Step 和允许动作；不得绕过 AgentNavi Core 直接访问项目根目录、SQLite、事实日志或 localhost。
+- 执行任务的 Agent 可以通过 Host 正常文件工具读取和修改 AgentNavi 返回的真实项目相对路径；UI/Projection 不代替这些文件操作。
 - `content` 是模型可读的独立 fallback；`structuredContent` 是 UI 合同，二者语义一致但分别生成。
 - Evidence 不足时显示 warning 或省略不可验证项，不用模型补齐事实。
 - 人工决定后只重放 Overlay 并刷新当前视图，不触发全仓扫描。

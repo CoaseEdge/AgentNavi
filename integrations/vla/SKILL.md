@@ -18,7 +18,8 @@ description: Use AgentNavi VLA to narrow repository context, visualize evidence-
 
 ## 约束
 
-- 不能访问 SQLite、项目日志、项目根目录或 localhost；不能写项目专用文件。
+- VLA UI/MCP Projection 不得绕过 AgentNavi Core，直接访问项目根目录、SQLite、事实日志或 localhost，也不能写项目专用文件。
+- 执行任务的 Agent 可以通过 Host 提供的正常文件工具，读取和修改 AgentNavi 返回的真实项目相对路径；该文件操作不由 VLA UI/MCP Projection 代替。
 - 不得扩大候选数量、一跳关系上限或把 warning 当成事实。
 - Evidence 不足时报告不确定性，不虚构文件、关系、因果或历史。
 - `agentnavi_review_decide` 是唯一写操作，只能由 App 调用；决定后等待刷新结果。
