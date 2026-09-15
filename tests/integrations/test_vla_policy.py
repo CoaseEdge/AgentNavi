@@ -27,6 +27,11 @@ class VLAIntegrationPolicyTestCase(unittest.TestCase):
         self.assertIn("执行任务的 Agent 可以通过 Host 提供的正常文件工具，读取和修改", skill)
         self.assertNotIn("innerHTML", skill)
 
+    def test_integration_docs_use_the_same_projection_boundary(self) -> None:
+        docs = (self.root / "docs" / "integrations.md").read_text(encoding="utf-8")
+        self.assertIn("VLA UI/MCP Projection 不得绕过 AgentNavi Core", docs)
+        self.assertIn("执行任务的 Agent 仍可通过 Host 提供的正常文件工具", docs)
+
 
 if __name__ == "__main__":
     unittest.main()
