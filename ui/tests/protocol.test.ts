@@ -7,6 +7,7 @@ import {
   parseFlowView,
   parseImpactView,
   parseHistoryView,
+  parseSemanticReviewView,
   parsePublicError,
   parseRepositoryOverviewView,
   parseRepositoryTourView,
@@ -31,6 +32,12 @@ const historyFixture: any = { schemaVersion: SCHEMA_VERSION, view: "history", pr
 assert(parseHistoryView(historyFixture)?.data.timeline[0]?.taskId === "task-1", "应解析 History timeline");
 assert(parseAgentNaviView(historyFixture)?.view === "history", "通用 parser 应分派 History");
 assert(parseRequestedView({ view: "history" }) === "history", "应识别 History 请求");
+
+const semanticEvidence = { kind: "semantic-node", summary: "Membership concept", layer: "L2", source: "semantic-heuristic", confidence: 0.72 } as const;
+const semanticReviewFixture: any = { schemaVersion: SCHEMA_VERSION, view: "semantic-review", project: { id: "fixture", name: "Fixture", kind: "software" }, sourceState: { status: "ready" }, warnings: [],
+  data: { layout: "semantic-review", revision: "review-1", includeReviewed: false, stats: { candidates: 1, pending: 1, reviewed: 0 }, reviewItems: [{ reviewId: "review-1", subject: { id: "concept:membership", kind: "concept", label: "Membership", layer: "L2", source: "semantic-heuristic", confidence: 0.72, evidence: [semanticEvidence] }, relation: "concept-candidate", object: null, confidence: 0.72, source: "semantic-heuristic", evidence: [semanticEvidence], allowedActions: ["accept", "reject"], decision: null }] } };
+assert(parseSemanticReviewView(semanticReviewFixture)?.data.reviewItems[0]?.allowedActions[0] === "accept", "应解析 Semantic Review 动作");
+assert(parseAgentNaviView(semanticReviewFixture)?.view === "semantic-review", "通用 parser 应分派 Semantic Review");
 for (const mutate of [
   (value: any) => { value.data.timeline[0].entity.layer = "L2"; },
   (value: any) => { value.data.timeline[0].relations[0].relation.targetId = "other"; },
