@@ -1,4 +1,5 @@
 export const SCHEMA_VERSION = "agentnavi.vla.v1" as const;
+export const MAX_CONTEXT_WARNINGS = 10;
 
 export interface ContextFile {
   path: string;
@@ -12,6 +13,39 @@ export interface ContextConcept {
   confidence: number;
   source: string;
   files: ContextFile[];
+}
+
+export interface ContextNavigationChain {
+  sourceConcept: TourStop["entity"];
+  conceptRelation: TourStop["relations"][number] | null;
+  relatedConcept: TourStop["entity"] | null;
+  fileRelation: TourStop["relations"][number];
+  file: TourStop["entity"];
+  evidence: Evidence[];
+}
+
+export interface ContextReadingItem {
+  position: number;
+  path: string;
+  language: string;
+  why: string;
+  evidence: Evidence[];
+  nextStep: { path: string; reason: string } | null;
+  chains: ContextNavigationChain[];
+  actions: Array<{
+    kind: "purpose" | "relevance" | "dependents" | "history" | "impact";
+    label: string;
+    summary: string;
+    evidence: Evidence[];
+  }>;
+  dependents: Array<{ path: string; relation: string }>;
+  history: Array<{
+    id: string;
+    title: string;
+    status: string;
+    createdAt: string;
+    relation: string;
+  }>;
 }
 
 export interface ContextWarning {
@@ -50,6 +84,10 @@ export interface ContextView {
     };
     concepts: ContextConcept[];
     files: ContextFile[];
+    navigation: {
+      revision: string;
+      readingOrder: ContextReadingItem[];
+    };
   };
   warnings: ContextWarning[];
 }
@@ -426,7 +464,156 @@ function commonEnvelope(value: unknown): {
   return { envelope, project: { id, name, kind }, sourceState: { status }, data, warnings };
 }
 
+const CONTEXT_ACTIONS = [
+  ["purpose", "它做什么"],
+  ["relevance", "为什么相关"],
+  ["dependents", "谁依赖它"],
+  ["history", "过去谁改过"],
+  ["impact", "如果改它"],
+] as const;
+
+function strictEvidence(value: unknown, limit = 3): Evidence[] | undefined {
+  const raw = Array.isArray(value) ? value : [];
+  if (raw.length === 0 || raw.length > limit) return undefined;
+  const parsed = raw.map(parseEvidence).filter((entry): entry is Evidence => Boolean(entry));
+  return parsed.length === raw.length ? parsed : undefined;
+}
+
+function contextChain(value: unknown, path: string): ContextNavigationChain | undefined {
+  const item = record(value);
+  if (!item) return undefined;
+  const sourceConcept = tourEntity(item.sourceConcept);
+  const parsedRelated = item.relatedConcept === null ? null : tourEntity(item.relatedConcept);
+  const parsedConceptRelation = item.conceptRelation === null ? null : tourRelation(item.conceptRelation);
+  if (parsedRelated === undefined || parsedConceptRelation === undefined) return undefined;
+  const relatedConcept = parsedRelated;
+  const conceptRelation = parsedConceptRelation;
+  const fileRelation = tourRelation(item.fileRelation);
+  const file = tourEntity(item.file);
+  const evidence = strictEvidence(item.evidence);
+  if (
+    !sourceConcept || !completeEntity(sourceConcept) || sourceConcept.kind !== "concept" ||
+    sourceConcept.layer !== "L2" || !file || !completeEntity(file) || file.kind !== "file" ||
+    file.layer !== "L1" || file.path !== path || !fileRelation ||
+    !completeRelation(fileRelation) || fileRelation.layer !== "L2" ||
+    fileRelation.targetId !== file.id || file.id === sourceConcept.id || !evidence
+  ) return undefined;
+  if (relatedConcept === null || conceptRelation === null) {
+    if (relatedConcept !== null || conceptRelation !== null || fileRelation.sourceId !== sourceConcept.id) {
+      return undefined;
+    }
+  } else if (
+    !completeEntity(relatedConcept) || relatedConcept.kind !== "concept" ||
+    relatedConcept.layer !== "L2" || relatedConcept.id === sourceConcept.id ||
+    file.id === relatedConcept.id || !completeRelation(conceptRelation) ||
+    conceptRelation.layer !== "L2" ||
+    new Set([conceptRelation.sourceId, conceptRelation.targetId]).size !== 2 ||
+    ![conceptRelation.sourceId, conceptRelation.targetId].includes(sourceConcept.id) ||
+    ![conceptRelation.sourceId, conceptRelation.targetId].includes(relatedConcept.id) ||
+    fileRelation.sourceId !== relatedConcept.id
+  ) return undefined;
+  return { sourceConcept, conceptRelation, relatedConcept, fileRelation, file, evidence };
+}
+
+function contextNavigation(
+  value: unknown,
+  candidatePaths: Set<string>,
+): ContextView["data"]["navigation"] | undefined {
+  const item = record(value);
+  const revision = displayText(item?.revision);
+  const rawReading = Array.isArray(item?.readingOrder) ? item.readingOrder : [];
+  if (!item || !nonBlank(revision) || rawReading.length > 12) return undefined;
+  const paths = new Set<string>();
+  const readingOrder: ContextReadingItem[] = [];
+  for (let index = 0; index < rawReading.length; index += 1) {
+    const raw = record(rawReading[index]);
+    const rawPosition = raw?.position;
+    const position = typeof rawPosition === "number" && Number.isInteger(rawPosition)
+      ? rawPosition : 0;
+    const path = text(raw?.path);
+    const language = displayText(raw?.language);
+    const why = displayText(raw?.why);
+    const evidence = strictEvidence(raw?.evidence);
+    const rawChains = Array.isArray(raw?.chains) ? raw.chains : [];
+    const chains = rawChains.map((chain) => contextChain(chain, path)).filter(
+      (chain): chain is ContextNavigationChain => Boolean(chain),
+    );
+    if (
+      !raw || position !== index + 1 || !isCanonicalRelativePath(path) ||
+      paths.has(path) || !candidatePaths.has(path) || !nonBlank(language) || !nonBlank(why) ||
+      !evidence || rawChains.length === 0 || rawChains.length > 3 || chains.length !== rawChains.length
+    ) return undefined;
+    paths.add(path);
+    const rawActions = Array.isArray(raw.actions) ? raw.actions : [];
+    if (rawActions.length !== CONTEXT_ACTIONS.length) return undefined;
+    const actions: ContextReadingItem["actions"] = [];
+    for (let actionIndex = 0; actionIndex < CONTEXT_ACTIONS.length; actionIndex += 1) {
+      const action = record(rawActions[actionIndex]);
+      const [kind, label] = CONTEXT_ACTIONS[actionIndex]!;
+      const summary = displayText(action?.summary);
+      const rawActionEvidence = Array.isArray(action?.evidence) ? action.evidence : [];
+      const actionEvidence = evidenceList(rawActionEvidence);
+      if (
+        action?.kind !== kind || action?.label !== label || !nonBlank(summary) ||
+        rawActionEvidence.length > 3 || actionEvidence.length !== rawActionEvidence.length
+      ) {
+        return undefined;
+      }
+      actions.push({ kind, label, summary, evidence: actionEvidence });
+    }
+    const rawDependents = Array.isArray(raw.dependents) ? raw.dependents : [];
+    if (rawDependents.length > 4) return undefined;
+    const dependents = rawDependents.flatMap((value) => {
+      const dependent = record(value);
+      const dependentPath = text(dependent?.path);
+      const relation = displayText(dependent?.relation);
+      return dependent && isCanonicalRelativePath(dependentPath) && candidatePaths.has(dependentPath) && nonBlank(relation)
+        ? [{ path: dependentPath, relation }] : [];
+    });
+    if (dependents.length !== rawDependents.length) return undefined;
+    const rawHistory = Array.isArray(raw.history) ? raw.history : [];
+    if (rawHistory.length > 3) return undefined;
+    const history = rawHistory.flatMap((value) => {
+      const historyItem = record(value);
+      const id = displayText(historyItem?.id);
+      const title = displayText(historyItem?.title);
+      const status = displayText(historyItem?.status);
+      const createdAt = displayText(historyItem?.createdAt);
+      const relation = displayText(historyItem?.relation);
+      return historyItem && [id, title, status, createdAt, relation].every(nonBlank)
+        ? [{ id, title, status, createdAt, relation }] : [];
+    });
+    if (history.length !== rawHistory.length) return undefined;
+    const rawNext = raw.nextStep;
+    let nextStep: ContextReadingItem["nextStep"] = null;
+    if (rawNext !== null) {
+      const next = record(rawNext);
+      const nextPath = text(next?.path);
+      const reason = displayText(next?.reason);
+      if (!next || !isCanonicalRelativePath(nextPath) || !candidatePaths.has(nextPath) || !nonBlank(reason)) {
+        return undefined;
+      }
+      nextStep = { path: nextPath, reason };
+    }
+    readingOrder.push({
+      position, path, language, why, evidence, nextStep, chains, actions, dependents, history,
+    });
+  }
+  for (let index = 0; index < readingOrder.length; index += 1) {
+    const expected = readingOrder[index + 1]?.path;
+    if ((readingOrder[index]!.nextStep?.path ?? undefined) !== expected) return undefined;
+  }
+  return { revision, readingOrder };
+}
+
 export function parseContextView(value: unknown): ContextView | undefined {
+  const rawEnvelope = record(value);
+  if (
+    !Array.isArray(rawEnvelope?.warnings) ||
+    rawEnvelope.warnings.length > MAX_CONTEXT_WARNINGS
+  ) {
+    return undefined;
+  }
   const common = commonEnvelope(value);
   if (!common || common.envelope.view !== "context") return undefined;
   const { project, sourceState, data, warnings } = common;
@@ -439,6 +626,8 @@ export function parseContextView(value: unknown): ContextView | undefined {
   const files = Array.isArray(data.files)
     ? data.files.slice(0, MAX_ITEMS).map(contextFile).filter((entry): entry is ContextFile => Boolean(entry))
     : [];
+  const navigation = contextNavigation(data.navigation, new Set(files.map((entry) => entry.path)));
+  if (!navigation) return undefined;
   return {
     schemaVersion: SCHEMA_VERSION,
     view: "context",
@@ -452,6 +641,7 @@ export function parseContextView(value: unknown): ContextView | undefined {
       },
       concepts,
       files,
+      navigation,
     },
     warnings,
   };

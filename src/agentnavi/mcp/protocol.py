@@ -20,6 +20,7 @@ from ..privacy import contains_private_path, is_canonical_relative_path
 
 
 SCHEMA_VERSION = "agentnavi.vla.v1"
+MAX_CONTEXT_WARNINGS = 10
 SUPPORTED_VIEWS = (
     "repo-overview",
     "repo-tour",
@@ -598,6 +599,7 @@ Envelope = AgentNaviView
 
 
 __all__ = [
+    "MAX_CONTEXT_WARNINGS",
     "SCHEMA_VERSION",
     "SUPPORTED_VIEWS",
     "AgentNaviView",

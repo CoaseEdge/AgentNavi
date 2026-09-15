@@ -1,4 +1,6 @@
-import type { AgentNaviView, ContextConcept, ContextFile, ContextView } from "./protocol.js";
+import type {
+  AgentNaviView, ContextConcept, ContextFile, ContextReadingItem, ContextView,
+} from "./protocol.js";
 import { renderRegisteredView } from "./views/index.js";
 import { clearRepositoryOverview } from "./views/repo-overview.js";
 import { clearRepositoryTour } from "./views/repo-tour.js";
@@ -50,7 +52,11 @@ function conceptNode(concept: ContextConcept, index: number): HTMLLIElement {
   return item;
 }
 
-function fileNode(file: ContextFile, index: number): HTMLLIElement {
+function fileNode(
+  file: ContextFile,
+  index: number,
+  reading?: ContextReadingItem,
+): HTMLLIElement {
   const item = document.createElement("li");
   item.className = "node-card file-node";
   const number = document.createElement("span");
@@ -59,6 +65,78 @@ function fileNode(file: ContextFile, index: number): HTMLLIElement {
   const path = document.createElement("code");
   replaceText(path, file.path);
   item.append(number, path, meta(`候选 · ${file.relation}`, file.language));
+  if (!reading) return item;
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "file-explain-trigger";
+  trigger.setAttribute("aria-expanded", "false");
+  replaceText(trigger, "查看 Why / Evidence / Next Step");
+  const panel = document.createElement("section");
+  panel.className = "file-explanation";
+  panel.hidden = true;
+  const why = document.createElement("p");
+  why.className = "file-why";
+  replaceText(why, `Why · ${reading.why}`);
+  const evidence = document.createElement("ul");
+  evidence.className = "context-evidence";
+  for (const entry of reading.evidence) {
+    const line = document.createElement("li");
+    replaceText(line, `Evidence · ${entry.summary}${entry.path ? ` · ${entry.path}` : ""}`);
+    evidence.append(line);
+  }
+  const chainList = document.createElement("ol");
+  chainList.className = "context-chains";
+  chainList.setAttribute("aria-label", `${file.path} 的可追溯关系链`);
+  for (const chain of reading.chains) {
+    const chainNode = document.createElement("li");
+    let traversal = chain.sourceConcept.label;
+    if (chain.conceptRelation && chain.relatedConcept) {
+      traversal = chain.conceptRelation.sourceId === chain.sourceConcept.id
+        ? `${chain.sourceConcept.label} —${chain.conceptRelation.relation}→ ${chain.relatedConcept.label}`
+        : `${chain.sourceConcept.label} ←${chain.conceptRelation.relation}— ${chain.relatedConcept.label}`;
+    }
+    replaceText(
+      chainNode,
+      `${traversal} —${chain.fileRelation.relation}→ ${chain.file.path}`,
+    );
+    chainList.append(chainNode);
+  }
+  const actionNav = document.createElement("div");
+  actionNav.className = "context-actions";
+  actionNav.setAttribute("role", "group");
+  actionNav.setAttribute("aria-label", `${file.path} 的导航操作`);
+  const actionSummary = document.createElement("p");
+  actionSummary.className = "context-action-summary";
+  const showAction = (selected: number) => {
+    for (const [actionIndex, button] of Array.from(actionNav.children).entries()) {
+      button.setAttribute("aria-pressed", String(actionIndex === selected));
+    }
+    replaceText(actionSummary, reading.actions[selected]?.summary ?? "");
+  };
+  reading.actions.forEach((action, actionIndex) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(actionIndex === 0));
+    replaceText(button, action.label);
+    button.addEventListener("click", () => showAction(actionIndex));
+    actionNav.append(button);
+  });
+  showAction(0);
+  const next = document.createElement("p");
+  next.className = "context-next-step";
+  replaceText(
+    next,
+    reading.nextStep
+      ? `Next Step · ${reading.nextStep.path} — ${reading.nextStep.reason}`
+      : "Next Step · 完成当前阅读路径",
+  );
+  panel.append(why, evidence, chainList, actionNav, actionSummary, next);
+  trigger.addEventListener("click", () => {
+    panel.hidden = !panel.hidden;
+    trigger.setAttribute("aria-expanded", String(!panel.hidden));
+  });
+  item.append(trigger, panel);
   return item;
 }
 
@@ -153,8 +231,17 @@ export class AgentNaviShell {
     element("concept-list").replaceChildren(
       ...view.data.concepts.map((concept, index) => conceptNode(concept, index)),
     );
+    const filesByPath = new Map(view.data.files.map((file) => [file.path, file]));
+    const renderedPaths = new Set(view.data.navigation.readingOrder.map((item) => item.path));
+    const ordered: Array<{ file: ContextFile; reading?: ContextReadingItem }> =
+      view.data.navigation.readingOrder.map((reading) => ({
+      file: filesByPath.get(reading.path)!, reading,
+      }));
+    ordered.push(...view.data.files.filter((file) => !renderedPaths.has(file.path)).map(
+      (file) => ({ file, reading: undefined }),
+    ));
     element("file-list").replaceChildren(
-      ...view.data.files.map((file, index) => fileNode(file, index)),
+      ...ordered.map(({ file, reading }, index) => fileNode(file, index, reading)),
     );
     element("context-map").hidden = false;
   }
